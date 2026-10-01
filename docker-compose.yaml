@@ -15,11 +15,13 @@
 # Voice is peer-to-peer WebRTC: the server only relays signaling, so no UDP
 # ports need to be opened here.
 #
-# Updates (D29): with AUTO_UPDATE=on, friendspeak checks GitHub for new
-# releases, warns everyone, and at the maintenance window (MAINTENANCE_CRON,
-# default Sunday 06:00 in TZ) asks the watchtower service below to pull the
-# new image and recreate the container. Generate WATCHTOWER_TOKEN with
-# `openssl rand -hex 32`.
+# Updates (D29), optional: with AUTO_UPDATE=on, friendspeak checks GitHub for
+# new releases, warns everyone, and at the maintenance window (MAINTENANCE_CRON,
+# default Sunday 06:00 in TZ) asks the watchtower service below to pull the new
+# image and recreate the container. To turn it on, set
+#   COMPOSE_PROFILES=autoupdate
+#   WATCHTOWER_TOKEN=<openssl rand -hex 32>
+# Without them only friendspeak runs, and new versions are just announced.
 
 name: friendspeak
 
@@ -53,7 +55,7 @@ services:
       # Needed while the GitHub repo is private: a token that can read its releases
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       WATCHTOWER_URL: http://watchtower:8080
-      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN (openssl rand -hex 32)}
+      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-}
     labels:
       # Watchtower only touches containers with this label
       com.centurylinklabs.watchtower.enable: "true"
@@ -83,12 +85,14 @@ services:
   # Replaces the friendspeak container when friendspeak asks it to (HTTP API
   # only: it never polls on its own). The maintained fork of containrrr/watchtower,
   # which was archived in 2025. It's the only service with the Docker socket.
+  # Runs only with COMPOSE_PROFILES=autoupdate.
   watchtower:
     image: nickfedor/watchtower:latest
+    profiles: [autoupdate]
     restart: unless-stopped
     command: --http-api-update --label-enable --cleanup
     environment:
-      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN (openssl rand -hex 32)}
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:-}  # required: watchtower exits without it (friendspeak keeps running)
       # Needed while the image on GHCR is private: your GitHub user and a token with read:packages
       REPO_USER: ${GHCR_USER:-}
       REPO_PASS: ${GHCR_TOKEN:-}

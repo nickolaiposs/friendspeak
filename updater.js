@@ -7,6 +7,9 @@
 //   AUTO_UPDATE=notify  check and tell clients an update exists; the host updates by hand
 //   AUTO_UPDATE=on      also install it at the window (Docker + Watchtower only)
 //
+// Without Watchtower (no token, or the sidecar isn't running) `on` behaves
+// like `notify`: the server keeps running and just announces the update.
+//
 // The container itself never touches Docker: it is read-only with no
 // capabilities. Only the Watchtower sidecar has the Docker socket.
 
@@ -32,7 +35,7 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
     mode = 'notify';
   }
   if (mode === 'on' && !watchtowerToken) {
-    log.warn('[update] AUTO_UPDATE=on needs WATCHTOWER_TOKEN (see docker-compose.yaml); falling back to notify');
+    log.warn('[update] AUTO_UPDATE=on without WATCHTOWER_TOKEN: new versions are announced, not installed (see README → Automatic updates)');
     mode = 'notify';
   }
 
@@ -72,15 +75,34 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
         if (st.latest) Object.assign(st, { latest: null, at: null }), clearTimeout(windowTimer), changed();
         return;
       }
-      if (st.latest?.version === latest) return;
-      st.latest = { version: latest, url: rel.html_url || `${releasesUrl}/tag/v${latest}` };
-      st.at = mode === 'on' ? nextRun(schedule, Date.now() + MIN_LEAD) : null;
-      log.log(`[update] friendspeak ${latest} is available` + (st.at ? `; installing at ${new Date(st.at).toString()}` : ' (AUTO_UPDATE=notify)'));
-      armWindow();
-      changed();
+      const isNew = st.latest?.version !== latest;
+      if (isNew) Object.assign(st, { latest: { version: latest, url: rel.html_url || `${releasesUrl}/tag/v${latest}` }, at: null });
+      // Only promise a maintenance window when something can carry it out.
+      // Checked again every time, so starting Watchtower later is enough.
+      let scheduled = false;
+      if (mode === 'on' && !st.at) {
+        if (await watchtowerUp()) {
+          st.at = nextRun(schedule, Date.now() + MIN_LEAD);
+          scheduled = true;
+          armWindow();
+        } else if (isNew) log.warn(`[update] can't reach Watchtower at ${watchtowerUrl}; announcing ${latest} without installing it`);
+      }
+      if (isNew) log.log(`[update] friendspeak ${latest} is available` + (mode === 'on' ? '' : ' (AUTO_UPDATE=notify)'));
+      if (scheduled) log.log(`[update] installing ${latest} at ${new Date(st.at).toString()}`);
+      if (isNew || scheduled) changed();
     } catch (err) {
       if (st.lastError !== err.message) log.warn('[update] check failed:', err.message);
       st.lastError = err.message;
+    }
+  }
+
+  // Any HTTP answer (401 without the token) means the sidecar is there
+  async function watchtowerUp() {
+    try {
+      await fetch(new URL('/v1/update', watchtowerUrl), { signal: AbortSignal.timeout(5e3) });
+      return true;
+    } catch {
+      return false;
     }
   }
 
