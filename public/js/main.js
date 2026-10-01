@@ -3656,7 +3656,7 @@ function settingsServer(body) {
     if (!name) return toast('Enter a server name', 'error');
     if (name !== S.server.name && (await update({ name }))) toast('Server renamed');
   };
-  serverName.onkeydown = (e) => e.key === 'Enter' && saveName();
+  serverName.addEventListener('keydown', (e) => e.key === 'Enter' && saveName());
   // Game on/off: can only be switched on when the server has the game assets
   const gameToggle = h('input', { type: 'checkbox' });
   const gameNote = h('p', { class: 'muted small' });
