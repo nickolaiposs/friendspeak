@@ -1,0 +1,538 @@
+[
+    {
+        "id": 100,
+        "name": "town",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 110,
+        "name": "coffee",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 111,
+        "name": "book",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 120,
+        "name": "dance",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 121,
+        "name": "lounge",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 122,
+        "name": "eco",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 130,
+        "name": "shop",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 200,
+        "name": "village",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 210,
+        "name": "sport",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 220,
+        "name": "lodge",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 221,
+        "name": "attic",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 230,
+        "name": "mtn",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 300,
+        "name": "plaza",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 310,
+        "name": "pet",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 318,
+        "name": "hideout",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 320,
+        "name": "dojo",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 321,
+        "name": "dojoext",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 330,
+        "name": "pizza",
+        "member": 0,
+        "maxUsers": 120,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 340,
+        "name": "stage",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 400,
+        "name": "beach",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 410,
+        "name": "lighthouse",
+        "member": 0,
+        "maxUsers": 300,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 411,
+        "name": "beacon",
+        "member": 0,
+        "maxUsers": 300,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 420,
+        "name": "ship",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 421,
+        "name": "shiphold",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 422,
+        "name": "shipquarters",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 423,
+        "name": "shipnest",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 800,
+        "name": "dock",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 801,
+        "name": "forts",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 802,
+        "name": "rink",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 803,
+        "name": "agent",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 804,
+        "name": "boiler",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 805,
+        "name": "berg",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 1
+    },
+    {
+        "id": 806,
+        "name": "cave",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 807,
+        "name": "shack",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 808,
+        "name": "mine",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 809,
+        "name": "forest",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 810,
+        "name": "cove",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 813,
+        "name": "cavemine",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 814,
+        "name": "hiddenlake",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 815,
+        "name": "underwater",
+        "member": 0,
+        "maxUsers": 150,
+        "game": 0,
+        "spawn": 0
+    },
+    {
+        "id": 900,
+        "name": "astro",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 901,
+        "name": "beans",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 902,
+        "name": "roundup",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 903,
+        "name": "hydro",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 904,
+        "name": "fish",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 905,
+        "name": "mine",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 906,
+        "name": "jetpack",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 907,
+        "name": "mission1",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 908,
+        "name": "mission2",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 909,
+        "name": "thinice",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 910,
+        "name": "pizzatron",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 911,
+        "name": "mission3",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 912,
+        "name": "waves",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 913,
+        "name": "mission4",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 914,
+        "name": "mission5",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 915,
+        "name": "mission6",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 916,
+        "name": "sub",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 920,
+        "name": "mission7",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 921,
+        "name": "mission8",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 922,
+        "name": "mission9",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 923,
+        "name": "mission10",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 927,
+        "name": "mission11",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 930,
+        "name": "dj3k",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 951,
+        "name": "sensei",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 955,
+        "name": "rescue",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 998,
+        "name": "card",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    },
+    {
+        "id": 999,
+        "name": "sled",
+        "member": 0,
+        "maxUsers": 80,
+        "game": 1,
+        "spawn": 0
+    }
+]
