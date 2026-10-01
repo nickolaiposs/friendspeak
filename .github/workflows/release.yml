@@ -1,0 +1,123 @@
+# Every push to `prod` releases the version in package.json (D29):
+#   1. a draft GitHub Release v<version> with the CHANGELOG.md section as notes
+#   2. desktop installers for macOS, Windows and Linux uploaded to it, with the
+#      latest*.yml files the app's updater reads
+#   3. the server image ghcr.io/<repo>:<version> (amd64 + arm64)
+#   4. once everything built: the release is published and the image tagged
+#      :latest. Only then do apps and servers see the update.
+# A version that is already released fails step 1: bump package.json first.
+name: Release
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch: # re-run by hand, e.g. after a flaky build
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create and publish the release
+  packages: write # push to ghcr.io
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  NODE_VERSION: 24
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.version }}
+        run: |
+          node scripts/release-notes.js "$V" > notes.md
+          draft=$(gh release view "v$V" --json isDraft -q .isDraft 2>/dev/null || echo none)
+          if [ "$draft" = "false" ]; then
+            echo "::error::v$V is already released. Bump \"version\" in package.json and add a CHANGELOG.md section."
+            exit 1
+          fi
+          # A draft left by a failed run: start over
+          if [ "$draft" = "true" ]; then gh release delete "v$V" --yes; fi
+          gh release create "v$V" --draft --target "$GITHUB_SHA" --title "friendspeak $V" --notes-file notes.md
+
+  desktop:
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-latest
+            args: --mac
+          - os: windows-latest
+            args: --win
+          - os: ubuntu-latest
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # --ignore-scripts: the installers don't include the game, so skip its build
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build and upload installers
+        run: npx electron-builder ${{ matrix.args }} --publish always
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Unsigned (ad-hoc on macOS) until there's an Apple Developer ID (D21)
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+  docker:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ needs.prepare.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    needs: [prepare, desktop, docker]
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Tag the image as latest
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$V"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "v$V" --repo "${{ github.repository }}" --draft=false --latest

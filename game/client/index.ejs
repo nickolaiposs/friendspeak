@@ -1,0 +1,37 @@
+<!-- This is a template file used by webpack -->
+
+<html lang="en">
+
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="ie=edge">
+
+        <title>friendspeak · Club Penguin</title>
+
+        <link rel="stylesheet" href="assets/styles/styles.css?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>" type="text/css">
+
+        <!-- Fonts -->
+        <script src="assets/scripts/lib/webfont.js?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>"></script>
+
+        <!-- Phaser -->
+        <script src="lib/phaser.min.js"></script>
+        <script src="assets/scripts/lib/phaser-cachebuster.min.js?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>"></script>
+
+        <!-- Ruffle -->
+        <script src="https://cdn.jsdelivr.net/npm/@ruffle-rs/ruffle/ruffle.min.js?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>"></script>
+
+        <!-- friendspeak: world addresses for this server -->
+        <script src="friendspeak.js?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>"></script>
+
+        <!-- Client bundle -->
+        <script src="assets/scripts/client/yukon.bundle.min.js?v=<%= htmlWebpackPlugin.options.templateParameters.timestamp %>"></script>
+    </head>
+
+    <body>
+        <!-- friendspeak: removed the GitHub corner link to wizguin/yukon -->
+
+        <div id="game" class="game"></div>
+    </body>
+
+</html>
