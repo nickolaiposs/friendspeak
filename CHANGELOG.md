@@ -5,6 +5,10 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.1 - 2026-10-01
+
+- Fixed: the server name field in Server settings didn't accept typing
+
 ## 1.1.0 - 2026-10-01
 
 First published release.
