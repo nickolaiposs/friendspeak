@@ -1,6 +1,6 @@
 node_modules/
-data/
-release/
+/data/
+/release/
 .DS_Store
 game/server/dist/
 game/client/dist/
