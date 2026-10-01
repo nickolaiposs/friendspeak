@@ -1,0 +1,51 @@
+# Checks for `dev` and pull requests. There's no test suite (AGENTS.md →
+# Verifying changes), so this catches syntax errors and a broken game build,
+# and makes sure a PR into `prod` is releasable.
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Syntax check
+        run: |
+          for f in server.js updater.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
+          for f in public/js/*.js; do node --check --input-type=module < "$f" || { echo "in $f"; exit 1; }; done
+      - name: Server starts
+        run: |
+          DATA_DIR="$RUNNER_TEMP/data" GAME=off PORT=3999 node server.js &
+          for i in $(seq 30); do curl -sf localhost:3999/api/info && exit 0; sleep 1; done
+          exit 1
+      - run: npm run build:game
+
+  # A merge into prod releases package.json's version, so it must be new and have notes
+  releasable:
+    if: github.event_name == 'pull_request' && github.base_ref == 'prod'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(node -p "require('./package.json').version")
+          node scripts/release-notes.js "$V" > /dev/null
+          if [ "$(gh release view "v$V" --json isDraft -q .isDraft 2>/dev/null)" = "false" ]; then
+            echo "::error::v$V is already released. Bump \"version\" in package.json."
+            exit 1
+          fi

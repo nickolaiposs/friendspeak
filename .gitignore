@@ -1,0 +1,12 @@
+node_modules/
+data/
+release/
+.DS_Store
+game/server/dist/
+game/client/dist/
+game/client/assets/media/
+game/client/assets/fonts/
+game/client/assets/scripts/client/
+game/assets-pack/
+game/assets-extra/
+.env

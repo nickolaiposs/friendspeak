@@ -1,0 +1,7 @@
+{
+  "name": "yukon",
+  "version": "1.11.0-beta",
+  "private": true,
+  "description": "Vendored copy of https://github.com/wizguin/yukon (commit 2f47b90), patched to run inside friendspeak. Build dependencies live in the root package.json.",
+  "license": "MIT"
+}
