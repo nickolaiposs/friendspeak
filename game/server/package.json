@@ -1,0 +1,6 @@
+{
+  "name": "yukon-server",
+  "private": true,
+  "description": "Vendored copy of https://github.com/wizguin/yukon-server (commit fead5f7), patched to run inside friendspeak. Dependencies live in the root package.json.",
+  "license": "MIT"
+}

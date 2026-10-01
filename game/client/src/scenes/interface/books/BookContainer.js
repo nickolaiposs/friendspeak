@@ -1,0 +1,70 @@
+import BaseDynamicWidget from '@scenes/base/BaseDynamicWidget'
+
+
+export default class BookContainer extends BaseDynamicWidget {
+
+    constructor(key) {
+        super(key)
+
+        // Current page number
+        this.page = 0
+        // Array of pages defined in derived class
+        this.pages
+        // Buttons container defined in derived class
+        this.buttons
+
+        this.isBook = true
+
+        this.scene.events.once('update', () =>
+            this.setCoins(this.world.client.coins)
+        )
+    }
+
+    showPage(page) {
+        // Hide current page
+        this.setPageVisible(false)
+
+        // Show new page
+        this.page = page
+        this.setPageVisible()
+
+        // Update button visibility
+        this.setButtonsVisible()
+    }
+
+    nextPage() {
+        let page = this.page + 1
+        if (page > this.pages.length - 1) {
+            return
+        }
+
+        this.showPage(page)
+    }
+
+    prevPage() {
+        let page = this.page - 1
+        if (page < 0) {
+            return
+        }
+
+        this.showPage(page)
+    }
+
+    setPageVisible(visible = true) {
+        this.pages[this.page].visible = visible
+    }
+
+    setButtonsVisible() {
+        // Not visible on first and last page
+        let visible = this.page > 0 && this.page < this.pages.length - 1
+
+        this.buttons.visible = visible
+    }
+
+    setCoins(coins) {
+        if (this.coins) {
+            this.coins.text = `YOUR COINS: ${coins}`
+        }
+    }
+
+}

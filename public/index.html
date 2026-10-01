@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>friendspeak</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='30' fill='%235865f2'/><text x='50' y='66' font-size='46' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'>fs</text></svg>" />
+    <link rel="stylesheet" href="/css/style.css" />
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="/js/main.js"></script>
+  </head>
+  <body>
+    <div id="banners"></div>
+    <div id="app">
+      <nav id="rail"></nav>
+      <aside id="sidebar">
+        <header id="server-header"></header>
+        <div id="channel-list"></div>
+        <div id="voice-panel" hidden></div>
+        <div id="user-panel"></div>
+      </aside>
+      <main id="main"></main>
+      <section id="game-view"></section>
+      <section id="stream-view"></section>
+      <aside id="members"></aside>
+    </div>
+    <div id="popovers"></div>
+    <div id="modal-root"></div>
+    <div id="toasts"></div>
+  </body>
+</html>

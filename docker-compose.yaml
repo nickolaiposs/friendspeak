@@ -1,0 +1,104 @@
+# friendspeak for Docker / Portainer (Stacks → Add stack → Web editor).
+#
+# Everything (chat, voice signaling, the penguin game) runs on ONE port. There is no
+# web UI: friends connect with the friendspeak desktop app.
+# Set the variables below in Portainer's "Environment variables" section, or in
+# a .env file next to this file when using `docker compose` directly.
+#
+# TLS, pick one:
+#   - HTTPS=1 (default): the server makes a self-signed certificate. The desktop
+#     app pins it after asking once.
+#   - HTTPS=0 behind your own reverse proxy (Nginx Proxy Manager, Traefik,
+#     Caddy…) with a real certificate. Enable WebSocket support on the proxy
+#     and remove the `ports:` mapping (or bind it to 127.0.0.1).
+#
+# Voice is peer-to-peer WebRTC: the server only relays signaling, so no UDP
+# ports need to be opened here.
+#
+# Updates (D29): with AUTO_UPDATE=on, friendspeak checks GitHub for new
+# releases, warns everyone, and at the maintenance window (MAINTENANCE_CRON,
+# default Sunday 06:00 in TZ) asks the watchtower service below to pull the
+# new image and recreate the container. Generate WATCHTOWER_TOKEN with
+# `openssl rand -hex 32`.
+
+name: friendspeak
+
+services:
+  friendspeak:
+    # Published by the release workflow on every push to `prod`. Keep :latest
+    # for auto-updates; pin a version (e.g. :1.1.0) to stay on it.
+    image: ${FRIENDSPEAK_IMAGE:-ghcr.io/nickolaiposs/friendspeak:latest}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${FRIENDSPEAK_PORT:-3000}:3000"
+    environment:
+      SERVER_NAME: ${SERVER_NAME:-friendspeak}
+      PASSWORD: ${PASSWORD:-}
+      GIPHY_API_KEY: ${GIPHY_API_KEY:-}
+      # Total space for files uploaded to channels (stored in the data volume)
+      MAX_STORAGE: ${MAX_STORAGE:-2GB}
+      HTTPS: ${HTTPS:-1}
+      # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
+      GAME: ${GAME:-on}
+      GAME_WORLD: ${GAME_WORLD:-Blizzard}
+      GAME_MAX_USERS: ${GAME_MAX_USERS:-300}
+      # off | notify (tell users a new version exists) | on (install it in the window)
+      AUTO_UPDATE: ${AUTO_UPDATE:-on}
+      # minute hour day-of-month month day-of-week, in TZ
+      MAINTENANCE_CRON: ${MAINTENANCE_CRON:-0 6 * * 0}
+      # How long before the window users see the (closeable) warning
+      MAINTENANCE_WARN: ${MAINTENANCE_WARN:-24h}
+      TZ: ${TZ:-UTC}
+      # Needed while the GitHub repo is private: a token that can read its releases
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      WATCHTOWER_URL: http://watchtower:8080
+      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN (openssl rand -hex 32)}
+    labels:
+      # Watchtower only touches containers with this label
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      # Chat history, emojis, penguins (game.sqlite), secrets and the TLS cert.
+      # Back this volume up; deleting it changes the certificate fingerprint.
+      - friendspeak-data:/data
+      # Game assets (optional; not shipped in the image). Use absolute
+      # host paths: Portainer doesn't resolve relative paths to your files.
+      # Empty folders are fine; the game then reports its assets as missing.
+      - ${GAME_ASSETS_PATH:-/opt/friendspeak/assets-pack}:/app/game/assets-pack:ro
+      - ${GAME_EXTRA_ASSETS_PATH:-/opt/friendspeak/assets-extra}:/app/game/assets-extra:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Replaces the friendspeak container when friendspeak asks it to (HTTP API
+  # only: it never polls on its own). The maintained fork of containrrr/watchtower,
+  # which was archived in 2025. It's the only service with the Docker socket.
+  watchtower:
+    image: nickfedor/watchtower:latest
+    restart: unless-stopped
+    command: --http-api-update --label-enable --cleanup
+    environment:
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:?set WATCHTOWER_TOKEN (openssl rand -hex 32)}
+      # Needed while the image on GHCR is private: your GitHub user and a token with read:packages
+      REPO_USER: ${GHCR_USER:-}
+      REPO_PASS: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  friendspeak-data:

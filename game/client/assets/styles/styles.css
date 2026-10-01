@@ -1,0 +1,24 @@
+:root {
+    --bg: #2e3440;
+    --text: #eceff4;
+    --accent: #88c0d0;
+    --button: #5e81ac;
+    --button-hover: #49688d;
+    --input: #00000055;
+    --input-text: #eceff4;
+    --danger: #bf616a;
+}
+
+*, ::after, ::before {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: var(--bg);
+}
+
+a {
+    text-decoration: none;
+}

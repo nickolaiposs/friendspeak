@@ -1,0 +1,23 @@
+.git
+.DS_Store
+node_modules
+data
+release
+build
+desktop
+public
+docs
+*.md
+docker-compose*.yaml
+.env
+
+# Built inside the image
+game/server/dist
+game/client/dist
+game/client/assets/scripts/client
+
+# Game assets (third-party, not redistributable): mounted at runtime, never baked into the image
+game/assets-pack
+game/assets-extra
+game/client/assets/media
+game/client/assets/fonts

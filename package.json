@@ -1,0 +1,155 @@
+{
+  "name": "friendspeak",
+  "version": "1.1.0",
+  "description": "Self-hosted Discord/TeamSpeak-style chat for friends with voice, GIFs, emojis, soundboards and an optional virtual penguin world (Yukon, assets not included). No accounts.",
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "start:https": "HTTPS=1 node server.js",
+    "desktop": "electron .",
+    "build:game": "node scripts/build-game.js",
+    "postinstall": "node scripts/build-game.js --if-possible",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
+    "dist:all": "electron-builder --mac --win --linux",
+    "release-notes": "node scripts/release-notes.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "electron-updater": "^6.8.9",
+    "emoji-picker-element": "^1.29.1",
+    "emoji-picker-element-data": "^1.8.0",
+    "express": "^5.2.1",
+    "fastest-validator": "^1.19.1",
+    "jsonwebtoken": "^9.0.3",
+    "phaser": "3.80.1",
+    "rate-limiter-flexible": "7.4.0",
+    "selfsigned": "^5.5.0",
+    "sequelize": "^6.37.8",
+    "socket.io": "^4.8.4",
+    "uuid": "11.1.1"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "private": true,
+  "repository": "github:nickolaiposs/friendspeak",
+  "devDependencies": {
+    "@babel/cli": "^7.29.7",
+    "@babel/core": "^7.29.7",
+    "@babel/preset-env": "^7.29.7",
+    "babel-loader": "^10.1.1",
+    "babel-plugin-module-resolver": "^5.0.3",
+    "core-js": "^3.50.0",
+    "css-loader": "^7.1.5",
+    "electron": "^44.5.0",
+    "electron-builder": "^26.15.3",
+    "howler": "^2.2.4",
+    "html-webpack-plugin": "^5.6.8",
+    "socket.io-client": "^4.8.4",
+    "style-loader": "^4.0.0",
+    "terser-webpack-plugin": "^5.6.1",
+    "webpack": "^5.111.1",
+    "webpack-cli": "^7.2.3"
+  },
+  "productName": "friendspeak",
+  "build": {
+    "appId": "app.friendspeak.desktop",
+    "productName": "friendspeak",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "desktop/**",
+      "public/**",
+      "!node_modules/phaser/**",
+      "!**/*.map"
+    ],
+    "mac": {
+      "category": "public.app-category.social-networking",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "identity": "-",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "friendspeak uses your microphone for voice channels.",
+        "NSCameraUsageDescription": "friendspeak shows your camera to friends in voice channels."
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Network",
+      "icon": "build/icon.png",
+      "syncDesktopName": true
+    },
+    "copyright": "friendspeak contributors",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "publish": {
+      "provider": "github",
+      "owner": "nickolaiposs",
+      "repo": "friendspeak",
+      "releaseType": "draft"
+    },
+    "dmg": {
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "artifactName": "${productName}-${version}-win-${arch}-setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-win-${arch}-portable.${ext}"
+    }
+  },
+  "author": "friendspeak",
+  "desktopName": "friendspeak.desktop"
+}
