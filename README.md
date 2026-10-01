@@ -146,7 +146,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | Variable | Default | Purpose |
 |---|---|---|
 | `FRIENDSPEAK_IMAGE` | `ghcr.io/nickolaiposs/friendspeak:latest` | The image from step 1 |
-| `WATCHTOWER_TOKEN` | **required** | Shared secret for the update sidecar: `openssl rand -hex 32` |
+| `COMPOSE_PROFILES` + `WATCHTOWER_TOKEN` | none | Optional. `autoupdate` + a secret (`openssl rand -hex 32`) to install updates automatically |
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
 | `PASSWORD` | none | **Set this** if the port is reachable from the internet |
@@ -163,11 +163,13 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 
 ### Automatic updates
 
-The compose file runs a second service, `watchtower` ([nickfedor/watchtower](https://github.com/nicholas-fedor/watchtower), the maintained fork), next to friendspeak. With `AUTO_UPDATE=on` (the compose default):
+Optional. The compose file includes a second service, `watchtower` ([nickfedor/watchtower](https://github.com/nicholas-fedor/watchtower), the maintained fork), which runs only when you set `COMPOSE_PROFILES=autoupdate` and `WATCHTOWER_TOKEN` (`openssl rand -hex 32`). Without them, friendspeak runs normally and only announces new versions: users see "an update is available" and you update by hand. With them and `AUTO_UPDATE=on` (the compose default):
 
 1. friendspeak checks GitHub for a new release every 6 hours.
 2. When one appears, it's scheduled for the next maintenance window (`MAINTENANCE_CRON`, at least 10 minutes away). Everyone on the server gets a closeable warning `MAINTENANCE_WARN` before the window, and again 10 minutes before. **Settings → About & updates** shows the schedule.
 3. At the window, friendspeak asks Watchtower to pull the new image and recreate the container. The server is offline for a minute or two, and clients reconnect by themselves. If it fails, it's retried at the next window.
+
+friendspeak only schedules a window when Watchtower answers, so a missing or stopped sidecar never produces a maintenance warning that doesn't happen. It checks again every 6 hours. If your Portainer version ignores `COMPOSE_PROFILES`, delete the `profiles:` line instead.
 
 Only the watchtower container gets the Docker socket, and it only touches containers labeled `com.centurylinklabs.watchtower.enable=true` (friendspeak). While the repo is private, also set `GITHUB_TOKEN` (friendspeak reads releases) and `GHCR_USER`/`GHCR_TOKEN` (watchtower pulls the image).
 
