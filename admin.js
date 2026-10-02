@@ -103,7 +103,7 @@ function createAdmin(ctx) {
       try {
         if (fs.statSync(AUDIT_FILE).size > AUDIT_MAX) fs.renameSync(AUDIT_FILE, AUDIT_FILE + '.1');
       } catch {}
-      fs.appendFileSync(AUDIT_FILE, JSON.stringify({ ts: Date.now(), actor, ip, action, detail: String(detail).slice(0, 200) }) + '\n', { mode: 0o600 });
+      fs.appendFileSync(AUDIT_FILE, JSON.stringify({ ts: Date.now(), actor, ip, action, detail: String(detail).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 200) }) + '\n', { mode: 0o600 });
     } catch (err) {
       console.error('[admin] could not write the audit log:', err.message);
     }
@@ -429,6 +429,114 @@ function createAdmin(ctx) {
   api.get('/audit', (req, res) => {
     const before = Number.isFinite(Number(req.query.before)) && req.query.before !== undefined && req.query.before !== '' ? Number(req.query.before) : Infinity;
     res.json(readAudit(before, clampInt(req.query.limit, 200, 1000)));
+  });
+
+  // ---------- users, bans and roles (D34) ----------
+  // The same actions the chat sockets use (server.js), credited to the dashboard.
+
+  const BY = 'Admin dashboard';
+  const actions = ctx.actions;
+  const rolesOf = (st, pid) => (Object.hasOwn(st.memberRoles, pid) ? st.memberRoles[pid] : []);
+  const roleNames = (st, ids) => (ids.length ? ids.map((x) => st.roles.find((r) => r.id === x)?.name || '?').join(', ') : 'none');
+  const urlId = (v) => (typeof v === 'string' && v.length > 0 && v.length <= 64 ? v : '');
+  // 400 with the action's own message, or run `done` and answer ok
+  const answer = (res, r, done) => {
+    if (r.error) return res.status(400).json({ error: r.error });
+    if (done) done(r);
+    res.json(r);
+  };
+  const logAction = (req, action, detail) => {
+    detail = String(detail).replace(/[\u0000-\u001f\u007f]/g, ' '); // names are user input
+    audit(req.admin.actor, peerOf(req), action, detail);
+    console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
+  };
+
+  api.get('/users', (req, res) => {
+    const st = ctx.state();
+    const online = [];
+    const onlineIds = new Set();
+    for (const [sid, u] of ctx.users) {
+      const p = u.profile;
+      onlineIds.add(p.id);
+      online.push({
+        sid,
+        id: p.id,
+        name: p.name,
+        color: p.color,
+        avatar: p.avatar,
+        status: p.status,
+        ip: u.ip || '',
+        since: u.since || null,
+        voice: u.voice,
+        voiceName: u.voice ? st.channels.find((c) => c.id === u.voice)?.name || null : null,
+        muted: !!u.muted,
+        deafened: !!u.deafened,
+        sharing: !!u.sharing,
+        camera: !!u.camera,
+        playing: !!u.playing,
+        roles: rolesOf(st, p.id),
+      });
+    }
+    const banned = new Set(st.bans.map((b) => b.profileId));
+    const offline = Object.entries(st.profiles)
+      .filter(([pid]) => !onlineIds.has(pid) && !banned.has(pid))
+      .map(([pid, p]) => ({ id: pid, name: p.name, color: p.color, avatar: p.avatar, status: p.status, seen: p.seen || null, lastIp: ctx.lastIp.get(pid) || null, roles: rolesOf(st, pid) }));
+    res.json({ online, offline, bans: st.bans.map((b) => ({ id: b.id, profileId: b.profileId, name: b.name, ip: b.ip || '', by: b.by, ts: b.ts })), roles: st.roles });
+  });
+
+  api.post('/users/:profileId/remove', (req, res) => {
+    const pid = urlId(req.params.profileId);
+    const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
+    answer(res, actions.removeMember({ profileId: pid }), () => logAction(req, 'user.remove', name));
+  });
+
+  api.post('/bans', (req, res) => {
+    const pid = urlId(req.body?.profileId);
+    const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
+    const ip = req.body?.ip === true;
+    answer(res, actions.ban({ profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
+  });
+
+  api.delete('/bans/:id', (req, res) => {
+    const ban = ctx.state().bans.find((b) => b.id === req.params.id);
+    answer(res, actions.unban(req.params.id), () => ban && logAction(req, 'ban.remove', ban.name));
+  });
+
+  api.get('/roles', (req, res) => {
+    const st = ctx.state();
+    const profiles = Object.create(null);
+    for (const [pid, p] of Object.entries(st.profiles)) profiles[pid] = { name: p.name, color: p.color, avatar: p.avatar };
+    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles });
+  });
+
+  api.post('/roles', (req, res) => {
+    answer(res, actions.createRole({ name: req.body?.name, color: req.body?.color }), (r) => logAction(req, 'role.create', r.role.name));
+  });
+
+  api.patch('/roles/:id', (req, res) => {
+    const id = urlId(req.params.id);
+    const old = ctx.state().roles.find((r) => r.id === id);
+    const b = req.body || {};
+    const patch = {};
+    for (const k of ['name', 'color', 'position']) if (b[k] !== undefined) patch[k] = b[k];
+    answer(res, actions.updateRole(id, patch), (r) => {
+      const what = Object.keys(patch).map((k) => (k === 'name' ? `renamed to ${r.role.name}` : k === 'color' ? 'color' : `moved to ${patch.position + 1}`));
+      logAction(req, 'role.update', `${old.name}${what.length ? ': ' + what.join(', ') : ''}`);
+    });
+  });
+
+  api.delete('/roles/:id', (req, res) => {
+    const id = urlId(req.params.id);
+    const old = ctx.state().roles.find((r) => r.id === id);
+    answer(res, actions.deleteRole(id), () => logAction(req, 'role.delete', old.name));
+  });
+
+  api.put('/users/:profileId/roles', (req, res) => {
+    const pid = urlId(req.params.profileId);
+    answer(res, actions.setMemberRoles(pid, req.body?.roles), (r) => {
+      const st = ctx.state();
+      logAction(req, 'role.assign', `${st.profiles[pid].name}: ${roleNames(st, r.roles)}`);
+    });
   });
 
   api.use((_req, res) => res.status(404).json({ error: 'No such admin API route' }));

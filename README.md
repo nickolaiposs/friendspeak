@@ -6,7 +6,7 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Text channels:** markdown (`# heading` / `##` / `###`, `-# small text`, `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `- lists`, `1. lists`, `> quotes`, `` `code` ``, ```` ``` ```` blocks), replies, edits, deletes, reactions, @mentions, typing indicators, and history that persists on the server.
 - **Direct messages:** peer to peer and end-to-end encrypted, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**, or swap **friend codes** (the **+** under **DMs**) to message someone you share no server with. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and opening one doesn't disconnect you from the server or its voice channel. Text, images (up to 4 per message, 10 MB each), GIFs, replies, edits and reactions. Messages are stored only on your two devices. If your friend is offline, the message waits, still encrypted, in their mailbox on a server they use, and arrives the next time they open the app. Images come straight from your friend's device, so the full picture loads once you're both online (a small preview arrives with the message).
 - **Calls in DMs:** the phone and camera buttons at the top of a conversation start a voice or video call with that friend. During a call you can mute, turn on your camera, share your screen (with audio) and use the soundboard, like in a voice channel. Calls are peer to peer, like the messages. You can keep browsing servers and other conversations while you're in one; joining a voice channel hangs up, and starting or accepting a call leaves the voice channel.
-- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible).
+- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible). Roles the host sets in the admin dashboard show as small tags next to names.
 - **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
 - **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. Anyone can delete any file. The host caps total storage with `MAX_STORAGE` (default 2 GB).
@@ -142,11 +142,13 @@ Example: `SERVER_NAME="Game Night" PASSWORD=hunter2 npm start`
 The server hosts a small web dashboard at `/admin`, on the same port. It is for the host, not for friends. Today it shows:
 
 - **Overview:** version, uptime, memory, how it is hosted, who is online, storage used, the game and update status.
+- **Users:** who is online (with their IP, since when, and what they are doing), everyone who has been on the server before (last seen, last IP) and the bans (with the real IP). You can remove someone, ban them (and their IP) and unban them.
+- **Roles:** create labels such as *Founder* or *Mod*, give them a color, order them, and assign them to people. Roles are labels shown next to names in the app. They are **not** a security feature and grant nothing: anyone who copies someone's profile id shows their roles, and everyone on the server can still manage channels, emojis and bans in the app.
 - **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
 - **Admin keys:** create a named key for each admin and revoke it.
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
-User management, bans, updates, storage, channels and game settings are planned for later versions.
+Updates, storage, channels and game settings are planned for later versions.
 
 **Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from `PASSWORD`, which every friend knows. The dashboard doesn't change what friends can do in the app: they can still manage channels, emojis and bans there.
 

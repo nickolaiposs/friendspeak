@@ -35,6 +35,9 @@ async function startServer(opts = {}) {
   const MAX_AVATAR_BYTES = 384 * 1024;
   const MAX_BANNER_BYTES = 640 * 1024; // profile background
   const MAX_ICON_BYTES = 512 * 1024;
+  const MAX_ROLES = 50;
+  const MAX_ROLES_PER_MEMBER = 10;
+  const MAX_ROLE_NAME = 32;
   const MAX_CHANNEL_NAME = 48; // room for emojis, incl. :custom: ones
   const MAX_STORAGE = parseSize(opts.maxStorage, 2 * 1024 ** 3); // all uploaded files together
   const MAX_FILES_PER_MESSAGE = 10;
@@ -84,6 +87,8 @@ async function startServer(opts = {}) {
       bans: [], // { id, profileId, name, ip, by, ts } (ip is never sent to clients)
       files: [], // uploaded files: { id, name, size, type, channelId, messageId, by, byName, ts }
       gameEnabled: true, // game on/off, from Settings → Server (only takes effect with assets)
+      roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
+      memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
     };
   }
 
@@ -95,6 +100,22 @@ async function startServer(opts = {}) {
   } catch {
     state = defaultState();
   }
+
+  // A hand-edited or damaged state.json must not crash the role code
+  function cleanRoleState() {
+    const roles = (Array.isArray(state.roles) ? state.roles : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && typeof r.color === 'string' && /^#[0-9a-f]{6}$/i.test(r.color));
+    const known = new Set(roles.map((r) => r.id));
+    const memberRoles = {};
+    if (state.memberRoles && typeof state.memberRoles === 'object' && !Array.isArray(state.memberRoles)) {
+      for (const [pid, list] of Object.entries(state.memberRoles)) {
+        const ids = Array.isArray(list) ? [...new Set(list.filter((x) => typeof x === 'string' && known.has(x)))].slice(0, MAX_ROLES_PER_MEMBER) : [];
+        if (ids.length) Object.defineProperty(memberRoles, pid, { value: ids, enumerable: true, writable: true, configurable: true });
+      }
+    }
+    state.roles = roles.slice(0, MAX_ROLES);
+    state.memberRoles = memberRoles;
+  }
+  cleanRoleState();
 
   let saveTimer = null;
   function writeState() {
@@ -358,7 +379,8 @@ async function startServer(opts = {}) {
 
   // ---------- realtime ----------
 
-  // socket.id -> { profile, voice: channelId|null, muted, deafened, sharing, camera }
+  // socket.id -> { profile, voice: channelId|null, muted, deafened, sharing, camera, since, ip }
+  // (`since` and `ip` are for the admin dashboard only; userList() never sends them)
   const users = new Map();
 
   function userList() {
@@ -382,6 +404,8 @@ async function startServer(opts = {}) {
       emojis: state.emojis,
       profiles: state.profiles,
       bans: publicBans(),
+      roles: state.roles,
+      memberRoles: state.memberRoles,
       storage: usage(),
       game: gameInfo(),
       update: updater.info(),
@@ -405,6 +429,19 @@ async function startServer(opts = {}) {
       maxHttpBufferSize: 4e6, // hello/profile:update carry the avatar and background images
       destroyUpgrade: false, // the game worlds share this http server on other paths
     });
+
+    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles });
+    const saveRoles = () => {
+      save();
+      io.emit('roles', rolesPayload());
+    };
+    // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
+    const cleanRoleName = (v) => {
+      const n = typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
+      return n.length <= MAX_ROLE_NAME ? n : '';
+    };
+    const isColor = (v) => typeof v === 'string' && isHexColor(v);
+    const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
     const broadcastUsers = () => {
       io.emit('users', userList());
@@ -561,6 +598,136 @@ async function startServer(opts = {}) {
       u.camera = false;
     }
 
+    // What people can do to the server, shared by the chat sockets below and the
+    // admin dashboard (admin.js). Each returns { ok: true, … } or { error }.
+    const actions = {
+      // by: who gets the credit; selfProfileId: the caller's own profile, if it has one;
+      // selfIp: the caller's address (never banned along with someone else)
+      ban({ profileId, ip, by, selfIp, selfProfileId }) {
+        profileId = str(profileId, 64);
+        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
+        if (selfProfileId && profileId === selfProfileId) return { error: 'You can’t ban yourself' };
+        if (state.bans.some((b) => b.profileId === profileId)) return { error: 'Already banned' };
+        // Skip the IP if it's shared with the person banning (same network,
+        // reverse proxy, or the host's own machine): it would ban them too.
+        let banIp = ip ? lastIp.get(profileId) || '' : '';
+        const ipSkipped = !!ip && (!banIp || banIp === selfIp || isLoopback(banIp));
+        if (ipSkipped) banIp = '';
+        const ban = { id: id(), profileId, name: state.profiles[profileId].name, ip: banIp, by, ts: Date.now() };
+        state.bans.push(ban);
+        save();
+        kick((s) => s.data.profileId === profileId || (banIp && clientIp(s) === banIp), 'banned');
+        io.emit('bans', publicBans());
+        return { ok: true, ipSkipped };
+      },
+
+      unban(banId) {
+        state.bans = state.bans.filter((b) => b.id !== banId);
+        save();
+        io.emit('bans', publicBans());
+        return { ok: true };
+      },
+
+      removeMember({ profileId, selfProfileId }) {
+        profileId = str(profileId, 64);
+        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
+        if (selfProfileId && profileId === selfProfileId) return { error: 'You can’t remove yourself' };
+        kick((s) => s.data.profileId === profileId, 'removed');
+        delete state.profiles[profileId];
+        const hadRoles = Object.hasOwn(state.memberRoles, profileId);
+        if (hadRoles) delete state.memberRoles[profileId];
+        save();
+        io.emit('profile:removed', { id: profileId });
+        if (hadRoles) io.emit('roles', rolesPayload());
+        return { ok: true };
+      },
+
+      updateServer({ name, icon, game }) {
+        if (name !== undefined) {
+          name = str(name, 40).trim();
+          if (!name) return { error: 'Server name required' };
+          state.name = name;
+        }
+        if (icon !== undefined) {
+          if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
+          state.icon = icon || '';
+        }
+        if (game !== undefined) {
+          if (game && !gameRef.current?.available) return { error: gameInfo().reason || 'The game is not available on this server' };
+          state.gameEnabled = !!game;
+          if (!game) for (const u of users.values()) u.playing = false;
+        }
+        save();
+        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo() });
+        if (game === false) broadcastUsers();
+        return { ok: true };
+      },
+
+      // --- roles: labels only, they grant nothing (D3, D34) ---
+
+      createRole({ name, color }) {
+        name = cleanRoleName(name);
+        if (!name) return { error: `Role name must be 1 to ${MAX_ROLE_NAME} characters` };
+        if (!isColor(color)) return { error: 'Color must look like #8b6cf6' };
+        if (roleNamed(name)) return { error: 'A role with that name already exists' };
+        if (state.roles.length >= MAX_ROLES) return { error: `At most ${MAX_ROLES} roles` };
+        const role = { id: id(), name, color: color.toLowerCase() };
+        state.roles.push(role);
+        saveRoles();
+        return { ok: true, role };
+      },
+
+      // position: zero-based index to move the role to
+      updateRole(roleId, { name, color, position } = {}) {
+        const role = typeof roleId === 'string' && state.roles.find((r) => r.id === roleId);
+        if (!role) return { error: 'Unknown role' };
+        if (name !== undefined) {
+          name = cleanRoleName(name);
+          if (!name) return { error: `Role name must be 1 to ${MAX_ROLE_NAME} characters` };
+          if (roleNamed(name, role)) return { error: 'A role with that name already exists' };
+        }
+        if (color !== undefined && !isColor(color)) return { error: 'Color must look like #8b6cf6' };
+        if (position !== undefined && !Number.isInteger(position)) return { error: 'Position must be a whole number' };
+        if (name !== undefined) role.name = name;
+        if (color !== undefined) role.color = color.toLowerCase();
+        if (position !== undefined) {
+          state.roles.splice(state.roles.indexOf(role), 1);
+          state.roles.splice(Math.max(0, Math.min(position, state.roles.length)), 0, role);
+        }
+        saveRoles();
+        return { ok: true, role };
+      },
+
+      deleteRole(roleId) {
+        const role = typeof roleId === 'string' && state.roles.find((r) => r.id === roleId);
+        if (!role) return { error: 'Unknown role' };
+        state.roles = state.roles.filter((r) => r !== role);
+        for (const pid of Object.keys(state.memberRoles)) {
+          const kept = state.memberRoles[pid].filter((x) => x !== roleId);
+          if (kept.length) state.memberRoles[pid] = kept;
+          else delete state.memberRoles[pid];
+        }
+        saveRoles();
+        return { ok: true };
+      },
+
+      // The profile's full new list: unknown ids and duplicates dropped, at most 10
+      setMemberRoles(profileId, roleIds) {
+        profileId = str(profileId, 64);
+        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
+        if (!Array.isArray(roleIds)) return { error: 'Roles must be a list' };
+        const known = new Set(state.roles.map((r) => r.id));
+        const list = [...new Set(roleIds.filter((x) => typeof x === 'string' && known.has(x)))].slice(0, MAX_ROLES_PER_MEMBER);
+        const before = Object.hasOwn(state.memberRoles, profileId) ? state.memberRoles[profileId] : [];
+        if (list.join() !== before.join()) {
+          if (list.length) state.memberRoles[profileId] = list;
+          else delete state.memberRoles[profileId];
+          saveRoles();
+        }
+        return { ok: true, roles: list };
+      },
+    };
+
     io.on('connection', (socket) => {
       const authed = () => users.has(socket.id);
       const on = (event, fn) =>
@@ -593,7 +760,7 @@ async function startServer(opts = {}) {
           users.delete(sid);
         }
         socket.data.profileId = p.id;
-        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false });
+        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
         state.profiles[p.id] = storedProfile(p);
         save();
         ack({ ok: true, sid: socket.id, server: publicState(), users: userList() });
@@ -699,65 +866,23 @@ async function startServer(opts = {}) {
       // --- bans (anyone can ban or unban, like channels: D3, D27) ---
 
       on('ban:add', ({ profileId, ip }, ack) => {
-        profileId = str(profileId, 64);
-        const pid = myId();
-        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return ack({ error: 'Unknown user' });
-        if (profileId === pid) return ack({ error: 'You can’t ban yourself' });
-        if (state.bans.some((b) => b.profileId === profileId)) return ack({ error: 'Already banned' });
-        // Skip the IP if it's shared with the person banning (same network,
-        // reverse proxy, or the host's own machine): it would ban them too.
-        let banIp = ip ? lastIp.get(profileId) || '' : '';
-        const ipSkipped = !!ip && (!banIp || banIp === clientIp(socket) || isLoopback(banIp));
-        if (ipSkipped) banIp = '';
-        const ban = { id: id(), profileId, name: state.profiles[profileId].name, ip: banIp, by: users.get(socket.id).profile.name, ts: Date.now() };
-        state.bans.push(ban);
-        save();
-        kick((s) => s.data.profileId === profileId || (banIp && clientIp(s) === banIp), 'banned');
-        io.emit('bans', publicBans());
-        ack({ ok: true, ipSkipped });
+        ack(actions.ban({ profileId, ip, by: users.get(socket.id).profile.name, selfIp: clientIp(socket), selfProfileId: myId() }));
       });
 
       // Remove someone from the server: disconnect them and drop them from the
       // member list. Unlike a ban they can come back (and reappear).
       on('member:remove', ({ profileId }, ack) => {
-        profileId = str(profileId, 64);
-        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return ack({ error: 'Unknown user' });
-        if (profileId === myId()) return ack({ error: 'You can’t remove yourself' });
-        kick((s) => s.data.profileId === profileId, 'removed');
-        delete state.profiles[profileId];
-        save();
-        io.emit('profile:removed', { id: profileId });
-        ack({ ok: true });
+        ack(actions.removeMember({ profileId, selfProfileId: myId() }));
       });
 
       on('ban:remove', ({ id: banId }, ack) => {
-        state.bans = state.bans.filter((b) => b.id !== banId);
-        save();
-        io.emit('bans', publicBans());
-        ack({ ok: true });
+        ack(actions.unban(banId));
       });
 
       // --- server name / icon (anyone can change them, D3) ---
 
       on('server:update', ({ name, icon, game }, ack) => {
-        if (name !== undefined) {
-          name = str(name, 40).trim();
-          if (!name) return ack({ error: 'Server name required' });
-          state.name = name;
-        }
-        if (icon !== undefined) {
-          if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return ack({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
-          state.icon = icon || '';
-        }
-        if (game !== undefined) {
-          if (game && !gameRef.current?.available) return ack({ error: gameInfo().reason || 'The game is not available on this server' });
-          state.gameEnabled = !!game;
-          if (!game) for (const u of users.values()) u.playing = false;
-        }
-        save();
-        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo() });
-        if (game === false) broadcastUsers();
-        ack({ ok: true });
+        ack(actions.updateServer({ name, icon, game }));
       });
 
       // --- channels ---
@@ -929,11 +1054,12 @@ async function startServer(opts = {}) {
       });
     });
 
-    return io;
+    return { io, actions };
   }
 
   const server = await createServer();
-  const io = (ioRef.current = attach(server));
+  const { io, actions } = attach(server);
+  ioRef.current = io;
   // opts.game === false (GAME=off): don't serve or start the game at all
   const game =
     opts.game === false
@@ -957,6 +1083,8 @@ async function startServer(opts = {}) {
         startedAt: Date.now(),
         state: () => state,
         users,
+        lastIp,
+        actions,
         usage,
         gameInfo,
         updater,
