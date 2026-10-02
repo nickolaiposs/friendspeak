@@ -58,14 +58,6 @@ async function startServer(opts = {}) {
   // scheduled update from `server:update` and show a maintenance warning.
   const ioRef = { current: null };
   const adminRef = { current: null }; // the admin dashboard, created once everything it reads exists
-  const updater = createUpdater({
-    ...opts.update,
-    version: VERSION,
-    onChange: (info) => {
-      ioRef.current?.emit('server:update', info);
-      adminRef.current?.notify('update');
-    },
-  });
 
   // ---------- persistent state ----------
 
@@ -88,6 +80,7 @@ async function startServer(opts = {}) {
       files: [], // uploaded files: { id, name, size, type, channelId, messageId, by, byName, ts }
       gameEnabled: true, // game on/off, from Settings → Server (only takes effect with assets)
       roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
+      updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
     };
   }
@@ -116,6 +109,23 @@ async function startServer(opts = {}) {
     state.memberRoles = memberRoles;
   }
   cleanRoleState();
+
+  // Update mode and maintenance window set in the admin dashboard; they override
+  // AUTO_UPDATE / MAINTENANCE_CRON. Only strings get through: updater.js checks the rest.
+  state.updateSettings = Object.fromEntries(
+    ['mode', 'cron'].filter((k) => state.updateSettings && typeof state.updateSettings === 'object' && typeof state.updateSettings[k] === 'string').map((k) => [k, state.updateSettings[k].slice(0, 100)])
+  );
+
+  // The updater needs the saved overrides, so it is created once the state is loaded
+  const updater = createUpdater({
+    ...opts.update,
+    version: VERSION,
+    overrides: state.updateSettings,
+    onChange: (info) => {
+      ioRef.current?.emit('server:update', info);
+      adminRef.current?.notify('update');
+    },
+  });
 
   let saveTimer = null;
   function writeState() {
@@ -1090,6 +1100,10 @@ async function startServer(opts = {}) {
         usage,
         gameInfo,
         updater,
+        saveUpdateSettings: (o) => {
+          state.updateSettings = o;
+          save();
+        },
         logs: logs || { lines: () => ({ lines: [], more: false }), on: () => () => {} },
         options: { local: opts.admin?.local, key: opts.admin?.key },
       }))
