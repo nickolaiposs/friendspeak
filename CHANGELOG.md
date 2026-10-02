@@ -5,8 +5,16 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
-## Unreleased
+## 1.1.3 - 2026-10-02
 
+- Admin dashboard at `/admin`: access, overview, server log, users, bans and
+  roles, updates, storage, channels, game and server settings, update mode and
+  maintenance window
+- Master volume, per-user boost and mute, and mute/deafen shortcuts
+- Voice: RNNoise noise reduction, a noise gate with a level display, and
+  speaker mode
+- Camera: background blur made on the sender's device, a preview before going
+  live, and picture backgrounds
 - Screen share quality: pick a tier (Auto, 720p30, 1080p60 or 1440p60)
   and what to optimize for (smooth motion or sharp text) when you share, and
   change both while live from the share button
