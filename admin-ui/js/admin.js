@@ -1,13 +1,15 @@
 import { h } from './util.js';
 import { api, connectEvents, setUnauthorizedHandler } from './api.js';
-import { loadingState } from './ui.js';
+import { loadingState, closeAllDialogs } from './ui.js';
 import overview from './views/overview.js';
+import users from './views/users.js';
+import roles from './views/roles.js';
 import log from './views/log.js';
 import keys from './views/keys.js';
 import audit from './views/audit.js';
 
 // Add a view: create a module exporting { id, title, mount(root, ctx) } and list it here.
-const views = [overview, log, keys, audit];
+const views = [overview, users, roles, log, keys, audit];
 
 const root = document.getElementById('root');
 let events = null;
@@ -158,6 +160,7 @@ function showApp() {
   }).catch(() => {});
 
   const route = () => {
+    closeAllDialogs();
     cleanup?.();
     cleanup = null;
     const id = location.hash.replace(/^#\//, '');
