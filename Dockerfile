@@ -42,7 +42,7 @@ ENV NODE_ENV=production \
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force \
-    && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins
+    && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
 
 COPY server.js updater.js admin.js logbuffer.js ./
 COPY admin-ui ./admin-ui

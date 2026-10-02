@@ -46,10 +46,12 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
   js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
+  js/background.js     camera backgrounds (blur, pictures): MediaPipe person segmentation, composited per frame into the track that is sent (D37)
+  models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
   js/audio.js          Web Audio graph: mic → noise reduction → noise gate → mute/PTT gate → outgoing track, soundboard mixing
   js/mic-worklet.js    AudioWorklet (audio thread): the mic's noise gate and speaker-mode ducking (D35)
   vendor/              prebuilt third-party files loaded as-is: the RNNoise worklet and wasm (see its README)
-  js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
+  js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
   js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
