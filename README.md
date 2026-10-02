@@ -77,7 +77,7 @@ The game is built into every friendspeak server. Click the 🐧 game under *Game
 
 Anyone on the server can turn it on or off in **Settings → Server → Games**. When it's off, or the server doesn't have the game assets, the *Games* section doesn't appear at all.
 
-- You're logged straight in. Your penguin is created from your friendspeak profile the first time you play: its name comes from your display name, and its color is the closest penguin color to your profile color. It's saved on that server.
+- You're logged straight in. Your penguin is created from your friendspeak profile the first time you play: its name comes from your display name, and its color is the closest penguin color to your profile color. It's saved on that server. If you change your display name, your penguin is renamed the next time you open the game.
 - Everyone on the server shares the same world (default name *Blizzard*), and the member list shows who's playing.
 - The game keeps running while you switch to text channels, and voice keeps working. **Pop out** opens it in its own window.
 - Push-to-talk and soundboard hotkeys keep working while the game has focus.
