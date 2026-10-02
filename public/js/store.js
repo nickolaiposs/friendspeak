@@ -1,6 +1,6 @@
 // Everything a user "owns" lives on their own device: profiles, their keys,
-// server bookmarks, settings (localStorage), soundboard files and direct
-// messages (IndexedDB).
+// server bookmarks, settings (localStorage), soundboard files, direct
+// messages and camera background pictures (IndexedDB).
 import { uid } from './util.js';
 
 const read = (k, d) => {
@@ -84,6 +84,9 @@ const DEFAULT_SETTINGS = {
   inputDevice: '',
   outputDevice: '',
   videoDevice: '', // camera
+  cameraBackground: 'none', // a key of BACKGROUNDS (background.js): 'none' | 'blur' | 'image'
+  cameraBlur: 0.5, // blur strength, 0..1
+  cameraImage: '', // the picture for 'image': a preset's id, or one of your own (backgroundStore)
   micVolume: 1,
   masterVolume: 1, // everything this app plays: voices, streams, soundboard, cues
   voiceVolume: 1, // other people's voices
@@ -140,7 +143,7 @@ export const settings = {
 let dbp;
 function db() {
   return (dbp ||= new Promise((resolve, reject) => {
-    const req = indexedDB.open('friendspeak', 3);
+    const req = indexedDB.open('friendspeak', 4);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains('sounds')) d.createObjectStore('sounds', { keyPath: 'id' });
@@ -149,6 +152,8 @@ function db() {
       if (!d.objectStoreNames.contains('dmMessages')) d.createObjectStore('dmMessages', { keyPath: 'key' }).createIndex('thread', 'thread');
       // Images sent and received in DMs, keyed by "<thread>|<file id>"
       if (!d.objectStoreNames.contains('dmFiles')) d.createObjectStore('dmFiles', { keyPath: 'key' }).createIndex('thread', 'thread');
+      // Your own camera background pictures (background.js)
+      if (!d.objectStoreNames.contains('backgrounds')) d.createObjectStore('backgrounds', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -186,6 +191,18 @@ export const sounds = {
     await this.put(sound);
     return sound;
   },
+};
+
+// ---------- camera background pictures (IndexedDB, see background.js) ----------
+
+export const backgroundStore = {
+  async all() {
+    const list = (await tx('readonly', (s) => s.getAll(), 'backgrounds')) || [];
+    return list.sort((a, b) => a.created - b.created);
+  },
+  get: (id) => tx('readonly', (s) => s.get(id), 'backgrounds'),
+  put: (pic) => tx('readwrite', (s) => s.put(pic), 'backgrounds'),
+  remove: (id) => tx('readwrite', (s) => s.delete(id), 'backgrounds'),
 };
 
 // ---------- direct messages (IndexedDB, see dm.js) ----------

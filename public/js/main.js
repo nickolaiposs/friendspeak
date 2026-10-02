@@ -6,6 +6,7 @@ import { VoiceClient, MEDIA, TIERS, MODES } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
+import { BACKGROUNDS, CAPTURE, PRESETS, presetCss, pictures, backgroundOf, loadBackground, activeBackground, setBackground, withBackground } from './background.js';
 import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
 
 applyAppearance(); // before the first render
@@ -318,7 +319,7 @@ function dmCallButtons(c, compact) {
       'button',
       {
         class: 'icon-btn' + (v.local.camera ? ' sharing' : ''),
-        title: (v.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+        title: (v.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click for cameras and backgrounds)',
         onclick: toggleCamera,
         oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
       },
@@ -1861,7 +1862,7 @@ function renderVoicePanel() {
           'button',
           {
             class: 'icon-btn' + (c.voice.local.camera ? ' sharing' : ''),
-            title: (c.voice.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+            title: (c.voice.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click for cameras and backgrounds)',
             onclick: toggleCamera,
             oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
           },
@@ -3432,42 +3433,271 @@ async function switchShare(opts) {
   const v = liveVoice();
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
   await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
-  // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
-  const own = v === DMCALL.voice ? dmCallUi.tiles.get('screen:' + me().id) : S.stage?.tiles.get('screen:' + S.call?.sid);
-  if (own?.video) {
-    own.video.srcObject = null;
-    own.video.srcObject = v.local.screen;
-    own.video.play().catch(() => {});
-  }
+  reattachOwn(v, 'screen');
   renderVoicePanel();
   toast('Switched what you’re sharing', 'info', 3000);
 }
 
+// After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
+function reattachOwn(v, kind) {
+  const own = v === DMCALL.voice ? dmCallUi.tiles.get(kind + ':' + me().id) : S.stage?.tiles.get(kind + ':' + S.call?.sid);
+  if (!own?.video) return;
+  own.video.srcObject = null;
+  own.video.srcObject = v.local[kind];
+  own.video.play().catch(() => {});
+}
+
 // ---------------------------------------------------------------- camera
 
-async function toggleCamera() {
-  if (!liveVoice()) return;
-  if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
-  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000);
+// The camera with the chosen background (D37), or null after telling the user why not
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000), null;
   const dev = settings.get().videoDevice;
   const cam = MEDIA.camera;
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
+  const capture = (effect) => {
+    const ideal = effect ? CAPTURE : cam.ideal;
+    return navigator.mediaDevices.getUserMedia({
       audio: false, // your voice already carries the audio
       video: {
         deviceId: dev ? { ideal: dev } : undefined,
-        width: { ideal: cam.ideal.width, max: cam.width },
-        height: { ideal: cam.ideal.height, max: cam.height },
-        frameRate: { ideal: cam.ideal.fps, max: cam.fps },
+        width: { ideal: ideal.width, max: cam.width },
+        height: { ideal: ideal.height, max: cam.height },
+        frameRate: { ideal: ideal.fps, max: effect ? ideal.fps : cam.fps },
       },
     });
+  };
+  const bg = await loadBackground();
+  setBackground(bg);
+  try {
+    const raw = await capture(!!BACKGROUNDS[bg.type]);
+    try {
+      return await withBackground(raw);
+    } catch (e) {
+      // Better a plain camera than none
+      console.warn('camera background', e);
+      toast('The camera background isn’t available: ' + e.message, 'error', 6000);
+      raw.getTracks().forEach((t) => t.stop());
+      setBackground({ ...bg, type: 'none' });
+      return await capture(false);
+    }
   } catch (e) {
-    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000);
+    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000), null;
   }
+}
+
+// Put the camera on the call: `stream` from the preview, or a new capture
+async function startCamera(stream) {
+  stream ||= liveVoice() && (await openCamera());
+  if (!stream) return;
   if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
   liveVoice().setMedia('camera', stream);
   renderVoicePanel();
+}
+
+// Off → on always goes through the preview (cameraDialog)
+function toggleCamera() {
+  if (!liveVoice()) return;
+  if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
+  cameraDialog();
+}
+
+// Change the camera background (settings keys), also mid-call. Strength, the
+// picture, and blur ↔ picture apply to a running camera at once. Going to or
+// from no background needs a new capture (a plain camera has no pipeline, and
+// is captured larger): the live camera's is swapped in without ending it for
+// viewers. Resolves to true when the capture had to change, so a preview can
+// reopen its own.
+let cameraSwap = Promise.resolve();
+function setCameraBackground(patch) {
+  settings.set(patch);
+  return (cameraSwap = cameraSwap
+    .then(async () => {
+      const was = !!BACKGROUNDS[activeBackground().type];
+      const bg = await loadBackground();
+      setBackground(bg);
+      if (was === !!BACKGROUNDS[bg.type]) return false;
+      const v = liveVoice();
+      if (!v?.local.camera) return true;
+      const stream = await openCamera();
+      if (!stream) return true;
+      if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop()), true;
+      await v.replaceMedia('camera', stream);
+      reattachOwn(v, 'camera');
+      return true;
+    })
+    .catch((e) => (console.warn('camera background', e), true)));
+}
+
+// A mirrored view of your camera as friends will get it: the live camera
+// while it's on, otherwise a capture of its own.
+function cameraPreview() {
+  const video = h('video', { muted: true, playsinline: true });
+  const status = h('div', { class: 'cam-status' });
+  const el = h('div', { class: 'cam-preview' }, video, status);
+  let own = null;
+  let run = 0;
+  const release = () => {
+    own?.getTracks().forEach((t) => t.stop());
+    own = null;
+  };
+  return {
+    el,
+    // (Re)open; call again after anything that changes the capture
+    async show() {
+      const mine = ++run;
+      release();
+      status.textContent = 'Starting camera…';
+      status.hidden = false;
+      const live = liveVoice()?.local.camera;
+      const stream = live || (await openCamera());
+      if (mine !== run) return void (!live && stream?.getTracks().forEach((t) => t.stop()));
+      if (!live) own = stream;
+      video.srcObject = null;
+      video.srcObject = stream;
+      if (!stream) return void (status.textContent = 'No camera');
+      video.play().catch(() => {});
+      status.hidden = true;
+    },
+    stop() {
+      run++;
+      release();
+      video.srcObject = null;
+    },
+    // Hand over the preview's own capture (null if it has none, e.g. still starting)
+    take() {
+      run++;
+      const stream = own;
+      own = null;
+      return stream;
+    },
+  };
+}
+
+// Tiles to choose what is behind you: nothing, a blur (with its strength), a
+// picture that comes with the app, or one of your own. `onRecapture` runs
+// when the choice changed the capture (see setCameraBackground).
+function backgroundPicker(onRecapture) {
+  const grid = h('div', { class: 'bg-grid' });
+  const pct = h('span', {});
+  const range = h('input', { type: 'range', min: 0, max: 1, step: 0.01, oninput: (e) => (setCameraBackground({ cameraBlur: +e.target.value }), (pct.textContent = Math.round(e.target.value * 100) + '%')) });
+  const blurField = h('label', { class: 'field' }, h('span', {}, 'Blur strength ', pct), range);
+  const file = h('input', {
+    type: 'file',
+    accept: 'image/*',
+    hidden: true,
+    onchange: async () => {
+      const f = file.files[0];
+      file.value = '';
+      if (!f) return;
+      try {
+        const pic = await pictures.add(f);
+        choose({ cameraBackground: 'image', cameraImage: pic.id });
+      } catch (e) {
+        toast(e.message, 'error', 5000);
+      }
+    },
+  });
+  let urls = [];
+  let disposed = false;
+  const choose = async (patch) => {
+    const swap = setCameraBackground(patch);
+    render();
+    if (await swap) onRecapture?.();
+  };
+  const tile = (name, selected, onclick, { cls = '', image = '', children = [] } = {}) =>
+    h(
+      'div',
+      { class: 'bg-tile ' + cls + (selected ? ' selected' : ''), role: 'button', tabindex: 0, title: name, style: image ? { backgroundImage: image } : null, onclick, onkeydown: (e) => e.key === 'Enter' && onclick() },
+      children,
+      h('span', { class: 'bg-name' }, name)
+    );
+  const render = async () => {
+    const pics = await pictures.all().catch(() => []);
+    if (disposed) return;
+    const bg = backgroundOf();
+    const on = (id) => bg.type === 'image' && bg.imageId === id;
+    for (const u of urls) URL.revokeObjectURL(u);
+    urls = pics.map((p) => URL.createObjectURL(p.blob));
+    grid.replaceChildren(
+      tile('None', bg.type === 'none', () => choose({ cameraBackground: 'none' }), { cls: 'plain', children: icon('camOff') }),
+      tile('Blur', bg.type === 'blur', () => choose({ cameraBackground: 'blur' }), { cls: 'blur' }),
+      ...PRESETS.map((p) => tile(p.name, on(p.id), () => choose({ cameraBackground: 'image', cameraImage: p.id }), { image: presetCss(p) })),
+      ...pics.map((p, i) =>
+        tile(p.name || 'Picture', on(p.id), () => choose({ cameraBackground: 'image', cameraImage: p.id }), {
+          image: `url("${urls[i]}")`,
+          children: h(
+            'button',
+            {
+              class: 'bg-remove',
+              title: 'Remove this picture',
+              onclick: async (e) => {
+                e.stopPropagation();
+                await pictures.remove(p.id);
+                if (on(p.id)) choose({ cameraBackground: 'none', cameraImage: '' });
+                else render();
+              },
+            },
+            '×'
+          ),
+        })
+      ),
+      tile('Add a picture', false, () => file.click(), { cls: 'plain add', children: icon('plus') })
+    );
+    blurField.hidden = bg.type !== 'blur';
+    range.value = bg.blur;
+    pct.textContent = Math.round(bg.blur * 100) + '%';
+  };
+  render();
+  return {
+    el: h('div', { class: 'bg-picker' }, grid, blurField, file),
+    dispose() {
+      disposed = true;
+      for (const u of urls) URL.revokeObjectURL(u);
+    },
+  };
+}
+
+// See yourself and choose what is behind you. Opens every time before the
+// camera goes on. Opened while it is on, it shows and changes the live camera.
+function cameraDialog() {
+  const live = !!liveVoice()?.local.camera;
+  const preview = cameraPreview();
+  const picker = backgroundPicker(() => preview.show());
+  modal(
+    live ? 'Camera' : 'Camera preview',
+    h(
+      'div',
+      { class: 'cam-dialog' },
+      preview.el,
+      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
+      h('p', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')
+    ),
+    {
+      actions: live
+        ? [(close) => h('button', { class: 'btn', onclick: close }, 'Done')]
+        : [
+            (close) => h('button', { class: 'btn ghost', onclick: close }, 'Cancel'),
+            (close) =>
+              h(
+                'button',
+                {
+                  class: 'btn',
+                  onclick: () => {
+                    const stream = preview.take();
+                    close();
+                    startCamera(stream);
+                  },
+                },
+                'Turn on camera'
+              ),
+          ],
+      onClose: () => {
+        preview.stop();
+        picker.dispose();
+      },
+    }
+  );
+  preview.show();
 }
 
 async function cameraPopover(anchor) {
@@ -3479,7 +3709,7 @@ async function cameraPopover(anchor) {
     settings.set({ videoDevice: id });
     if (liveVoice()?.local.camera) {
       liveVoice().stopMedia('camera', true);
-      await toggleCamera();
+      await startCamera();
     }
   };
   popover(
@@ -3491,7 +3721,9 @@ async function cameraPopover(anchor) {
         ? [{ deviceId: '', label: 'Default camera' }, ...cams].map((d, i) =>
             h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Camera ${i}`))
           )
-        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found')
+        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found'),
+      h('div', { class: 'menu-sep' }),
+      h('button', { class: 'menu-item', onclick: () => (closePopover(), cameraDialog()) }, 'Preview and background…')
     ),
     { align: 'right' }
   );
@@ -4357,11 +4589,29 @@ function settingsVoice(body) {
     {
       onchange: async (e) => {
         settings.set({ videoDevice: e.target.value });
-        if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await toggleCamera());
+        if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await startCamera());
+        if (previewing) preview.show();
       },
     },
     h('option', { value: '' }, 'Default')
   );
+  const preview = cameraPreview();
+  preview.el.hidden = true;
+  let previewing = false;
+  const previewBtn = h(
+    'button',
+    {
+      class: 'btn small ghost',
+      onclick: () => {
+        previewing = !previewing;
+        previewBtn.textContent = previewing ? 'Stop preview' : 'Preview';
+        preview.el.hidden = !previewing;
+        previewing ? preview.show() : preview.stop();
+      },
+    },
+    'Preview'
+  );
+  const picker = backgroundPicker(() => previewing && preview.show());
   navigator.mediaDevices?.enumerateDevices().then((devs) => {
     for (const d of devs) {
       const opt = h('option', { value: d.deviceId }, d.label || `${d.kind} ${d.deviceId.slice(0, 6)}`);
@@ -4511,7 +4761,10 @@ function settingsVoice(body) {
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
+    h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
+    h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
+    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
@@ -4552,6 +4805,8 @@ function settingsVoice(body) {
   );
   return () => {
     clearInterval(iv);
+    preview.stop();
+    picker.dispose();
     if (testing && !liveVoice()) audio.stopMic();
   };
 }

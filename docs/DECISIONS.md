@@ -420,3 +420,28 @@ Without a mic, users join **listen-only** instead of failing.
 **Still open (issue #11, phase 3):** Electron background/occlusion switches, a start-bitrate floor, and an upload budget across viewers. All wait for measurements with real shares. An SFU for more than about 3–4 viewers stays a gated later step. It would need its own decision as an exception to D2, D5 and rule 4 in AGENTS.md.
 
 **Alternatives:** keeping D22's fixed ceiling and codec order (the status quo, and what #11 complained about); fixed quality presets only, with no ladder (simple, but a viewer on a thin link or a loaded encoder gets a stalled stream); fitting by bitrate alone without a mode (can't tell text from motion); an SFU now (fixes upload for many viewers, but puts media through the server and needs UDP ports).
+
+## D37: Camera backgrounds are made on the sender's device, with MediaPipe · Active
+**Context:** People wanted to hide the room behind them on camera, with a blur or a picture, and to see how they look before anyone else does.
+**Decision:**
+- The effect runs in the sender's app, before the camera reaches a peer connection (`background.js`). Viewers get an ordinary video track, so the mesh (D5, D22), DM calls (D33), the socket protocol and the server don't change, and older apps see the effect without knowing about it.
+- People are found with MediaPipe Tasks Vision (`@mediapipe/tasks-vision`, Apache 2.0) and its selfie segmentation model (250 KB, committed in `public/models/`). The library is WebAssembly plus a prebuilt ES module, so it loads as-is from `node_modules` through the `friendspeak://` routes like the emoji picker: no build step (D1), nothing native. It loads on first use, and nothing is fetched from the internet.
+- Frames come from the camera track (`MediaStreamTrackProcessor`), are composited on a canvas, and leave through a `MediaStreamTrackGenerator`. They don't depend on `requestAnimationFrame`, so the effect keeps running while the window is hidden.
+- The compositor is the same for every background: the person from the mask, then a painter for whatever goes behind them. `BACKGROUNDS` in `background.js` lists the painters: `blur` (with a strength) and `image` (a picture scaled to cover the frame). A picture is cut out with a tighter mask than a blur, because a rim of the real room shows against a picture and not against its own blur.
+- Pictures are either presets or your own. The presets are gradients drawn in code, so the app ships no image files. Your own are kept on the device in IndexedDB, scaled down to 1920×1080 JPEG when added, and are never uploaded: only the composited video leaves the machine.
+- The camera never goes on unseen: turning it on opens a preview dialog first, every time, with the background choices. Nothing is sent until it is confirmed. The same dialog, opened while the camera is on, changes the live camera.
+- A camera with a background is captured at 720p30 instead of the plain camera's size, because segmenting and compositing run on the UI thread for every frame.
+- Switching between a background and none mid-call opens a new capture and swaps it in with `replaceMedia`, so viewers keep the same stream. Every other change (strength, picture, blur ↔ picture) applies to the running camera at once.
+- If the effect can't start, the camera comes on without it and a toast says why.
+
+**Consequences:**
+- The desktop installers grow by about 12 MB (one WebAssembly build; the no-SIMD and module variants are excluded in `package.json` → `build.files`). The server image doesn't carry the package (`Dockerfile`).
+- The first camera with a background takes a few seconds to appear while the WebAssembly compiles. After that the segmenter stays loaded until the app closes.
+- The mask is 256 px wide and has no memory between frames: edges around hair and fast hands are rough, more visibly against a picture than against a blur. A blur shows a faint halo of the person's own colors.
+- It costs CPU and GPU on the sender only. On a machine without WebGL the segmenter falls back to the CPU and may not hold 30 fps.
+- Only people are kept: a pet or something you hold up away from your body may be hidden.
+- Turning the camera on takes two clicks. The caller of a DM video call gets the dialog when the call connects, so their camera isn't on until they confirm.
+- Your own pictures don't travel with a profile export, and are shared by every profile on the device.
+- The viewer sees a picture the right way round; your own preview is mirrored, so text in it reads backwards to you only.
+
+**Alternatives:** the same pipeline in a worker (keeps the UI thread free, but MediaPipe's loader uses `importScripts`, which module workers don't have, and a classic worker can't import the ES bundle without a build step); compositing in WebGL on MediaPipe's own context (no mask readback, but far more code for a 256 px mask); TensorFlow.js body-segmentation (wraps the same model with a bigger runtime); ONNX Runtime Web with MODNet or Robust Video Matting (cleaner edges, models of tens of MB and much more GPU); the operating system's effects (macOS Portrait, Windows Studio Effects: free where present, but hardware-dependent and missing on Linux); blurring on the viewer's side (the room would still leave the sender's machine); shipping stock photos as presets (licensing, and megabytes in every installer); a "don't show the preview again" switch (not asked for; the dialog is also where the background is chosen).
