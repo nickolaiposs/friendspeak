@@ -94,6 +94,8 @@ const DEFAULT_SETTINGS = {
   userVolumes: {}, // profileId -> 0..2
   lastChannel: {}, // serverId -> channelId
   showMembers: true,
+  shareTier: 'auto', // screen share quality ceiling: a key of TIERS (voice.js)
+  shareMode: 'smooth', // 'smooth' (games, video) | 'sharp' (text, code)
   hideOffline: false, // collapse the member list's Offline section
   railDmsHidden: false, // collapsed groups in the left rail
   railServersHidden: false,

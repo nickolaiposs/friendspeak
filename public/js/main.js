@@ -2,7 +2,7 @@ import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level } from './audio.js';
-import { VoiceClient, SCREEN, MEDIA } from './voice.js';
+import { VoiceClient, MEDIA, TIERS, MODES } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
@@ -3158,12 +3158,34 @@ function editSound(s, redraw) {
 
 // Pick what to share. Browsers show their own picker after this (we hint which
 // tab it opens on); the desktop app has none, so we list sources ourselves.
+const SHARE_TIERS = { auto: 'Auto (up to 1440p60)', '720p30': '720p 30 fps', '1080p60': '1080p 60 fps', '1440p60': '1440p 60 fps', source: 'Source (up to 4K 120 fps)' };
+const SHARE_MODES = { smooth: 'Smooth: games and video', sharp: 'Sharp: text and code' };
+
+// The saved share quality: { tier, mode }
+function shareQuality() {
+  const s = settings.get();
+  return { tier: TIERS[s.shareTier] ? s.shareTier : 'auto', mode: MODES[s.shareMode] ? s.shareMode : 'smooth' };
+}
+
+// Tier and mode selects that edit `q` in place and call onChange(q)
+function shareQualityFields(q, onChange) {
+  const select = (key, options, label) => {
+    const el = h('select', { onchange: (e) => ((q[key] = e.target.value), onChange?.(q)) }, Object.entries(options).map(([v, text]) => h('option', { value: v }, text)));
+    el.value = q[key];
+    return h('label', { class: 'field' }, h('span', {}, label), el);
+  };
+  return h('div', { class: 'share-quality' }, select('tier', SHARE_TIERS, 'Quality'), select('mode', SHARE_MODES, 'Optimize for'));
+}
+
 function sharePopover(anchor) {
+  const q = shareQuality();
   popover(
     anchor,
     h(
       'div',
       { class: 'menu' },
+      shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q))),
+      h('div', { class: 'menu-sep' }),
       h('button', { class: 'menu-item', onclick: () => (closePopover(), screenPicker({ switching: true })) }, 'Change source'),
       h('button', { class: 'menu-item danger', onclick: () => (closePopover(), liveVoice()?.stopMedia('screen')) }, 'Stop sharing')
     ),
@@ -3182,11 +3204,12 @@ async function screenPicker({ switching = false } = {}) {
   let withAudio = true;
   const audioBox = (label) =>
     h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (withAudio = e.target.checked) }), label);
-  const quality = h('p', { class: 'muted small' }, `Streams up to ${SCREEN.height >= 2160 ? '4K' : SCREEN.height + 'p'} at ${SCREEN.fps} fps.` + (DMCALL.voice ? '' : ' Only people who click LIVE receive it.'));
+  const q = shareQuality();
+  const quality = h('div', {}, shareQualityFields(q), DMCALL.voice ? null : h('p', { class: 'muted small' }, 'Only people who click LIVE receive it.'));
 
   if (!desktop) {
     const choice = (surface, ic, label, sub) =>
-      h('button', { class: 'share-choice', onclick: () => (close(), share({ surface, withAudio })) }, icon(ic), h('strong', {}, label), h('span', { class: 'muted small' }, sub));
+      h('button', { class: 'share-choice', onclick: () => (close(), share({ surface, withAudio, quality: q })) }, icon(ic), h('strong', {}, label), h('span', { class: 'muted small' }, sub));
     const close = modal(
       heading,
       h(
@@ -3211,7 +3234,7 @@ async function screenPicker({ switching = false } = {}) {
   let selected = null;
   const grid = h('div', { class: 'share-grid' });
   const tabs = h('div', { class: 'share-tabs' });
-  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio })) }, switching ? 'Switch' : 'Go Live');
+  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio, quality: q })) }, switching ? 'Switch' : 'Go Live');
   const draw = () => {
     tabs.replaceChildren(
       ...[
@@ -3257,11 +3280,13 @@ async function screenPicker({ switching = false } = {}) {
 }
 
 // Ask for the screen or window; null when cancelled or failed (after a toast).
-async function captureScreen({ surface, sourceId, withAudio }) {
+async function captureScreen({ surface, sourceId, withAudio, quality }) {
+  const tier = TIERS[quality.tier];
+  const fps = Math.min(tier.fps, MODES[quality.mode].maxFps);
   const video = {
-    width: { ideal: SCREEN.width, max: SCREEN.width },
-    height: { ideal: SCREEN.height, max: SCREEN.height },
-    frameRate: { ideal: SCREEN.fps, max: SCREEN.fps },
+    width: { ideal: tier.width, max: tier.width },
+    height: { ideal: tier.height, max: tier.height },
+    frameRate: { ideal: fps, max: fps },
     ...(surface ? { displaySurface: surface } : {}),
   };
   // Raw audio: voice processing would mangle music and game sound.
@@ -3302,7 +3327,8 @@ async function captureScreen({ surface, sourceId, withAudio }) {
 async function startShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
-  liveVoice().setMedia('screen', stream);
+  settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
+  liveVoice().setMedia('screen', stream, opts.quality);
   audio.cue('join');
   renderVoicePanel();
 }
@@ -3311,7 +3337,8 @@ async function switchShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
   const v = liveVoice();
-  await v.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
+  settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
+  await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
   // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
   const own = v === DMCALL.voice ? dmCallUi.tiles.get('screen:' + me().id) : S.stage?.tiles.get('screen:' + S.call?.sid);
   if (own?.video) {
@@ -3401,10 +3428,12 @@ function openStage({ screen } = {}) {
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
     // Resolution, real frame rate and codec of the focused (or first) screen
-    // share, so people can see what they are getting (and the sharer sees what
-    // each viewer gets)
+    // share or camera, so people can see what they are getting (and the sharer
+    // sees what each viewer gets). Sampled once per second and fed to both the
+    // header and the stats panel, since rates are deltas between calls.
     let frames = 0;
     let last = null;
+    S.stage.history = [];
     S.stage.timer = setInterval(async () => {
       const tile = statsTile();
       const v = tile?.video;
@@ -3413,12 +3442,20 @@ function openStage({ screen } = {}) {
       frames = total;
       last = tile;
       const base = v?.videoWidth ? `${v.videoWidth}×${v.videoHeight} · ${fps} fps` : '';
-      const info = tile && (await S.voice?.videoStats(tile.sid, 'screen').catch(() => null));
-      if (statsTile() !== tile) return;
+      const info = tile && (await S.voice?.videoStats(tile.sid, tile.kind).catch(() => null));
+      if (statsTile() !== tile || S.stage?.stats !== stats) return;
       const full = base && [base, formatVideoStats(info)].filter(Boolean).join(' · ');
       stats.textContent = full;
-      stats.title = full;
+      stats.title = full ? 'Stream stats: ' + full : '';
+      stats.style.cursor = full ? 'pointer' : '';
+      if (tile && info) {
+        const hist = S.stage.history;
+        hist.push({ time: new Date().toISOString(), tile: tile.key, kind: tile.kind, role: Array.isArray(info) ? 'sender' : 'receiver', stats: info });
+        if (hist.length > 60) hist.shift();
+      }
+      S.stage.statsPanel?.update(tile, info);
     }, 1000);
+    stats.onclick = () => openStatsPanel(stats);
     $('#stream-view').replaceChildren(
       h(
         'header',
@@ -3456,7 +3493,7 @@ function statsTile() {
   const st = S.stage;
   if (!st) return null;
   const focused = st.tiles.get(st.focus);
-  if (focused?.kind === 'screen') return focused.live ? focused : null;
+  if (focused?.kind === 'screen' || focused?.kind === 'camera') return focused.live ? focused : null;
   return [...st.tiles.values()].find((t) => t.kind === 'screen' && t.live) || null;
 }
 
@@ -3592,9 +3629,94 @@ function formatVideoStats(info) {
     .map((v) =>
       v.paused
         ? 'viewer away (paused)'
-        : `${v.codec}${hw(v.hw)} ${v.w || 0}×${v.h || 0}@${v.fps || 0} ${(v.mbps || 0).toFixed(1)} Mbps` + (v.limit && v.limit !== 'none' ? ` (limited by ${v.limit})` : '')
+        : `${v.codec}${hw(v.hw)} ${v.w || 0}×${v.h || 0}@${v.fps || 0} ${(v.mbps || 0).toFixed(1)} Mbps` + (v.rung ? ` [rung ${v.rung.h}p${v.rung.fps}]` : '') + (v.limit && v.limit !== 'none' ? ` (limited by ${v.limit})` : '')
     )
     .join(' | ');
+}
+
+// The "Stream stats" panel: live numbers for the tile statsTile() picked, plus
+// the last minute of samples (S.stage.history) as JSON to paste into a bug report.
+function openStatsPanel(anchor) {
+  const st = S.stage;
+  if (!st || st.statsPanel) return;
+  const body = h('div', { class: 'stats-body' }, h('p', { class: 'muted small' }, 'Waiting for the next sample…'));
+  const copy = async () => {
+    const mine = st.history.at(-1)?.role === 'sender';
+    const kind = st.history.at(-1)?.kind;
+    const header = {
+      version: appUpdate?.current || null,
+      userAgent: navigator.userAgent,
+      devicePixelRatio: window.devicePixelRatio,
+      trackSettings: mine ? S.voice?.local[kind]?.getVideoTracks()[0]?.getSettings() || null : null,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({ header, history: st.history }, null, 2));
+      toast(`Copied ${st.history.length} stats samples`);
+    } catch {
+      toast('Could not copy the stats', 'error');
+    }
+  };
+  const panel = h('div', { class: 'stats-panel-inner' }, h('div', { class: 'stats-head' }, h('strong', {}, 'Stream stats'), h('div', { class: 'spacer' }), h('button', { class: 'btn small', onclick: copy }, 'Copy')), body);
+  const pop = popover(anchor, panel, { align: 'start', className: 'stats-panel', onClose: () => st.statsPanel === api && (st.statsPanel = null) });
+  const api = {
+    close: () => pop.close(),
+    update(tile, info) {
+      body.replaceChildren(statsView(tile, info));
+      pop.place();
+    },
+  };
+  st.statsPanel = api;
+}
+
+function statsView(tile, info) {
+  const f = (x, d = 1) => (typeof x === 'number' && isFinite(x) ? x.toFixed(d) : '–');
+  const size = (w, hh) => (w ? `${w}×${hh}` : '–');
+  const hw = (x) => (x === true ? 'hw' : x === false ? 'sw' : '');
+  if (!tile || !info) return h('p', { class: 'muted small' }, 'Nothing to measure: focus a live screen share or camera.');
+  if (!Array.isArray(info)) {
+    const rows = [
+      ['Codec', `${info.codec} (${hw(info.hw) || '?'} decode${info.decoder ? ', ' + info.decoder : ''})`],
+      ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps`],
+      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
+      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s)`],
+      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}`],
+      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms, available ${f(info.availMbps, 1)} Mbps`],
+    ];
+    return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))));
+  }
+  if (!info.length) return h('p', { class: 'muted small' }, 'No viewers yet.');
+  const cols = ['Viewer', 'Capture', 'Rung', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path', 'Viewer size'];
+  const row = (v) => {
+    const name = S.call?.users.find((u) => u.sid === v.sid)?.name || 'someone';
+    const limit = v.limit && v.limit !== 'none' ? v.limit : 'none';
+    return [
+      name + (v.paused ? ' (away)' : ''),
+      `${size(v.capW, v.capH)} @ ${f(v.capFps, 0)}`,
+      v.rung ? `${v.rung.h}p${v.rung.fps}` : '–',
+      `${size(v.w, v.h)} @ ${f(v.fps, 0)}`,
+      `${f(v.sentMbps, 2)} / ${f(v.mbps, 2)} / ${f(v.availMbps, 1)}`,
+      `${v.codec} ${hw(v.hw)} ${v.impl || ''}`.trim() + (v.note ? ` (${v.note})` : ''),
+      limit,
+      f(v.qp, 0),
+      f(v.encMs),
+      v.loss != null ? f(v.loss * 100, 1) + '%' : '–',
+      f(v.rtt ?? v.pathRtt, 0),
+      v.cand || '–',
+      v.view ? (v.view.hidden ? 'hidden' : size(v.view.w, v.view.h)) : '–',
+    ];
+  };
+  const first = info[0];
+  return h(
+    'div',
+    {},
+    first?.tier && h('p', { class: 'muted small' }, `Quality: ${SHARE_TIERS[first.tier] || 'Camera'}, ${first.mode}`),
+    h(
+      'table',
+      { class: 'stats-table' },
+      h('thead', {}, h('tr', {}, cols.map((c) => h('th', {}, c)))),
+      h('tbody', {}, info.map((v) => h('tr', {}, row(v).map((c) => h('td', {}, c)))))
+    )
+  );
 }
 
 // Reconcile the stage with who is in the channel, sharing, or on camera.
@@ -3702,6 +3824,7 @@ function closeStage() {
   const st = S.stage;
   if (!st) return;
   clearInterval(st.timer);
+  st.statsPanel?.close();
   st.ro.disconnect();
   for (const key of [...st.tiles.keys()]) dropTile(key);
   if (S.call?.connected) for (const sid of st.watching) S.voice.watch(sid, 'screen', false);
