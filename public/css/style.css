@@ -311,6 +311,12 @@ body.game-visible #main { display: none; }
 .presence { position: absolute; right: -3px; bottom: -3px; width: 12px; height: 12px; background: var(--green); border: 2.5px solid var(--bg-1); border-radius: 50%; }
 .member-names { min-width: 0; }
 .member-name { font-weight: 600; font-size: calc(14px * var(--font-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-roles, .role-tags { display: flex; gap: 4px; margin-top: calc(2px * var(--density)); }
+.member-roles { overflow: hidden; flex-wrap: nowrap; }
+.role-tags { flex-wrap: wrap; margin-top: 6px; }
+.role-tag { flex: none; max-width: 100%; box-sizing: border-box; font-size: calc(10.5px * var(--font-scale)); font-weight: 600; line-height: 1.2; padding: calc(1px * var(--density)) calc(7px * var(--density)); border: 1px solid; border-radius: 999px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-roles .role-tag { flex: 0 1 auto; min-width: 0; }
+.role-more { flex: none; font-size: calc(10.5px * var(--font-scale)); color: var(--muted); align-self: center; }
 .member-status { font-size: calc(12px * var(--font-scale)); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------------- buttons, fields */
