@@ -1,5 +1,5 @@
 import { h, fmtTime } from '../util.js';
-import { load, copyText } from '../ui.js';
+import { load, copyText, confirmDialog, alertDialog } from '../ui.js';
 
 function secretBox(secret, onDone) {
   const val = h('div', { class: 'secret' }, secret);
@@ -35,8 +35,9 @@ export default {
 
     const revoke = async (k) => {
       const warn = k.current ? ' This is the key you are signed in with, so you will be signed out.' : '';
-      if (!confirm(`Revoke the key "${k.name}"?${warn}`)) return;
-      try { await api.del('keys/' + encodeURIComponent(k.id)); } catch (err) { alert(err.message); }
+      const ok = await confirmDialog({ title: `Revoke "${k.name}"?`, body: `Sessions using this key end at once.${warn}`, confirmLabel: 'Revoke', danger: true });
+      if (!ok) return;
+      try { await api.del('keys/' + encodeURIComponent(k.id)); } catch (err) { alertDialog('Could not revoke', err.message); }
       refresh();
     };
 

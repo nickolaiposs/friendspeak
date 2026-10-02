@@ -94,7 +94,10 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
   name, icon /* data: URL, https: URL or '' */, channels: [{ id, name /* may contain emojis, incl. :custom: ones */, type: 'text'|'voice' }],
   messages: { [channelId]: Message[] },   // capped at 500 per channel
   emojis: [{ name, url /* data: URL */, by }],
-  profiles: { [profileId]: { name, color, avatar, banner, card? } },  // last-seen snapshot, for rendering history and profile cards; `card` = public DM keys (D32)
+  profiles: { [profileId]: { name, color, avatar, banner, card?, status, seen } },  // last-seen snapshot, for rendering history and profile cards; `card` = public DM keys (D32)
+  bans: [{ id, profileId, name, ip, by, ts }],   // `ip` is '' for a profile-only ban and never sent to clients
+  roles: [{ id, name, color /* #rrggbb */ }],    // labels managed in the admin dashboard, first = highest (D34). ≤50, name 1 to 32 characters
+  memberRoles: { [profileId]: [roleId] },        // only profiles with a role, ≤10 each. Beside `profiles` because storedProfile() rebuilds those on every hello
   files: [{ id, name, size, type, channelId, messageId /* null until attached */, by /* profileId */, byName, ts }]
 }
 ```
@@ -112,7 +115,7 @@ Uploaded file contents live in `dataDir/files/<id>` (the id is 128 random bits).
 
 The client builds URLs as `${server}/files/${id}/${name}`. The desktop app saves downloads via `desktop.download(url)` (`webContents.downloadURL`, which gives a save dialog and honours pinned certificates).
 
-In-memory only: `users: Map<socketId, { profile, voice, muted, deafened, playing }>`.
+In-memory only: `users: Map<socketId, { profile, voice, muted, deafened, sharing, camera, playing, since, ip }>`. `since` (when the socket said `hello`) and `ip` (its peer address) are for the admin dashboard and are never sent to clients (`userList()` leaves them out).
 
 ### Protocol (Socket.IO, path `/socket.io`)
 
@@ -122,7 +125,7 @@ Every event except `hello` requires a successful `hello` first. `on()` inside `a
 
 | Event | Payload | Ack | Effect |
 |---|---|---|---|
-| `hello` | `{ profile, password }` | `{ ok, sid, server: { name, icon, channels, emojis, profiles, bans, game, update }, users }` or `{ error, banned? }` | refused if the profile id or IP is banned. Registers the socket; broadcasts `profile`, `users`. **One session per profile:** any older socket with the same profile id is taken out of voice (`voice:peer-left`), sent `session:replaced` and disconnected. A reconnect after a network drop therefore never shows the person twice, even though the dead socket would otherwise linger until its ping timeout (~45 s). The replaced client doesn't auto-reconnect; it shows a message instead. |
+| `hello` | `{ profile, password }` | `{ ok, sid, server: { name, icon, channels, emojis, profiles, bans, roles, memberRoles, game, update }, users }` or `{ error, banned? }` | refused if the profile id or IP is banned. Registers the socket; broadcasts `profile`, `users`. **One session per profile:** any older socket with the same profile id is taken out of voice (`voice:peer-left`), sent `session:replaced` and disconnected. A reconnect after a network drop therefore never shows the person twice, even though the dead socket would otherwise linger until its ping timeout (~45 s). The replaced client doesn't auto-reconnect; it shows a message instead. |
 | `server:update` | `{ name?, icon?, game? }` (`icon: ''` removes it; ≤512KB data image or an https link. `game: true/false` switches the game on or off; switching it on is refused while the game isn't available, e.g. assets missing) | `{ ok }` / `{ error }` | `server { name, icon, game }` (and `users` when the game is switched off) |
 | `profile:update` | profile | none | `profile`, `users` |
 | `msg:history` | `{ channelId, before? }` | `{ messages }` (≤50, oldest first) | none |
@@ -151,7 +154,9 @@ Every event except `hello` requires a successful `hello` first. `on()` inside `a
 
 A profile may carry `card` (`{ id, s, d, sig }`, the public keys for DMs, D32). The server checks its shape and that `id` is the profile's id, stores it and passes it on; clients verify the signature. `users` entries carry the profile minus `banner` (the list is re-broadcast on every mute toggle). Clients read backgrounds from `profiles` and keep it current with `profile` events.
 
-**Server → client:** `users`, `profile`, `server`, `channels`, `emojis`, `msg:new`, `msg:update`, `msg:deleted`, `files:new {files, storage}`, `files:deleted {ids, storage}`, `typing`, `rtc:signal {from, data}`, `voice:peer-left {sid}`, `voice:kicked` (your voice channel was deleted), `session:replaced` (the same profile connected again elsewhere; followed by a server-side disconnect), `bans` (the list, without IPs), `banned` / `removed` (each followed by a server-side disconnect), `profile:removed {id}`, `server:update` (the `update` object below changed). A `profile` event also goes out when someone disconnects, carrying their new `seen` time.
+**Server → client:** `users`, `profile`, `server`, `channels`, `emojis`, `msg:new`, `msg:update`, `msg:deleted`, `files:new {files, storage}`, `files:deleted {ids, storage}`, `typing`, `rtc:signal {from, data}`, `voice:peer-left {sid}`, `voice:kicked` (your voice channel was deleted), `session:replaced` (the same profile connected again elsewhere; followed by a server-side disconnect), `bans` (the list, without IPs), `roles { roles, memberRoles }` (either changed), `banned` / `removed` (each followed by a server-side disconnect), `profile:removed {id}`, `server:update` (the `update` object below changed). A `profile` event also goes out when someone disconnects, carrying their new `seen` time.
+
+`roles` and `memberRoles` (D34) are labels the host sets in the admin dashboard. They enforce nothing and the app only shows them next to names. There are no client → server role events, so this is the one management action the app can't do. Both fields, and the `roles` event, are optional (D29): an older app ignores them, and an app on an older server treats missing fields as no roles. `member:remove` also drops the profile's assignments (and sends `roles`).
 
 Stored profiles (`server.profiles`) carry `status` and `seen` (last time online). The member list shows every stored profile that isn't online or banned under **Offline**.
 
@@ -198,9 +203,18 @@ A web page at `/admin`, served by the server itself, with a JSON API and one eve
 | `GET /admin/api/keys` | session | `{ keys: [{ id, name, created, lastUsed, env, bootstrap, active, current }] }`. `current` is the key this session signed in with |
 | `POST /admin/api/keys` | session | `{ name }` (1 to 40 characters) → `{ ok, key, secret }`. The secret is returned this once |
 | `DELETE /admin/api/keys/:id` | session | `{ ok }`; its sessions end at once. 400 for the `env` key or an unknown id |
-| `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke` |
+| `GET /admin/api/users` | session | `{ online, offline, bans, roles }`. `online`: one per chat socket `{ sid, id, name, color, avatar, status, ip, since, voice, voiceName, muted, deafened, sharing, camera, playing, roles }` (`ip` is the peer address, the proxy's behind one). `offline`: every stored profile that isn't online or banned `{ id, name, color, avatar, status, seen, lastIp, roles }` (`lastIp` is in memory only, so null after a restart). `bans`: `{ id, profileId, name, ip, by, ts }` with the real `ip` (`""` for a profile-only ban). No banners |
+| `POST /admin/api/users/:profileId/remove` | session | `{ ok }`. Like `member:remove`: disconnects them, deletes the profile and its role assignments. 400 `Unknown user` |
+| `POST /admin/api/bans` | session | `{ profileId, ip? }` → `{ ok, ipSkipped }`. 400 `Unknown user` / `Already banned`. The ban is credited to `Admin dashboard`. With `ip: true` the profile's last address is banned too, unless it is unknown, loopback or the address of this admin request (`ipSkipped: true`) |
+| `DELETE /admin/api/bans/:id` | session | `{ ok }`, also for an id that is already gone |
+| `GET /admin/api/roles` | session | `{ roles, memberRoles, profiles: { [profileId]: { name, color, avatar } } }` (every stored profile) |
+| `POST /admin/api/roles` | session | `{ name, color }` → `{ ok, role }`, added last. 400 for a bad name or color (`#rrggbb`, stored lowercase), a duplicate name (case-insensitive) or more than 50 roles |
+| `PATCH /admin/api/roles/:id` | session | any of `{ name, color, position }` (`position` = zero-based index to move to) → `{ ok, role }`. 400 for an unknown role or a bad value |
+| `DELETE /admin/api/roles/:id` | session | `{ ok }`; removes the role from every member. 400 `Unknown role` |
+| `PUT /admin/api/users/:profileId/roles` | session | `{ roles: [roleId] }`, the full new list (unknown ids and duplicates dropped, ≤10) → `{ ok, roles }`. An empty list removes the entry. 400 `Unknown user` |
+| `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke`, `user.remove`, `ban.add`, `ban.remove`, `role.create`, `role.update`, `role.delete`, `role.assign`. `detail` has names, not ids, with control characters replaced by spaces |
 
-Timestamps are milliseconds since the epoch. "session" means a valid session or a local request (then the actor is `"local"`).
+The user, ban and role routes call the same `actions` object in `server.js` as the chat sockets (`ban:add`, `member:remove`, `ban:remove`, `server:update`), so the rules and the broadcasts to the app are identical; `admin.js` only validates the URL, audits and answers. The `change` topics for them are `users` (connected, left, voice) and `state` (profiles, bans, roles). Timestamps are milliseconds since the epoch. "session" means a valid session or a local request (then the actor is `"local"`).
 
 **Event stream** (`/admin/api/events`). It starts with `retry: 5000`. Log events carry an SSE `id:`, and a browser that reconnects with `Last-Event-ID` is sent the buffered lines it missed.
 
@@ -211,7 +225,7 @@ Timestamps are milliseconds since the epoch. "session" means a valid session or 
 | `ping` | `{}` | every 25 s |
 | `bye` | `{ reason }` | the session ended (`expired`) or the server is closing; the stream then closes and the dashboard shows the sign-in page |
 
-**The UI** (`admin-ui/`): `index.html`, `admin.css` and plain ES modules. `js/admin.js` loads the session, shows the sign-in page (with the certificate fingerprint) or the app, keeps one event stream and routes by URL hash. `js/api.js` wraps `fetch` and the event stream, and `js/ui.js` has shared bits. Each view is one module in `js/views/` (`overview`, `log`, `keys`, `audit`) exporting `{ id, title, mount(root, ctx) }`, registered in the `views` array in `js/admin.js`. `util.js` is not copied: `/admin/js/util.js` is `public/js/util.js`.
+**The UI** (`admin-ui/`): `index.html`, `admin.css` and plain ES modules. `js/admin.js` loads the session, shows the sign-in page (with the certificate fingerprint) or the app, keeps one event stream and routes by URL hash. `js/api.js` wraps `fetch` and the event stream, and `js/ui.js` has shared bits (`load`, `copyText`, the dialogs `showDialog` and `confirmDialog`, and the role label `roleTag` and ID chip `idChip`). Each view is one module in `js/views/` (`overview`, `users`, `roles`, `log`, `keys`, `audit`) exporting `{ id, title, mount(root, ctx) }`, registered in the `views` array in `js/admin.js`. `util.js` is not copied: `/admin/js/util.js` is `public/js/util.js`.
 
 ### DM signaling and mailboxes (Socket.IO namespace `/dm`, D28, D32)
 

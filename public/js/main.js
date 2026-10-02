@@ -774,6 +774,23 @@ function profileCardHead(p, extra) {
   );
 }
 
+// Role labels (set by the host in the admin dashboard; they grant nothing). The server's order is the display order.
+// Everything here is server-supplied, so shapes are checked and names only ever become text nodes.
+// The text color is pulled toward the theme's text color, so a dark role stays readable on a dark theme.
+const MAX_ROLES = 10;
+function rolesOf(profileId) {
+  const sv = S.server;
+  if (!sv || !Array.isArray(sv.roles) || !sv.memberRoles || typeof sv.memberRoles !== 'object') return [];
+  const ids = sv.memberRoles[profileId];
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const have = new Set(ids);
+  return sv.roles.filter((r) => r && typeof r.name === 'string' && r.name && have.has(r.id)).slice(0, MAX_ROLES);
+}
+function roleTag(r) {
+  const color = typeof r.color === 'string' && /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : 'var(--muted)';
+  return h('span', { class: 'role-tag', title: r.name, style: { color: `color-mix(in srgb, ${color} 72%, var(--text))`, background: `color-mix(in srgb, ${color} 16%, transparent)`, borderColor: `color-mix(in srgb, ${color} 55%, var(--muted))` } }, r.name);
+}
+
 function profilePopover(anchor, u, align = 'right') {
   const p = fullProfile(u);
   const live = S.users.find((x) => x.id === p.id);
@@ -783,12 +800,13 @@ function profilePopover(anchor, u, align = 'right') {
       ? 'Last seen ' + fmtTime(p.seen)
       : '';
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
+  const roles = rolesOf(p.id);
   const pop = popover(
     anchor,
     h(
       'div',
       { class: 'profile-card' },
-      profileCardHead(p, doing ? h('div', { class: 'small pc-doing' }, doing) : null),
+      profileCardHead(p, [doing ? h('div', { class: 'small pc-doing' }, doing) : null, roles.length ? h('div', { class: 'role-tags' }, roles.map(roleTag)) : null]),
       other
         ? h(
             'div',
@@ -1223,6 +1241,14 @@ function openSocket(entry, rejoinVoice = null) {
 
   socket.on('bans', (bans) => {
     c.server.bans = bans;
+    if (viewed()) renderMembers();
+  });
+
+  socket.on('roles', (msg) => {
+    if (!c.server) return;
+    const { roles, memberRoles } = msg && typeof msg === 'object' ? msg : {};
+    c.server.roles = Array.isArray(roles) ? roles : [];
+    c.server.memberRoles = memberRoles && typeof memberRoles === 'object' && !Array.isArray(memberRoles) ? memberRoles : {};
     if (viewed()) renderMembers();
   });
 
@@ -1903,8 +1929,9 @@ function renderMembers() {
       { label: 'Remove from server…', danger: true, run: () => removePrompt(u.id) },
       !isBanned(u.id) && { label: 'Ban…', danger: true, run: () => banPrompt(u.id) },
     ]);
-  const row = (u) =>
-    h(
+  const row = (u) => {
+    const roles = rolesOf(u.id);
+    return h(
       'div',
       { class: 'member' + (u.offline ? ' offline' : ''), onclick: (e) => profilePopover(e.currentTarget, u, 'left'), oncontextmenu: menu(u) },
       h('div', { class: 'member-av' }, avatarEl(u, 32), h('span', { class: 'presence' + (u.offline ? ' off' : '') })),
@@ -1916,9 +1943,18 @@ function renderMembers() {
           'div',
           { class: 'member-status' },
           [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ') || u.status || ''
-        )
+        ),
+        roles.length
+          ? h(
+              'div',
+              { class: 'member-roles', title: roles.length > 3 ? roles.map((r) => r.name).join(', ') : null },
+              roles.slice(0, 3).map(roleTag),
+              roles.length > 3 ? h('span', { class: 'role-more' }, `+${roles.length - 3}`) : null
+            )
+          : null
       )
     );
+  };
   box.replaceChildren(
     ...[
       inVoice.length ? h('div', { class: 'cat' }, `In voice — ${inVoice.length}`) : null,
