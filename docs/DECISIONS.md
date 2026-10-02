@@ -373,3 +373,24 @@ Without a mic, users join **listen-only** instead of failing.
 - Assignments live in `memberRoles` and are dropped when a member is removed. Only the dashboard can change roles and assignments. It is the one management action that is not open to everyone in the app.
 
 **Alternatives:** an admin panel inside the desktop app (it already has the pinned certificate and the socket, and no browser attack surface, but it isn't a web UI and needs the app installed); signed stateless session cookies (they survive restarts, but revoking a key couldn't end them at once); admin rights on a profile id (spoofable, D3) or on a DM keypair identity (D32; possible later, but servers still trust profile ids today); a Socket.IO namespace for the dashboard (a second auth path, and the client library to serve); reading container logs from the Docker socket (root on the host; `updater.js` leaves that to the Watchtower sidecar, D29); trusting `X-Forwarded-For`.
+
+## D35: Camera backgrounds are made on the sender's device, with MediaPipe · Active
+**Context:** People wanted to hide the room behind them on camera. A blur first, their own pictures later.
+**Decision:**
+- The effect runs in the sender's app, before the camera reaches a peer connection (`background.js`). Viewers get an ordinary video track, so the mesh (D5, D22), DM calls (D33), the socket protocol and the server don't change, and older apps see the effect without knowing about it.
+- People are found with MediaPipe Tasks Vision (`@mediapipe/tasks-vision`, Apache 2.0) and its selfie segmentation model (250 KB, committed in `public/models/`). The library is WebAssembly plus a prebuilt ES module, so it loads as-is from `node_modules` through the `friendspeak://` routes like the emoji picker: no build step (D1), nothing native. It loads on first use, and nothing is fetched from the internet.
+- Frames come from the camera track (`MediaStreamTrackProcessor`), are composited on a canvas, and leave through a `MediaStreamTrackGenerator`. They don't depend on `requestAnimationFrame`, so the effect keeps running while the window is hidden.
+- The compositor is the same for every background: the person from the mask, then a painter for whatever goes behind them. `BACKGROUNDS` in `background.js` lists the painters. Today that is `blur`. A picture is one more painter plus a choice in the UI; the settings (`cameraBackground` names the kind, options sit beside it), the capture and the track swap don't change.
+- A camera with a background is captured at 720p30 instead of the plain camera's size, because segmenting and compositing run on the UI thread for every frame.
+- Switching between a background and none mid-call opens a new capture and swaps it in with `replaceMedia`, so viewers keep the same stream. Options (blur strength) apply to the running camera at once.
+- If the effect can't start, the camera comes on without it and a toast says why.
+
+**Consequences:**
+- The desktop installers grow by about 12 MB (one WebAssembly build; the no-SIMD and module variants are excluded in `package.json` → `build.files`). The server image doesn't carry the package (`Dockerfile`).
+- The first camera with a background takes a few seconds to appear while the WebAssembly compiles. After that the segmenter stays loaded until the app closes.
+- The mask is 256 px wide and has no memory between frames: edges around hair and fast hands are soft, and a blur shows a faint halo of the person's own colors.
+- It costs CPU and GPU on the sender only. On a machine without WebGL the segmenter falls back to the CPU and may not hold 30 fps.
+- Only people are kept: a pet or something you hold up away from your body may be blurred.
+
+**Alternatives:** the same pipeline in a worker (keeps the UI thread free, but MediaPipe's loader uses `importScripts`, which module workers don't have, and a classic worker can't import the ES bundle without a build step); compositing in WebGL on MediaPipe's own context (no mask readback, but far more code for a 256 px mask); TensorFlow.js body-segmentation (wraps the same model with a bigger runtime); ONNX Runtime Web with MODNet or Robust Video Matting (cleaner edges, models of tens of MB and much more GPU); the operating system's effects (macOS Portrait, Windows Studio Effects: free where present, but hardware-dependent and missing on Linux); blurring on the viewer's side (the room would still leave the sender's machine).
+
