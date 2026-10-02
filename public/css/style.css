@@ -695,3 +695,31 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .color-field { display: flex; align-items: center; gap: 10px; cursor: pointer; min-width: 0; }
 .color-field input[type='color'] { width: 40px; height: 30px; flex: none; cursor: pointer; }
 .color-field .hex { display: block; font: calc(11.5px * var(--font-scale)) ui-monospace, monospace; color: var(--muted); }
+
+/* calls in DMs */
+#call-panel { display: flex; align-items: center; gap: 0; padding: 8px 10px; border-top: 1px solid var(--line); background: var(--bg-1); }
+#call-panel .vp-info { cursor: pointer; }
+#call-panel .icon-btn { width: 30px; }
+.icon-btn.accept { color: var(--green); }
+.btn.accept { background: var(--green); color: var(--on-green); }
+.dm-call-btns { display: flex; gap: 2px; }
+.call-status { font-variant-numeric: tabular-nums; }
+.call-stage { flex: none; height: 230px; display: flex; flex-direction: column; background: #000; border-bottom: 1px solid var(--line); }
+.call-stage.has-video { height: 58%; min-height: 280px; }
+#main.call-max .call-stage { flex: 1; height: auto; }
+#main.call-max .messages, #main.call-max .composer-wrap { display: none; }
+.call-bar { flex: none; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 0 8px 8px; }
+.call-bar .call-status { color: var(--muted); font-size: calc(13px * var(--font-scale)); min-width: 44px; text-align: right; }
+.call-bar .icon-btn { width: 38px; height: 38px; border-radius: 50%; background: var(--bg-3); color: var(--text); }
+.call-bar .icon-btn:hover { background: var(--bg-active); }
+.call-bar .icon-btn.off { color: var(--red); }
+.call-bar .icon-btn.sharing { color: var(--green); }
+.call-bar .icon-btn.hangup { background: var(--red); color: var(--on-red); }
+.call-bar .icon-btn.accept { background: var(--green); color: var(--on-green); }
+.tile-flag { display: inline-flex; vertical-align: -3px; margin-left: 4px; color: var(--red); }
+.tile-flag:empty { display: none; }
+.tile-flag .icon { width: 14px; height: 14px; }
+#call-ring { position: fixed; top: 16px; right: 16px; z-index: 60; display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,.5); animation: pop .15s; }
+.cr-text { display: flex; flex-direction: column; min-width: 0; margin-right: 6px; }
+.cr-text strong { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.msg.note .msg-text { color: var(--muted); }

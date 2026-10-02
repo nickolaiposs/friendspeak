@@ -5,6 +5,7 @@ import { audio, Level } from './audio.js';
 import { VoiceClient, SCREEN, MEDIA } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
+import { DmCalls } from './call.js';
 import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
 
 applyAppearance(); // before the first render
@@ -100,6 +101,7 @@ const I = {
   hash: '<svg viewBox="0 0 24 24"><path d="M5.88 21 6.6 17H3l.35-2h3.6l1.06-6H4.4l.35-2h3.6l.72-4h2l-.72 4h6l.72-4h2l-.72 4H22l-.35 2h-3.6l-1.06 6h3.61l-.35 2h-3.6l-.72 4h-2l.72-4h-6l-.72 4h-2zm4.13-12-1.06 6h6l1.06-6h-6z"/></svg>',
   speaker: '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
+  phone: '<svg viewBox="0 0 24 24"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>',
   hangup: '<svg viewBox="0 0 24 24"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85a1 1 0 0 1-1.41-.01L.29 13.08a1 1 0 0 1 0-1.41C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67a1 1 0 0 1 0 1.41l-2.48 2.48a1 1 0 0 1-1.41.01 11.3 11.3 0 0 0-2.67-1.85 1 1 0 0 1-.56-.9v-3.1A15.5 15.5 0 0 0 12 9z"/></svg>',
   people: '<svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>',
   smile: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-3.5 6a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zm7 0a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3zM12 17.5A5.5 5.5 0 0 1 6.9 14h10.2a5.5 5.5 0 0 1-5.1 3.5z"/></svg>',
@@ -131,6 +133,7 @@ const DM = new DirectMessages({
   presence() {
     renderRail();
     if (inDmView()) (renderChannels(), refreshChatTitle());
+    DMCALL.linkChanged();
   },
   message(peerId, m) {
     const cid = 'dm:' + peerId;
@@ -167,6 +170,7 @@ const DM = new DirectMessages({
     S.typing.get(cid).set(peerId, { name: profileOf(peerId).name, until: Date.now() + 4000 });
     if (cid === S.channelId) renderTyping();
   },
+  call: (peerId, d) => DMCALL.receive(peerId, d),
 });
 
 // Open the conversation with someone (from a server's member list or a message)
@@ -221,9 +225,349 @@ async function trustKeyPrompt(peerId) {
 async function deleteConversation(peerId) {
   const name = profileOf(peerId).name;
   if (!(await confirmModal('Delete conversation', `Delete your conversation with ${name} from this device? Their copy isn't affected.`))) return;
+  if (DMCALL.with(peerId)) DMCALL.hangup();
   if (S.channelId === 'dm:' + peerId) leaveDmView();
   await DM.removeContact(peerId);
 }
+
+// ---------------------------------------------------------------- calls in DMs (call.js, D33)
+
+const DMCALL = new DmCalls(DM, {
+  change: () => renderDmCall(),
+  active(c) {
+    audio.cue('join');
+    const err = c.voice.micError;
+    if (err) toast(`No microphone (${err.message}). You joined the call listen-only — soundboard still works.`, 'error', 7000);
+    if (c.out && c.video) toggleCamera();
+  },
+  ended(c, why, mine) {
+    const name = profileOf(c.peerId).name;
+    const caller = c.out ? me().id : c.peerId;
+    if (c.started) {
+      audio.cue('leave');
+      DM.note(c.peerId, caller, `📞 ${c.video ? 'Video call' : 'Call'} · ${clock(Date.now() - c.started)}`);
+      if (why === 'lost') toast(`The call with ${name} lost its connection`, 'error', 6000);
+    } else if (!c.out) {
+      if (!mine) DM.note(c.peerId, caller, '📞 Missed call', true);
+    } else if (why === 'unanswered') {
+      DM.note(c.peerId, caller, '📞 No answer');
+      toast(`${name} didn’t answer`);
+    } else if (why === 'unreachable') toast(`Couldn’t reach ${name}`, 'error');
+    else if (why === 'declined') toast(`${name} declined the call`);
+    else if (why === 'busy') toast(`${name} is in another call`);
+  },
+});
+
+// Whichever is live, the DM call or the voice channel's call (S.call): its VoiceClient takes the camera and the screen share
+const liveVoice = () => DMCALL.voice || (S.voiceChannel ? S.voice : null);
+
+const clock = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(s / 60) % 60);
+  return (s >= 3600 ? Math.floor(s / 3600) + ':' + mm.padStart(2, '0') : mm) + ':' + String(s % 60).padStart(2, '0');
+};
+
+function startDmCall(peerId, video = false) {
+  const name = profileOf(peerId).name;
+  if (DMCALL.cur) return toast(DMCALL.with(peerId) ? `You’re already in a call with ${name}` : 'Hang up your current call first');
+  if (!DM.online(peerId)) return toast(`${name} is offline`);
+  if (!DM.canSendFiles(peerId)) return toast(`${name} needs to connect with a current friendspeak before you can call them`, 'error'); // calls are sealed (D33)
+  if (S.call) leaveVoice(); // one microphone: a DM call or a voice channel, not both
+  audio.ensure();
+  DMCALL.sync(S.muted, S.deafened);
+  DMCALL.start(peerId, video);
+}
+
+async function acceptDmCall() {
+  const c = DMCALL.cur;
+  if (c?.state !== 'ringing') return;
+  if (S.call) leaveVoice();
+  audio.ensure();
+  DMCALL.sync(S.muted, S.deafened);
+  selectChannel('dm:' + c.peerId);
+  await DMCALL.accept();
+}
+
+function dmCallStatus(c) {
+  if (c.state === 'calling') return 'Calling…';
+  if (c.state === 'ringing') return c.video ? 'Incoming video call' : 'Incoming call';
+  const state = c.voice?.peers.get(c.peerId)?.state;
+  if (state === 'connected') return clock(Date.now() - c.started);
+  return state === 'disconnected' || state === 'failed' ? 'Reconnecting…' : 'Connecting…';
+}
+
+// compact: the sidebar panel (mute lives in the user panel right below it)
+function dmCallButtons(c, compact) {
+  const hangup = (title) => h('button', { class: 'icon-btn danger hangup', title, onclick: () => DMCALL.hangup() }, icon('hangup'));
+  if (c.state === 'ringing') return [h('button', { class: 'icon-btn accept', title: 'Accept', onclick: acceptDmCall }, icon('phone')), hangup('Decline')];
+  if (c.state === 'calling') return [hangup('Cancel')];
+  const v = c.voice;
+  const off = S.muted || S.deafened;
+  const all = [
+    compact ? null : h('button', { class: 'icon-btn' + (off ? ' off' : ''), title: off ? 'Unmute' : 'Mute', onclick: toggleMute }, icon(off ? 'micOff' : 'mic')),
+    h(
+      'button',
+      {
+        class: 'icon-btn' + (v.local.camera ? ' sharing' : ''),
+        title: (v.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+        onclick: toggleCamera,
+        oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
+      },
+      icon(v.local.camera ? 'cam' : 'camOff')
+    ),
+    h(
+      'button',
+      {
+        class: 'icon-btn' + (v.local.screen ? ' sharing' : ''),
+        title: v.local.screen ? 'Change source or stop sharing' : 'Share your screen',
+        onclick: (e) => (v.local.screen ? sharePopover(e.currentTarget) : screenPicker()),
+      },
+      icon('screen')
+    ),
+    compact ? null : h('button', { class: 'icon-btn' + (dmCallUi.max ? ' on' : ''), title: dmCallUi.max ? 'Show the chat' : 'Hide the chat', onclick: () => ((dmCallUi.max = !dmCallUi.max), renderDmCall()) }, icon('expand')),
+    hangup('Hang up'),
+  ];
+  return all.filter(Boolean);
+}
+
+// The call's view sits on top of the conversation with that person, so it only
+// shows (and video is only received at full size) while that DM is open. The
+// sidebar panel and the incoming-call card show wherever you are.
+const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, ringing: null, ringTimer: null };
+
+function renderDmCall() {
+  const c = DMCALL.cur;
+  const ui = dmCallUi;
+  const p = c && profileOf(c.peerId);
+
+  // Ring while it's ringing, on either end
+  const ringing = c && c.state !== 'active' ? c.state : null;
+  if (ringing !== ui.ringing) {
+    clearInterval(ui.ringTimer);
+    ui.ringing = ringing;
+    if (ringing) {
+      const cue = ringing === 'ringing' ? 'ring' : 'calling';
+      audio.cue(cue);
+      ui.ringTimer = setInterval(() => audio.cue(cue), ringing === 'ringing' ? 2000 : 3000);
+      if (ringing === 'ringing' && document.hidden) document.title = `(•) friendspeak`;
+    }
+  }
+
+  const card = $('#call-ring');
+  card.hidden = c?.state !== 'ringing';
+  card.replaceChildren(
+    ...(card.hidden
+      ? []
+      : [
+          avatarEl(p, 44),
+          h('div', { class: 'cr-text' }, h('strong', {}, p.name), h('span', { class: 'muted small' }, dmCallStatus(c))),
+          h('button', { class: 'btn small accept', onclick: acceptDmCall }, 'Accept'),
+          h('button', { class: 'btn small danger', onclick: () => DMCALL.hangup() }, 'Decline'),
+        ])
+  );
+
+  const panel = $('#call-panel');
+  panel.hidden = !c;
+  panel.replaceChildren(
+    ...(c
+      ? [
+          h(
+            'div',
+            { class: 'vp-info', title: 'Open the conversation', onclick: () => selectChannel('dm:' + c.peerId) },
+            h('div', { class: 'vp-status call-status' }, dmCallStatus(c)),
+            h('div', { class: 'vp-channel' }, 'Call with ' + p.name)
+          ),
+          ...dmCallButtons(c, true),
+        ]
+      : [])
+  );
+
+  // Call buttons in the header of the open conversation
+  const peerId = inDmView() ? peerOf(S.channelId) : null;
+  $('#main .dm-call-btns')?.replaceChildren(
+    ...(peerId && !DMCALL.with(peerId)
+      ? [
+          h('button', { class: 'icon-btn', title: 'Start a voice call', onclick: () => startDmCall(peerId) }, icon('phone')),
+          h('button', { class: 'icon-btn', title: 'Start a video call', onclick: () => startDmCall(peerId, true) }, icon('cam')),
+        ]
+      : [])
+  );
+
+  // A new call (or none): start the view over
+  if (ui.call !== c) {
+    for (const key of [...ui.tiles.keys()]) dropDmCallTile(key);
+    ui.ro?.disconnect();
+    ui.el?.remove();
+    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1 });
+    if (c) {
+      ui.main = h('div', { class: 'stage-main' });
+      ui.grid = h('div', { class: 'stage-grid' });
+      ui.body = h('div', { class: 'stage' }, ui.main, ui.grid);
+      ui.bar = h('div', { class: 'call-bar' });
+      ui.el = h('div', { class: 'call-stage' }, ui.body, ui.bar);
+      ui.ro = new ResizeObserver(() => layoutStage(ui));
+      ui.ro.observe(ui.grid);
+    }
+  }
+  const head = c && S.channelId === 'dm:' + c.peerId ? $('#main > .chat-header') : null;
+  $('#main').classList.toggle('call-max', !!head && ui.max);
+  if (!c) return;
+  // The view takes room from the messages: keep them at the newest one
+  const box = $('#messages');
+  const atBottom = box && atBottomOrNew(box);
+  if (!head) ui.el.remove();
+  else if (ui.el.previousElementSibling !== head) head.after(ui.el);
+
+  // Screens first, then the two people (camera, or avatar while it's off)
+  const v = DMCALL.voice;
+  const mine = me().id;
+  const want = [
+    v && c.remote.screen && { who: c.peerId, kind: 'screen' },
+    v?.local.screen && { who: mine, kind: 'screen' },
+    { who: c.peerId, kind: v && c.remote.camera ? 'camera' : 'user' },
+    { who: mine, kind: v?.local.camera ? 'camera' : 'user' },
+  ].filter(Boolean);
+  for (const w of want) w.key = w.kind + ':' + w.who;
+  for (const key of [...ui.tiles.keys()]) if (!want.some((w) => w.key === key)) dropDmCallTile(key);
+  for (const w of want) {
+    if (ui.tiles.has(w.key)) continue;
+    ui.tiles.set(w.key, dmCallTile(w.key, w.who, w.kind));
+    if (w.kind === 'screen' && w.who !== mine) ui.focus = w.key; // they started sharing: show it large
+  }
+  if (!ui.tiles.has(ui.focus)) ui.focus = null;
+
+  const focused = ui.tiles.get(ui.focus);
+  if (focused && ui.main.firstChild !== focused.el) ui.main.replaceChildren(focused.el);
+  if (!focused) ui.main.replaceChildren();
+  const rest = want.filter((w) => w.key !== ui.focus).map((w) => ui.tiles.get(w.key).el);
+  if (rest.length !== ui.grid.children.length || rest.some((el, i) => ui.grid.children[i] !== el)) ui.grid.replaceChildren(...rest);
+  ui.body.classList.toggle('focused', !!focused);
+  ui.el.classList.toggle('has-video', want.some((w) => w.kind !== 'user'));
+
+  for (const t of ui.tiles.values()) {
+    t.el.classList.toggle('focus', t === focused);
+    const theirs = t.who !== mine;
+    if (t.flag) {
+      const { muted, deafened } = theirs ? c.remote : S;
+      t.flag.replaceChildren(...(muted || deafened ? [icon(deafened ? 'headOff' : 'micOff')] : []));
+    }
+    if (!t.video) continue;
+    const src = v?.mediaOf(t.who, t.kind) || null;
+    if (t.video.srcObject !== src) t.video.srcObject = src;
+    // Taken out of the page (another channel was open), a video pauses
+    if (src && head && t.video.paused) t.video.play().catch(() => {});
+    t.status.hidden = !!src;
+    if (t.kind === 'screen') {
+      t.video.muted = !theirs || S.deafened;
+      t.video.volume = ui.volume;
+    }
+    t.report?.();
+  }
+
+  ui.bar.replaceChildren(h('span', { class: 'call-status' }, dmCallStatus(c)), ...dmCallButtons(c, false));
+  layoutStage(ui);
+  if (head && atBottom) box.scrollTop = box.scrollHeight;
+}
+
+// kind: 'screen', 'camera' or 'user' (avatar)
+function dmCallTile(key, who, kind) {
+  const ui = dmCallUi;
+  const mine = who === me().id;
+  const p = mine ? me() : profileOf(who);
+  const tile = { key, who, kind, el: null, video: null, status: null, flag: null };
+  // A single click focuses; wait a moment so a double click can go fullscreen instead
+  let clickTimer;
+  const attrs = {
+    class: 'tile ' + kind + (mine && kind === 'camera' ? ' mirror' : ''),
+    onclick: () => {
+      clearTimeout(clickTimer);
+      clickTimer = setTimeout(() => ((ui.focus = ui.focus === key ? null : key), renderDmCall()), 220);
+    },
+    ondblclick: () => {
+      clearTimeout(clickTimer);
+      if (tile.video) document.fullscreenElement ? document.exitFullscreen() : tile.el.requestFullscreen?.().catch(() => {});
+    },
+  };
+  if (kind !== 'screen') {
+    attrs['data-who'] = who; // speaking outline
+    tile.flag = h('span', { class: 'tile-flag' });
+  }
+  const label = h('span', { class: 'tile-name' }, kind === 'screen' ? (mine ? 'Your screen' : p.name + '’s screen') : mine ? 'You' : p.name, tile.flag);
+  if (kind === 'user') {
+    tile.el = h('div', attrs, avatarEl(p, 64), label);
+    return tile;
+  }
+
+  const video = h('video', { autoplay: true, playsinline: true, muted: true });
+  video.muted = true;
+  tile.video = video;
+  tile.status = h('div', { class: 'stream-status' }, kind === 'screen' ? 'Connecting to stream…' : 'Connecting…');
+  let controls = null;
+  if (kind === 'screen' && !mine) {
+    const out = settings.get().outputDevice;
+    if (out && video.setSinkId) video.setSinkId(out).catch(() => {});
+    const stop = (e) => e.stopPropagation();
+    controls = h(
+      'div',
+      { class: 'tile-controls', onclick: stop, ondblclick: stop },
+      h(
+        'label',
+        { class: 'stream-volume', title: 'Stream volume' },
+        icon('speaker'),
+        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => (video.volume = ui.volume = +e.target.value) })
+      )
+    );
+  }
+  tile.el = h('div', attrs, video, tile.status, label, controls);
+  if (!mine) {
+    // Tell them how many device pixels we show, so their encoder is no bigger
+    // than that, and pauses while we can't see it (window hidden, or another
+    // channel open).
+    let timer;
+    let last = '';
+    tile.report = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const dpr = devicePixelRatio || 1;
+        const view = { w: Math.round(video.clientWidth * dpr), h: Math.round(video.clientHeight * dpr), hidden: document.hidden || !video.isConnected };
+        if (!view.hidden && !(view.w && view.h)) return;
+        const sig = JSON.stringify(view);
+        if (sig === last || ui.tiles.get(key) !== tile) return;
+        last = sig;
+        DMCALL.voice?.view(who, kind, view);
+      }, 300);
+    };
+    tile.ro = new ResizeObserver(tile.report);
+    tile.ro.observe(video);
+  }
+  return tile;
+}
+
+function dropDmCallTile(key) {
+  const tile = dmCallUi.tiles.get(key);
+  if (!tile) return;
+  dmCallUi.tiles.delete(key);
+  if (tile.video) tile.video.srcObject = null;
+  tile.ro?.disconnect();
+  tile.el.remove();
+}
+
+document.addEventListener('visibilitychange', () => {
+  for (const t of dmCallUi.tiles.values()) t.report?.();
+});
+
+// The call clock, and who's speaking
+setInterval(() => {
+  const c = DMCALL.cur;
+  if (c?.state === 'active') for (const el of $$('.call-status')) el.textContent = dmCallStatus(c);
+}, 1000);
+setInterval(() => {
+  const v = DMCALL.voice;
+  if (!v || !dmCallUi.el?.isConnected) return;
+  const levels = v.levels();
+  if (audio.selfAnalyser) levels.set(me().id, Level(audio.selfAnalyser));
+  for (const el of $$('.tile[data-who]', dmCallUi.el)) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
+}, 90);
 
 // ---------------------------------------------------------------- toasts, modals, popovers
 
@@ -1010,6 +1354,7 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   if (!c?.connected) return;
   if (S.call === c && c.voiceChannel === channelId) return;
   if (S.call !== c) endCall(); // one call at a time: hang up the one on another server
+  if (DMCALL.cur && DMCALL.cur.state !== 'ringing') DMCALL.hangup(); // one microphone: a DM call or a voice channel, not both
   audio.ensure();
   try {
     await c.voice.join(channelId);
@@ -1079,9 +1424,11 @@ function syncVoiceState() {
   audio.setMuted(S.muted || S.deafened);
   audio.setMonitor(!S.deafened && settings.get().soundboardMonitor);
   S.voice?.setDeafened(S.deafened);
+  DMCALL.sync(S.muted, S.deafened);
   for (const c of conns()) if (c.connected) c.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
   renderUserPanel();
   syncStage();
+  renderDmCall();
 }
 
 // Speaking indicators, polled from analysers.
@@ -1519,6 +1866,7 @@ function profileSwitcher(anchor) {
 function switchProfile(id) {
   profiles.setActive(id);
   if (inDmView()) S.channelId = null; // those DMs belong to the previous profile
+  DMCALL.stop();
   DM.start(me(), servers.all());
   renderUserPanel();
   // Servers identify you by profile id, so reconnect as the new one. A call on
@@ -1665,6 +2013,7 @@ function renderMain(error) {
       dm ? h('span', { class: 'muted small dm-status' }, dmStatus(ch.with)) : null,
       dm ? h('button', { class: 'badge warn dm-conflict', hidden: !DM.contacts.get(ch.with)?.conflict, title: 'Messages from a different key are being refused', onclick: () => trustKeyPrompt(ch.with) }, 'different key') : null,
       h('div', { class: 'spacer' }),
+      dm ? h('div', { class: 'dm-call-btns' }) : null,
       canUpload && !dm ? h('button', { class: 'icon-btn', title: 'Files in this channel', onclick: () => openFileBrowser(ch.id) }, icon('folder')) : null,
       h(
         'button',
@@ -1702,6 +2051,7 @@ function renderMain(error) {
   renderMessages();
   renderReplyBar();
   renderAttachTray();
+  renderDmCall();
   ta.focus();
 }
 
@@ -1786,7 +2136,7 @@ function messageEl(m, prev) {
   return h(
     'div',
     {
-      class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : '') + (m.mailed ? ' mailed' : ''),
+      class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : '') + (m.mailed ? ' mailed' : '') + (m.note ? ' note' : ''),
       'data-id': m.id,
       title: m.mailed ? 'Waiting in their mailbox' : m.pending ? 'Not delivered yet' : null,
     },
@@ -1853,10 +2203,11 @@ function messageEl(m, prev) {
     h(
       'div',
       { class: 'msg-actions' },
-      h('button', { title: 'Add reaction', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'react', messageId: m.id }) }, icon('addReact')),
-      h('button', { title: 'Reply', onclick: () => setReply(m) }, icon('reply')),
-      mine && m.text ? h('button', { title: 'Edit', onclick: () => editMessage(m) }, icon('edit')) : null,
-      mine
+      // A note (e.g. "Missed call") exists only on this device: nothing to react to, reply to or edit
+      m.note ? null : h('button', { title: 'Add reaction', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'react', messageId: m.id }) }, icon('addReact')),
+      m.note ? null : h('button', { title: 'Reply', onclick: () => setReply(m) }, icon('reply')),
+      mine && m.text && !m.note ? h('button', { title: 'Edit', onclick: () => editMessage(m) }, icon('edit')) : null,
+      mine || m.note
         ? h(
             'button',
             {
@@ -2713,7 +3064,7 @@ function openSoundboard(anchor) {
     h(
       'div',
       { class: 'muted small sb-hint' },
-      S.voiceChannel ? 'Everyone in your voice channel hears these.' : 'Join a voice channel so friends hear these. ',
+      DMCALL.voice ? 'Your friend in the call hears these.' : S.voiceChannel ? 'Everyone in your voice channel hears these.' : 'Join a voice channel so friends hear these. ',
       ' Drop audio files here • right-click a sound to edit or set a hotkey.'
     ),
     fileInput
@@ -2814,7 +3165,7 @@ function sharePopover(anchor) {
       'div',
       { class: 'menu' },
       h('button', { class: 'menu-item', onclick: () => (closePopover(), screenPicker({ switching: true })) }, 'Change source'),
-      h('button', { class: 'menu-item danger', onclick: () => (closePopover(), S.voice?.stopMedia('screen')) }, 'Stop sharing')
+      h('button', { class: 'menu-item danger', onclick: () => (closePopover(), liveVoice()?.stopMedia('screen')) }, 'Stop sharing')
     ),
     { align: 'right' }
   );
@@ -2823,15 +3174,15 @@ function sharePopover(anchor) {
 // `switching`: pick a new source for the share that's already live, without
 // ending it (viewers keep watching; see VoiceClient.replaceMedia).
 async function screenPicker({ switching = false } = {}) {
-  if (!S.voiceChannel) return;
-  if (switching && !S.voice?.local.screen) return;
+  if (!liveVoice()) return;
+  if (switching && !liveVoice().local.screen) return;
   const share = (opts) => (switching ? switchShare(opts) : startShare(opts));
   const heading = switching ? 'Change what you share' : 'Share your screen';
   if (!navigator.mediaDevices?.getDisplayMedia) return toast('Screen sharing needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000);
   let withAudio = true;
   const audioBox = (label) =>
     h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (withAudio = e.target.checked) }), label);
-  const quality = h('p', { class: 'muted small' }, `Streams up to ${SCREEN.height >= 2160 ? '4K' : SCREEN.height + 'p'} at ${SCREEN.fps} fps. Only people who click LIVE receive it.`);
+  const quality = h('p', { class: 'muted small' }, `Streams up to ${SCREEN.height >= 2160 ? '4K' : SCREEN.height + 'p'} at ${SCREEN.fps} fps.` + (DMCALL.voice ? '' : ' Only people who click LIVE receive it.'));
 
   if (!desktop) {
     const choice = (surface, ic, label, sub) =>
@@ -2943,7 +3294,7 @@ async function captureScreen({ surface, sourceId, withAudio }) {
       return fail(e2);
     }
   }
-  if (!S.voiceChannel) return stream.getTracks().forEach((t) => t.stop()), null; // left voice meanwhile
+  if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop()), null; // left voice meanwhile
   if (withAudio && !stream.getAudioTracks().length) toast('This source has no shareable audio, so you’re sharing video only.', 'info', 5000);
   return stream;
 }
@@ -2951,7 +3302,7 @@ async function captureScreen({ surface, sourceId, withAudio }) {
 async function startShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
-  S.voice.setMedia('screen', stream);
+  liveVoice().setMedia('screen', stream);
   audio.cue('join');
   renderVoicePanel();
 }
@@ -2959,12 +3310,13 @@ async function startShare(opts) {
 async function switchShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
-  await S.voice.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
+  const v = liveVoice();
+  await v.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
   // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
-  const own = S.stage?.tiles.get('screen:' + S.call?.sid);
+  const own = v === DMCALL.voice ? dmCallUi.tiles.get('screen:' + me().id) : S.stage?.tiles.get('screen:' + S.call?.sid);
   if (own?.video) {
     own.video.srcObject = null;
-    own.video.srcObject = S.voice.local.screen;
+    own.video.srcObject = v.local.screen;
     own.video.play().catch(() => {});
   }
   renderVoicePanel();
@@ -2974,8 +3326,8 @@ async function switchShare(opts) {
 // ---------------------------------------------------------------- camera
 
 async function toggleCamera() {
-  if (!S.voiceChannel) return;
-  if (S.voice.local.camera) return S.voice.stopMedia('camera');
+  if (!liveVoice()) return;
+  if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
   if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000);
   const dev = settings.get().videoDevice;
   const cam = MEDIA.camera;
@@ -2993,8 +3345,8 @@ async function toggleCamera() {
   } catch (e) {
     return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000);
   }
-  if (!S.voiceChannel) return stream.getTracks().forEach((t) => t.stop());
-  S.voice.setMedia('camera', stream);
+  if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
+  liveVoice().setMedia('camera', stream);
   renderVoicePanel();
 }
 
@@ -3005,8 +3357,8 @@ async function cameraPopover(anchor) {
   const pick = async (id) => {
     closePopover();
     settings.set({ videoDevice: id });
-    if (S.voice?.local.camera) {
-      S.voice.stopMedia('camera', true);
+    if (liveVoice()?.local.camera) {
+      liveVoice().stopMedia('camera', true);
       await toggleCamera();
     }
   };
@@ -3323,8 +3675,7 @@ function syncStage() {
 
 // Grid mode: pick the column count that makes 16:9 tiles as big as possible
 // in the space available, like Discord's call grid.
-function layoutStage() {
-  const st = S.stage;
+function layoutStage(st = S.stage) {
   if (!st) return;
   const g = st.grid;
   if (st.body.classList.contains('focused')) {
@@ -3782,13 +4133,13 @@ function settingsAppearance(body) {
 function settingsVoice(body) {
   const st = settings.get();
   const inSel = h('select', { onchange: (e) => (settings.set({ inputDevice: e.target.value }), restartMic()) }, h('option', { value: '' }, 'Default'));
-  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), S.voice?.applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
+  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), liveVoice()?.applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
   const camSel = h(
     'select',
     {
       onchange: async (e) => {
         settings.set({ videoDevice: e.target.value });
-        if (S.voice?.local.camera) (S.voice.stopMedia('camera', true), await toggleCamera());
+        if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await toggleCamera());
       },
     },
     h('option', { value: '' }, 'Default')
@@ -3805,19 +4156,19 @@ function settingsVoice(body) {
     camSel.value = st.videoDevice;
   });
   const restartMic = async () => {
-    if (!S.voiceChannel) return;
+    if (!liveVoice()) return;
     try {
       await audio.startMic();
-      S.voice.micError = null;
+      liveVoice().micError = null;
     } catch (e) {
       toast(e.message, 'error');
     }
   };
   const meter = h('div', { class: 'meter' }, h('div', { class: 'meter-fill' }));
   let testing = false;
-  const testBtn = h('button', { class: 'btn small ghost' }, S.voiceChannel ? 'Mic active' : 'Test mic');
+  const testBtn = h('button', { class: 'btn small ghost' }, liveVoice() ? 'Mic active' : 'Test mic');
   testBtn.onclick = async () => {
-    if (S.voiceChannel) return;
+    if (liveVoice()) return;
     if (testing) {
       audio.stopMic();
       testing = false;
@@ -3885,7 +4236,7 @@ function settingsVoice(body) {
   );
   return () => {
     clearInterval(iv);
-    if (testing && !S.voiceChannel) audio.stopMic();
+    if (testing && !liveVoice()) audio.stopMic();
   };
 }
 
