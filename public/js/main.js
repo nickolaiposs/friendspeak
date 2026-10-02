@@ -3,7 +3,8 @@ import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl,
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level } from './audio.js';
 import { VoiceClient, SCREEN, MEDIA } from './voice.js';
-import { DirectMessages } from './dm.js';
+import { DirectMessages, MAX_FILES } from './dm.js';
+import { identityFor } from './identity.js';
 import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
 
 applyAppearance(); // before the first render
@@ -67,6 +68,8 @@ const initials = (label) =>
     .join('');
 
 const me = () => profiles.active();
+// What servers get: the profile plus its public card for DMs (never the keys)
+const myProfile = async () => ({ ...me(), card: (await identityFor(me()).catch(() => null))?.card });
 const channelById = (id) => S.server?.channels.find((c) => c.id === id);
 const profileOf = (id, fallbackName) =>
   S.server?.profiles?.[id] || DM.contacts.get(id) || (id === me()?.id ? me() : null) || { name: fallbackName || 'unknown' };
@@ -153,6 +156,11 @@ const DM = new DirectMessages({
   deleted(peerId) {
     if ('dm:' + peerId === S.channelId) renderMessages(true);
   },
+  progress(peerId, fileId, fraction) {
+    if ('dm:' + peerId !== S.channelId) return;
+    const el = $(`.dm-file[data-file="${CSS.escape(fileId)}"] .dm-file-state`);
+    if (el) el.textContent = Math.round(fraction * 100) + '%';
+  },
   typing(peerId) {
     const cid = 'dm:' + peerId;
     if (!S.typing.has(cid)) S.typing.set(cid, new Map());
@@ -174,6 +182,40 @@ function leaveDmView() {
   if (target) return selectChannel(target.id);
   S.channelId = null;
   renderAll();
+}
+
+// Friend codes: how to message someone you share no server with (D32)
+function friendDialog() {
+  if (!DM.identity) return toast('Still starting up, try again in a moment');
+  const code = DM.myCode();
+  const mine = h('textarea', { class: 'friend-code', readonly: true, rows: 4, onclick: () => mine.select() });
+  mine.value = code;
+  const theirs = h('textarea', { class: 'friend-code', rows: 4, placeholder: 'fs1.…' });
+  const add = async (close) => {
+    const res = await DM.addFriend(theirs.value);
+    if (res.error) return toast(res.error, 'error');
+    close();
+    selectChannel('dm:' + res.id);
+  };
+  modal(
+    'Add a friend',
+    h(
+      'div',
+      {},
+      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below. It holds your public key and the addresses of your saved servers, which pass messages along without being able to read them.'),
+      h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
+      h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
+      h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
+      DM.relays().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers, so a friend can only reach you through one of theirs, and only while you’re both online.')
+    ),
+    { actions: [(c) => h('button', { class: 'btn', onclick: () => add(c) }, 'Add friend')] }
+  );
+}
+
+async function trustKeyPrompt(peerId) {
+  const name = profileOf(peerId).name;
+  const text = `Someone using ${name}’s profile is showing a different key than the one saved on this device, so their messages are being refused. That happens when ${name} lost their profile and made it again, and also when someone is pretending to be them. Ask ${name} before you trust it.`;
+  if (await confirmModal('Different key', text, 'Trust the new key')) DM.trustNewKey(peerId);
 }
 
 async function deleteConversation(peerId) {
@@ -543,7 +585,7 @@ function welcome() {
 function applyProfileChange() {
   renderUserPanel();
   DM.updateProfile(me());
-  for (const c of conns()) if (c.connected) c.socket.emit('profile:update', me());
+  myProfile().then((p) => conns().forEach((c) => c.connected && c.socket.emit('profile:update', p)));
 }
 
 // ---------------------------------------------------------------- server rail
@@ -565,7 +607,10 @@ function renderRail() {
   rail.replaceChildren(
     h('div', { class: 'rail-logo', title: 'friendspeak' }, 'fs'),
     h('div', { class: 'rail-sep' }),
-    group('railDmsHidden', 'DMs', railDmsHidden, 'direct messages. Start one from anyone’s name in a server’s member list.', DM.unreadTotal()),
+    group('railDmsHidden', 'DMs', railDmsHidden, 'direct messages. Start one from anyone’s name in a server’s member list, or with a friend code.', DM.unreadTotal()),
+    ...(railDmsHidden
+      ? []
+      : [h('button', { class: 'rail-add rail-add-dm', title: 'Add a friend with a friend code', onclick: friendDialog }, icon('plus'))]),
     ...(railDmsHidden
       ? []
       : contacts.map((c) =>
@@ -731,7 +776,7 @@ function openSocket(entry, rejoinVoice = null) {
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
 
   socket.on('connect', async () => {
-    const res = await socket.emitWithAck('hello', { profile: me(), password: entry.password || '' });
+    const res = await socket.emitWithAck('hello', { profile: await myProfile(), password: entry.password || '' });
     if (res.error) {
       toast(res.error, 'error');
       if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
@@ -1166,7 +1211,7 @@ function dmSidebar() {
   return h(
     'div',
     {},
-    h('div', { class: 'cat' }, h('span', {}, 'Direct messages')),
+    h('div', { class: 'cat' }, h('span', {}, 'Direct messages'), h('button', { class: 'cat-add', title: 'Add a friend with a friend code', onclick: friendDialog }, icon('plus'))),
     list.map((c) =>
       h(
         'div',
@@ -1181,7 +1226,7 @@ function dmSidebar() {
         c.unread ? h('span', { class: 'count' }, c.unread) : null
       )
     ),
-    h('p', { class: 'muted small dm-hint' }, 'Messages go straight to your friend’s device, not through a server. Start one from anyone’s name in a server’s member list.')
+    h('p', { class: 'muted small dm-hint' }, 'Messages are encrypted between your two devices. No server can read them. Start one from anyone’s name in a server’s member list, or add a friend with a friend code.')
   );
 }
 
@@ -1582,7 +1627,8 @@ function renderMain(error) {
   const ch = chatById(S.channelId);
   if (!ch) return main.replaceChildren(h('div', { class: 'home' }, h('p', { class: 'muted' }, 'No channel selected')));
   const dm = ch.type === 'dm';
-  const canUpload = !!S.server?.storage && !dm; // files live in channels (D24); DMs carry text only
+  // Files live in channels (D24). DMs carry images, sent straight to the friend's device.
+  const canUpload = dm || !!S.server?.storage;
 
   const ta = h('textarea', {
     id: 'composer-input',
@@ -1595,18 +1641,18 @@ function renderMain(error) {
       if (files.length && canUpload) (e.preventDefault(), addAttachments(files));
     },
   });
-  const fileIn = h('input', { type: 'file', multiple: true, hidden: true, onchange: () => (addAttachments([...fileIn.files]), (fileIn.value = '')) });
+  const fileIn = h('input', { type: 'file', multiple: true, hidden: true, accept: dm ? 'image/png,image/jpeg,image/gif,image/webp' : null, onchange: () => (addAttachments([...fileIn.files]), (fileIn.value = '')) });
   // Drop files anywhere on the chat
   const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
   main.ondragover = (e) => {
-    if (!hasFiles(e) || !canUpload || !channelById(S.channelId)) return;
+    if (!hasFiles(e) || !canUpload || !chatById(S.channelId)) return;
     e.preventDefault();
     main.classList.add('dropping');
   };
   main.ondragleave = (e) => !main.contains(e.relatedTarget) && main.classList.remove('dropping');
   main.ondrop = (e) => {
     main.classList.remove('dropping');
-    if (!hasFiles(e) || !canUpload || !channelById(S.channelId)) return;
+    if (!hasFiles(e) || !canUpload || !chatById(S.channelId)) return;
     e.preventDefault();
     addAttachments([...e.dataTransfer.files]);
   };
@@ -1617,8 +1663,9 @@ function renderMain(error) {
       ...chatTitle(ch),
       !S.connected && !dm ? h('span', { class: 'badge warn' }, 'reconnecting…') : null,
       dm ? h('span', { class: 'muted small dm-status' }, dmStatus(ch.with)) : null,
+      dm ? h('button', { class: 'badge warn dm-conflict', hidden: !DM.contacts.get(ch.with)?.conflict, title: 'Messages from a different key are being refused', onclick: () => trustKeyPrompt(ch.with) }, 'different key') : null,
       h('div', { class: 'spacer' }),
-      canUpload ? h('button', { class: 'icon-btn', title: 'Files in this channel', onclick: () => openFileBrowser(ch.id) }, icon('folder')) : null,
+      canUpload && !dm ? h('button', { class: 'icon-btn', title: 'Files in this channel', onclick: () => openFileBrowser(ch.id) }, icon('folder')) : null,
       h(
         'button',
         {
@@ -1643,7 +1690,7 @@ function renderMain(error) {
       h(
         'div',
         { class: 'composer', ondragover: (e) => e.preventDefault() },
-        canUpload ? h('button', { class: 'icon-btn attach-btn', title: 'Upload files', onclick: () => fileIn.click() }, icon('clip')) : null,
+        canUpload ? h('button', { class: 'icon-btn attach-btn', title: dm ? 'Send images' : 'Upload files', onclick: () => fileIn.click() }, icon('clip')) : null,
         fileIn,
         ta,
         h('button', { class: 'icon-btn gif-btn', title: 'GIFs', onclick: (e) => openGifPicker(e.currentTarget) }, 'GIF'),
@@ -1660,7 +1707,13 @@ function renderMain(error) {
 
 // Whether a DM can be delivered right now
 const dmStatus = (peerId) =>
-  DM.connected(peerId) ? 'connected' : DM.online(peerId) ? 'connecting…' : 'offline · messages are delivered when you’re both online';
+  DM.connected(peerId)
+    ? 'connected'
+    : DM.online(peerId)
+      ? 'connecting…'
+      : DM.canMail(peerId)
+        ? 'offline · messages wait for them in their mailbox'
+        : 'offline · messages are delivered when you’re both online';
 
 // Header icon + title: # and the channel name, or the other person in a DM
 function chatTitle(ch) {
@@ -1681,6 +1734,8 @@ function refreshChatTitle() {
   head.prepend(...chatTitle(ch));
   const status = head.querySelector('.dm-status');
   if (status && ch.type === 'dm') status.textContent = dmStatus(ch.with);
+  const conflict = head.querySelector('.dm-conflict');
+  if (conflict && ch.type === 'dm') conflict.hidden = !DM.contacts.get(ch.with)?.conflict;
   const ta = $('#composer-input');
   if (ta) ta.placeholder = ch.type === 'dm' ? `Message @${ch.name}` : `Message #${ch.name}`;
 }
@@ -1730,7 +1785,11 @@ function messageEl(m, prev) {
   const reactions = Object.entries(m.reactions || {});
   return h(
     'div',
-    { class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : ''), 'data-id': m.id, title: m.pending ? 'Not delivered yet' : null },
+    {
+      class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : '') + (m.mailed ? ' mailed' : ''),
+      'data-id': m.id,
+      title: m.mailed ? 'Waiting in their mailbox' : m.pending ? 'Not delivered yet' : null,
+    },
     m.replyTo
       ? h(
           'div',
@@ -1759,7 +1818,7 @@ function messageEl(m, prev) {
               h('span', { class: 'msg-time' }, fmtTime(m.ts))
             ),
         m.text ? h('div', { class: 'msg-text' + (jumbo ? ' jumbo' : ''), html: m.edited ? html.replace(/(<\/p>)?$/, (end) => ' <span class="edited">(edited)</span>' + end) : html }) : null,
-        m.files?.length ? h('div', { class: 'attachments' }, m.files.map(attachmentEl)) : null,
+        m.files?.length ? h('div', { class: 'attachments' }, m.files.map(m.thread ? (f) => dmAttachmentEl(m, f) : attachmentEl)) : null,
         embeds.length ? h('div', { class: 'embeds' }, embeds.map(embedEl)) : null,
         m.gif
           ? h(
@@ -1833,7 +1892,10 @@ function renderMessages(keepScroll = false) {
         h(
           'p',
           { class: 'muted' },
-          `This is the beginning of your direct messages with ${p.name}. They go straight between your two devices over an encrypted connection and are stored only there; servers you share just help you find each other. There are no accounts, so anyone who copied ${p.name}’s profile could pretend to be them.`
+          `This is the beginning of your direct messages with ${p.name}. They are encrypted so that only your two devices can read them, and stored only there. Servers you both use help you find each other and hold messages, still encrypted, while one of you is away. ` +
+            (DM.contacts.get(ch.with)?.card
+              ? `This device remembers ${p.name}’s key, so someone else using their profile is refused.`
+              : `${p.name}’s key isn’t known yet. Until they connect with a current friendspeak, anyone who copied their profile could pretend to be them, and images can’t be sent.`)
         )
       )
     );
@@ -1972,8 +2034,19 @@ async function sendMessage(text, gif) {
   text = (text || '').trim();
   const cid = S.channelId;
   if (isDm(cid)) {
-    if (!text && !gif) return;
-    await DM.sendMessage(peerOf(cid), { text, gif, replyTo: S.replyTo?.id });
+    const images = gif ? [] : S.attachments.get(cid) || [];
+    if (!text && !gif && !images.length) return;
+    S.attachments.delete(cid);
+    renderAttachTray();
+    try {
+      await DM.sendMessage(peerOf(cid), { text, gif, replyTo: S.replyTo?.id, files: images.map((a) => a.file) });
+    } catch (err) {
+      S.attachments.set(cid, images); // an image that can't be read: give everything back
+      renderAttachTray();
+      toast('Couldn’t read one of the images', 'error');
+      return false;
+    }
+    for (const a of images) a.preview && URL.revokeObjectURL(a.preview);
     S.replyTo = null;
     lastTyping = 0;
     return renderReplyBar();
@@ -2043,6 +2116,7 @@ const fileEmoji = (type = '') =>
   /^image\//.test(type) ? '🖼️' : /^video\//.test(type) ? '🎬' : /^audio\//.test(type) ? '🎵' : /zip|compressed|tar|rar|7z/.test(type) ? '🗜️' : /pdf/.test(type) ? '📕' : /^text\//.test(type) ? '📝' : '📄';
 
 function downloadFile(f) {
+  if (f.blobUrl) return h('a', { href: f.blobUrl, download: f.name }).click(); // a DM image, already on this device
   const url = fileUrl(f, true);
   if (desktop?.download) return desktop.download(url);
   h('a', { href: url, download: f.name }).click(); // the server answers with Content-Disposition: attachment
@@ -2057,6 +2131,7 @@ async function deleteFilesPrompt(files, skipConfirm) {
 
 function addAttachments(files) {
   const cid = S.channelId;
+  if (isDm(cid)) return addDmImages(files);
   if (!S.connected || !channelById(cid) || !files.length) return;
   if (S.uploading.has(cid)) return toast('Wait for the current upload to finish', 'error');
   if (!S.attachments.has(cid)) S.attachments.set(cid, []);
@@ -2076,13 +2151,32 @@ function addAttachments(files) {
   $('#composer-input')?.focus();
 }
 
+// DMs carry images only, a few per message (D32)
+function addDmImages(files) {
+  const cid = S.channelId;
+  if (!DM.canSendFiles(peerOf(cid))) return toast(`${profileOf(peerOf(cid)).name} needs to connect with a current friendspeak before you can send them images`, 'error');
+  if (!S.attachments.has(cid)) S.attachments.set(cid, []);
+  const list = S.attachments.get(cid);
+  for (const file of files) {
+    const error = list.length >= MAX_FILES ? `Up to ${MAX_FILES} images per message` : DM.fileError(file);
+    if (error) {
+      toast(error, 'error');
+      if (list.length >= MAX_FILES) break;
+      continue;
+    }
+    list.push({ key: uid(), file, preview: URL.createObjectURL(file), progress: null, xhr: null });
+  }
+  renderAttachTray();
+  $('#composer-input')?.focus();
+}
+
 function renderAttachTray() {
   const tray = $('#attach-tray');
   if (!tray) return;
   const cid = S.channelId;
   const list = S.attachments.get(cid) || [];
   tray.hidden = !list.length;
-  const st = S.server?.storage;
+  const st = isDm(cid) ? null : S.server?.storage;
   const total = list.reduce((n, a) => n + a.file.size, 0);
   tray.replaceChildren(
     ...list.map((a) => {
@@ -2157,6 +2251,24 @@ function attachmentEl(f) {
   if (kind === 'video') return h('div', { class: 'attachment media' }, h('video', { src: url, controls: true, preload: 'metadata' }), del);
   if (kind === 'audio') return h('div', { class: 'attachment file' }, card(), h('audio', { src: url, controls: true, preload: 'metadata' }), del);
   return h('div', { class: 'attachment file' }, card(), del);
+}
+
+// An image in a DM: its thumbnail came with the message, and the image itself
+// is fetched from the friend's device when you're both online
+function dmAttachmentEl(m, f) {
+  const peerId = peerOf(S.channelId);
+  const scale = Math.min(1, 520 / f.w, 350 / f.h);
+  const img = h('img', { src: f.thumb || null, alt: f.name, style: { aspectRatio: `${f.w} / ${f.h}`, width: Math.max(24, Math.round(f.w * scale)) + 'px', height: 'auto' } });
+  const state = h('span', { class: 'dm-file-state' }, f.gone ? 'no longer available' : '');
+  const el = h('div', { class: 'attachment media dm-file loading', 'data-file': f.id }, img, state);
+  DM.fileUrl(peerId, f.id).then((url) => {
+    if (!url) return;
+    img.src = url;
+    img.onclick = () => lightbox(url, { ...f, blobUrl: url });
+    el.classList.remove('loading');
+    state.remove();
+  });
+  return el;
 }
 
 function embedEl(e) {
@@ -3577,7 +3689,8 @@ function settingsProfile(body) {
       h('button', { class: 'btn small', onclick: () => (switchProfile(profiles.create({ name: 'new friend' }).id), settingsProfile(body.replaceChildren() || body)) }, 'New profile'),
       h('button', { class: 'btn small ghost', onclick: () => importInput.click() }, 'Import…'),
       importInput
-    )
+    ),
+    h('p', { class: 'muted small' }, 'An exported profile includes its private keys for direct messages. Keep the file to yourself: whoever has it can read and send DMs as you.')
   );
 }
 
