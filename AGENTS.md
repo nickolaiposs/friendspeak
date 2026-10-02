@@ -12,7 +12,7 @@ This is the guide for engineers and AI agents changing this repo. Read it before
 
 friendspeak is a self-hosted Discord/TeamSpeak-style app for small friend groups. It has text channels, WebRTC voice, emojis, GIFs, a soundboard, and an optional virtual penguin world based on the open-source Yukon client and server (game assets not included). **There are no accounts anywhere.** Identity is a profile stored in the desktop app. The app runs as:
 
-1. **A server** (`server.js`): Express + Socket.IO, plus the Yukon game worlds, all on **one port**. It serves no chat UI (D26), only the game client that the app shows in an iframe.
+1. **A server** (`server.js`): Express + Socket.IO, plus the Yukon game worlds, all on **one port**. It serves no chat UI (D26), only the game client that the app shows in an iframe and the admin dashboard at `/admin` (D34).
 2. **The client** (`public/`): vanilla JS ES modules with no build step. It ships only inside the desktop app.
 3. **A desktop app** (`desktop/`): Electron. It loads the client from a private `friendspeak://` origin. It is a client only and never hosts (D23).
 
@@ -37,6 +37,9 @@ There is **no automated test suite**. See "Verifying changes" below.
 ```
 server.js              friendspeak server; exports startServer(opts) (used by the CLI and Docker)
 updater.js             server self-update: GitHub Releases check, cron maintenance window, Watchtower trigger (D29)
+admin.js               admin dashboard backend: local rule, admin keys, sessions, rate limit, audit log, JSON API + event stream (D34)
+logbuffer.js           ring buffer of the server's console output, for the dashboard's log view
+admin-ui/              the admin dashboard, served at /admin (plain ES modules, no build step); one module per view in js/views/
 public/                the client UI, bundled into the desktop app (no bundler; files load as-is)
   js/main.js           UI, app state (object S), socket handlers, settings, game view
   js/voice.js          WebRTC mesh (VoiceClient)
@@ -47,7 +50,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
   js/gogh.js           data: 50 terminal color schemes from Gogh
-  js/util.js           h() DOM helper, markdown renderer, avatars, address parsing
+  js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)
 game/index.js          glue: serves the game, starts Yukon worlds, creates penguins for profiles
@@ -57,7 +60,7 @@ game/assets-pack/      (gitignored) Yukon-compatible asset pack; ~3.4 GB
 game/assets-extra/     (gitignored) art for the extra rooms
 scripts/build-game.js  builds both vendored projects
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax, server boot, game build); release.yml (push to prod → release, D29)
+.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, server boot, game build); release.yml (push to prod → release, D29)
 data/                  (gitignored) server state when run via `npm start` (state.json, mail.json, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
@@ -85,6 +88,11 @@ Dockerfile, docker-compose.yaml, docker/   production server image and stack (D2
 ### Add a setting
 Add a default to `DEFAULT_SETTINGS` in `public/js/store.js`, then UI in the matching `settings*` function in `main.js`. Server-side options go in `startServer(opts)` plus the CLI env mapping at the bottom of `server.js` (and `docker-compose.yaml` / `.env.example` if Docker users need it).
 
+### Add a dashboard view or admin route
+1. `admin.js` → add the route on `api` below the session check (everything after the `// Everything below needs a local request or a session` middleware is already gated). Validate input (`cleanName()`, `str()`, `clampInt()`), call `audit(req.admin.actor, peerOf(req), 'thing.did', detail)` for every state change, and `notify(topic)` so open dashboards refetch. State-changing routes get the CSRF checks for free: they must be `POST`/`PUT`/`PATCH`/`DELETE` with a JSON body.
+2. `admin-ui/js/views/<name>.js` → export `{ id, title, mount(root, ctx) }` and register it in the `views` array in `admin-ui/js/admin.js`. Build DOM with `h()`. The CSP forbids inline `<script>`, `<style>` and `style="…"` attributes in HTML, so put styles in `admin.css` (setting `el.style` from JS is fine). Don't add a second `util.js` there.
+3. Document the route in `docs/ARCHITECTURE.md` → Admin dashboard, and the decision in DECISIONS.md if it changes who can do what.
+
 ### Change desktop behaviour
 Keep the renderer API small. Add IPC in `desktop/main.js` (`ipcMain.handle('desktop:…')`), expose it in `desktop/preload.js`, and use it in `main.js` via `desktop`.
 
@@ -98,6 +106,7 @@ There are no unit tests. Verification so far has been scripted with **puppeteer-
 - **Server protocol:** a Node script with `socket.io-client` that runs `hello` → exercises events → asserts broadcasts.
 - **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll.
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
+- **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
 - **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`.
 
 Always syntax-check after edits, and rebuild the game after touching `game/*/src`.
@@ -120,7 +129,7 @@ Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 
 
 ## Gotchas (learned the hard way)
 
-- **The server has no UI.** `http://localhost:3000` only shows a plain-text notice. Run the client with `npm run desktop` (D26).
+- **The server has no chat UI.** `http://localhost:3000` only shows a plain-text notice. Run the client with `npm run desktop` (D26). The one web page is the admin dashboard at `/admin` (D34); it needs no key from localhost unless `ADMIN_LOCAL=off`.
 - **`localStorage` is per-origin.** The desktop app uses a fixed custom origin (`friendspeak://app`) so profiles don't vanish when ports change (D10).
 - `replaceChildren(null)` inserts the text "null". Filter falsy children first (`h()` already does).
 - **Yukon loads some files from the site root** (`/assets/media/clothing/...`), not relative to `/game/`. `game/index.js` mounts the asset dirs at both `/game/assets` and `/assets`.

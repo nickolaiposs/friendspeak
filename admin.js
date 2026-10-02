@@ -1,0 +1,458 @@
+// The admin dashboard (D34): a web page at /admin, served by the friendspeak
+// server itself, plus the JSON API and the event stream behind it.
+//
+// Access: a request from this very machine (loopback peer, localhost Host, no
+// proxy headers) needs no key. Everything else needs an admin key and TLS.
+// Keys are 32 random bytes, stored only as SHA-256 hashes in DATA_DIR/admin.json.
+// Sessions are opaque tokens held in memory. There are no accounts (D3): this
+// is the one place that is gated, because it shows IPs and logs.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const COOKIE = 'fs_admin';
+const SESSION_MAX = 12 * 3600e3; // absolute
+const SESSION_IDLE = 3600e3; // sliding
+const AUDIT_MAX = 5 * 1024 * 1024;
+const MAX_KEYS = 50;
+const MAX_TRACKED_IPS = 10000;
+const FREE_FAILURES = 5;
+
+const sha256 = (v) => crypto.createHash('sha256').update(v).digest();
+const sha256hex = (v) => sha256(v).toString('hex');
+const isLoopbackAddr = (a) => a === '::1' || a.startsWith('127.');
+const peerOf = (req) => String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+const hostnameOf = (host) => {
+  host = String(host || '').toLowerCase();
+  return host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
+};
+const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+const cleanName = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 40) : '');
+const clampInt = (v, def, max) => {
+  const n = Math.floor(Number(v));
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : def;
+};
+
+const HEADERS = {
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-store',
+};
+
+function createAdmin(ctx) {
+  const { app, express, dataDir, logs, options = {} } = ctx;
+  const KEYS_FILE = path.join(dataDir, 'admin.json');
+  const AUDIT_FILE = path.join(dataDir, 'admin-audit.log');
+  const UI_DIR = path.join(__dirname, 'admin-ui');
+  const localAllowed = options.local !== false;
+
+  // ---------- keys ----------
+
+  const newSecret = () => 'fsa_' + crypto.randomBytes(32).toString('base64url');
+  let stored = []; // { id, name, hash, created, lastUsed, bootstrap? }
+  try {
+    const j = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
+    stored = (Array.isArray(j.keys) ? j.keys : []).filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string' && /^[0-9a-f]{64}$/.test(k.hash)).map((k) => ({ id: k.id, name: cleanName(k.name) || 'key', hash: k.hash, created: Number(k.created) || Date.now(), lastUsed: Number(k.lastUsed) || null, bootstrap: !!k.bootstrap }));
+  } catch {}
+  function saveKeys() {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const tmp = KEYS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ keys: stored }, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, KEYS_FILE);
+  }
+
+  let envKey = null;
+  if (options.key) {
+    if (String(options.key).length >= 16) envKey = { id: 'env', name: 'ADMIN_KEY (env)', hash: sha256hex(String(options.key)), created: ctx.startedAt, lastUsed: null, env: true };
+    else console.error('[admin] ADMIN_KEY is shorter than 16 characters and is ignored');
+  }
+  if (!envKey && !stored.length) {
+    const secret = newSecret();
+    stored.push({ id: crypto.randomBytes(8).toString('hex'), name: 'First-boot key', hash: sha256hex(secret), created: Date.now(), lastUsed: null, bootstrap: true });
+    saveKeys();
+    // stdout, not console: the key must never enter the log buffer the dashboard shows
+    process.stdout.write(
+      `\n  Admin key (generated on first boot):\n\n    ${secret}\n\n` +
+        '  This is the only time it is shown. Use it to sign in to the admin dashboard\n' +
+        '  at /admin on this server (set ADMIN_KEY to choose your own instead).\n\n'
+    );
+  }
+
+  const isActive = (k) => !(k.bootstrap && envKey);
+  const allKeys = () => (envKey ? [envKey, ...stored] : stored);
+  const findKey = (kid) => allKeys().find((k) => k.id === kid);
+  const keyView = (k, current) => ({ id: k.id, name: k.name, created: k.created, lastUsed: k.lastUsed || null, env: !!k.env, bootstrap: !!k.bootstrap, active: isActive(k), current: k.id === current });
+
+  // Compare the submitted key against every active key, without stopping at the first match
+  function matchKey(secret) {
+    const given = sha256(secret);
+    let found = null;
+    for (const k of allKeys()) {
+      const ok = crypto.timingSafeEqual(given, Buffer.from(k.hash, 'hex')) && isActive(k);
+      if (ok && !found) found = k;
+    }
+    return found;
+  }
+
+  // ---------- audit ----------
+
+  function audit(actor, ip, action, detail = '') {
+    try {
+      try {
+        if (fs.statSync(AUDIT_FILE).size > AUDIT_MAX) fs.renameSync(AUDIT_FILE, AUDIT_FILE + '.1');
+      } catch {}
+      fs.appendFileSync(AUDIT_FILE, JSON.stringify({ ts: Date.now(), actor, ip, action, detail: String(detail).slice(0, 200) }) + '\n', { mode: 0o600 });
+    } catch (err) {
+      console.error('[admin] could not write the audit log:', err.message);
+    }
+  }
+  function readAudit(before, limit) {
+    const out = [];
+    for (const file of [AUDIT_FILE, AUDIT_FILE + '.1']) {
+      let text;
+      try {
+        text = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      const rows = text.split('\n');
+      for (let i = rows.length - 1; i >= 0 && out.length <= limit; i--) {
+        if (!rows[i]) continue;
+        try {
+          const e = JSON.parse(rows[i]);
+          if (e.ts < before) out.push({ ts: e.ts, actor: str(e.actor, 80), ip: str(e.ip, 64), action: str(e.action, 40), detail: str(e.detail, 200) });
+        } catch {}
+      }
+      if (out.length > limit) break;
+    }
+    return { entries: out.slice(0, limit), more: out.length > limit };
+  }
+
+  // ---------- request classification ----------
+
+  const hasProxyHeaders = (req) => ['x-forwarded-for', 'forwarded', 'x-real-ip'].some((h) => req.headers[h] !== undefined);
+  const hostIsLocal = (req) => ['localhost', '127.0.0.1', '[::1]'].includes(hostnameOf(req.headers.host));
+  const isTls = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+  function classify(req) {
+    const ip = peerOf(req);
+    const direct = isLoopbackAddr(ip) && hostIsLocal(req);
+    const local = localAllowed && direct && !hasProxyHeaders(req);
+    const tls = isTls(req);
+    // A key over plain HTTP is only fine when it never leaves this machine
+    return { ip, local, tls, canLogin: tls || (direct && !hasProxyHeaders(req)) };
+  }
+
+  // ---------- sessions ----------
+
+  const sessions = new Map(); // sha256(token) hex -> { keyId, actor, created, seen }
+  const parseCookies = (header) => {
+    const out = {};
+    for (const part of String(header || '').split(';')) {
+      const i = part.indexOf('=');
+      if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+    }
+    return out;
+  };
+  const sessionExpired = (s, now) => now - s.created > SESSION_MAX || now - s.seen > SESSION_IDLE || !findKey(s.keyId) || !isActive(findKey(s.keyId));
+  function sessionOf(req, touch) {
+    const token = parseCookies(req.headers.cookie)[COOKIE];
+    if (!token) return null;
+    const sk = sha256hex(token);
+    const s = sessions.get(sk);
+    if (!s) return null;
+    if (sessionExpired(s, Date.now())) return sessions.delete(sk), null;
+    if (touch) s.seen = Date.now();
+    s.sk = sk;
+    return s;
+  }
+  const pruneTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [sk, s] of sessions) if (sessionExpired(s, now)) sessions.delete(sk);
+    pruneLimits(now);
+  }, 60e3);
+  pruneTimer.unref();
+
+  // The identity behind a request: { local, actor, keyId, sk } or null
+  function who(req, touch = true) {
+    if (classify(req).local) return { local: true, actor: 'local', keyId: null, sk: null };
+    const s = sessionOf(req, touch);
+    return s ? { local: false, actor: s.actor, keyId: s.keyId, sk: s.sk } : null;
+  }
+
+  // ---------- rate limit ----------
+
+  const failures = new Map(); // ip -> { n, until, last }
+  let recent = []; // timestamps of failed logins, any IP
+  let globalUntil = 0;
+  function pruneLimits(now) {
+    for (const [ip, f] of failures) if (now - f.last > 24 * 3600e3) failures.delete(ip);
+    recent = recent.filter((t) => now - t < 600e3);
+  }
+  function lockedFor(ip, now) {
+    // The global lock only applies to an IP that has already failed. Otherwise
+    // anyone could keep it on forever and block the real admin (a clean IP is
+    // still held back by nothing but the per-IP rules).
+    return Math.max(0, failures.has(ip) ? globalUntil - now : 0, (failures.get(ip)?.until || 0) - now);
+  }
+  function noteFailure(ip, now) {
+    let f = failures.get(ip);
+    if (!f) {
+      if (failures.size >= MAX_TRACKED_IPS) {
+        pruneLimits(now);
+        if (failures.size >= MAX_TRACKED_IPS) failures.delete(failures.keys().next().value);
+      }
+      f = { n: 0, until: 0, last: now };
+      failures.set(ip, f);
+    }
+    f.n++;
+    f.last = now;
+    // The 5th failure in a row starts the first lockout: 30 s, doubling up to 1 h
+    if (f.n >= FREE_FAILURES) f.until = now + Math.min(30e3 * 2 ** (f.n - FREE_FAILURES), 3600e3);
+    recent.push(now);
+    recent = recent.filter((t) => now - t < 600e3);
+    if (recent.length > 100) globalUntil = now + 60e3;
+  }
+
+  // ---------- event stream ----------
+
+  const streams = new Set(); // { res, sk }
+  function send(st, event, data, eventId) {
+    try {
+      st.res.write((eventId ? `id: ${eventId}\n` : '') + `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    } catch {}
+  }
+  const endStream = (st, reason) => {
+    send(st, 'bye', { reason });
+    streams.delete(st);
+    try {
+      st.res.end();
+    } catch {}
+  };
+  const unsubscribeLogs = logs.on((line) => {
+    for (const st of streams) send(st, 'log', line, line.id);
+  });
+  const pending = new Map(); // topic -> timer, so a burst of changes is one event
+  function notify(topic) {
+    if (pending.has(topic) || !streams.size) return;
+    const t = setTimeout(() => {
+      pending.delete(topic);
+      for (const st of streams) send(st, 'change', { topic });
+    }, 250);
+    t.unref();
+    pending.set(topic, t);
+  }
+  const pingTimer = setInterval(() => {
+    const now = Date.now();
+    for (const st of [...streams]) {
+      const s = st.sk ? sessions.get(st.sk) : null;
+      if (st.sk && (!s || sessionExpired(s, now))) {
+        if (s) sessions.delete(st.sk);
+        endStream(st, 'expired');
+      } else {
+        if (s) s.seen = now; // an open stream counts as activity; the 12 h limit still applies
+        send(st, 'ping', {});
+      }
+    }
+  }, 25e3);
+  pingTimer.unref();
+
+  function revokeSessions(keyId) {
+    const gone = new Set();
+    for (const [sk, s] of sessions) if (s.keyId === keyId) sessions.delete(sk), gone.add(sk);
+    for (const st of [...streams]) if (st.sk && gone.has(st.sk)) endStream(st, 'expired');
+  }
+
+  // ---------- routes ----------
+
+  app.use('/admin', (req, res, next) => {
+    res.set(HEADERS);
+    // /admin → /admin/ (relative URLs in the page need the slash)
+    if (req.path === '/' && !req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(302, '/admin/' + (req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''));
+    next();
+  });
+
+  const api = express.Router();
+  app.use('/admin/api', api);
+
+  // State-changing requests: JSON only, same origin. Applies to local requests too,
+  // so a web page open in the host's browser can't drive the dashboard.
+  api.use((req, res, next) => {
+    // A page on another origin (or another port of localhost) has no business here, even for GET
+    const site = req.headers['sec-fetch-site'];
+    if (site === 'cross-site' || site === 'same-site') return res.status(403).json({ error: 'Cross-site request refused' });
+    next();
+  });
+  api.use((req, res, next) => {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+    const fail = (error) => res.status(403).json({ error });
+    if (!/^application\/json/i.test(req.headers['content-type'] || '')) return fail('Content-Type must be application/json');
+    let originHost = null;
+    try {
+      originHost = new URL(String(req.headers.origin || '')).host;
+    } catch {}
+    if (!originHost || originHost !== req.headers.host) return fail('Cross-origin request refused. Behind a reverse proxy, make sure it passes the original Host header.');
+    const site = req.headers['sec-fetch-site'];
+    if (site !== undefined && site !== 'same-origin') return fail('Cross-origin request refused');
+    next();
+  });
+  api.use(express.json({ limit: '1mb' }));
+
+  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
+
+  api.get('/session', (req, res) => {
+    const c = classify(req);
+    const me = who(req);
+    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
+  });
+
+  api.post('/login', (req, res) => {
+    const c = classify(req);
+    if (c.local) return res.json({ ok: true, actor: 'local' });
+    if (!c.canLogin) return res.status(400).json({ error: 'Signing in needs HTTPS. Start the server with HTTPS=1 or put it behind a TLS reverse proxy.' });
+    const now = Date.now();
+    const wait = lockedFor(c.ip, now);
+    if (wait > 0) {
+      const retryAfter = Math.ceil(wait / 1000);
+      return res.set('Retry-After', String(retryAfter)).status(429).json({ error: 'Too many attempts. Try again later.', retryAfter });
+    }
+    const secret = req.body && typeof req.body.key === 'string' ? req.body.key.slice(0, 200) : '';
+    if (!secret) return res.status(400).json({ error: 'Key required' });
+    const key = matchKey(secret);
+    if (!key) {
+      noteFailure(c.ip, now);
+      audit('', c.ip, 'login.failed');
+      console.log(`[admin] failed sign-in from ${c.ip}`);
+      return res.status(401).json({ error: 'Wrong key' });
+    }
+    failures.delete(c.ip);
+    key.lastUsed = now;
+    if (!key.env) saveKeys();
+    const token = crypto.randomBytes(32).toString('base64url');
+    sessions.set(sha256hex(token), { keyId: key.id, actor: key.name, created: now, seen: now });
+    res.set('Set-Cookie', cookieHeader(token, SESSION_MAX / 1000, c.tls));
+    audit(key.name, c.ip, 'login');
+    console.log(`[admin] ${key.name} signed in from ${c.ip}`);
+    notify('keys');
+    res.json({ ok: true, actor: key.name });
+  });
+
+  // Everything below needs a local request or a session
+  api.use((req, res, next) => {
+    const me = who(req);
+    if (!me) return res.status(401).json({ error: 'Sign in required', login: true });
+    req.admin = me;
+    next();
+  });
+
+  api.post('/logout', (req, res) => {
+    const c = classify(req);
+    if (req.admin.sk) {
+      sessions.delete(req.admin.sk);
+      for (const st of [...streams]) if (st.sk === req.admin.sk) endStream(st, 'expired');
+      audit(req.admin.actor, c.ip, 'logout');
+      console.log(`[admin] ${req.admin.actor} signed out`);
+    }
+    res.set('Set-Cookie', cookieHeader('', 0, c.tls)).json({ ok: true });
+  });
+
+  api.get('/overview', (req, res) => {
+    const st = ctx.state();
+    const mem = process.memoryUsage();
+    res.json({
+      name: st.name,
+      icon: st.icon,
+      version: ctx.version,
+      startedAt: ctx.startedAt,
+      uptime: Math.round(process.uptime()),
+      node: process.version,
+      platform: `${process.platform} ${process.arch}`,
+      memory: { rss: mem.rss, heapUsed: mem.heapUsed },
+      docker: !!ctx.inDocker,
+      https: !!ctx.https,
+      fingerprint: ctx.fingerprint(),
+      password: !!ctx.passwordSet,
+      adminLocal: localAllowed,
+      counts: { online: ctx.users.size, profiles: Object.keys(st.profiles).length, bans: st.bans.length, channels: st.channels.length },
+      storage: ctx.usage(),
+      game: ctx.gameInfo(),
+      update: ctx.updater.info(),
+    });
+  });
+
+  api.get('/logs', (req, res) => {
+    const before = req.query.before !== undefined && Number.isFinite(Number(req.query.before)) ? Number(req.query.before) : undefined;
+    res.json(logs.lines({ before, limit: clampInt(req.query.limit, 500, 2000) }));
+  });
+
+  api.get('/events', (req, res) => {
+    res.set({ 'Content-Type': 'text/event-stream', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    res.write('retry: 5000\n\n');
+    const st = { res, sk: req.admin.sk };
+    // A reconnecting EventSource says where it left off: replay what it missed
+    const last = Number(req.headers['last-event-id']);
+    if (Number.isInteger(last) && last > 0) for (const line of logs.lines({ limit: 2000 }).lines) if (line.id > last) send(st, 'log', line, line.id);
+    streams.add(st);
+    res.on('close', () => streams.delete(st));
+  });
+
+  api.get('/keys', (req, res) => res.json({ keys: allKeys().map((k) => keyView(k, req.admin.keyId)) }));
+
+  api.post('/keys', (req, res) => {
+    const name = cleanName(req.body?.name);
+    if (!name) return res.status(400).json({ error: 'Name required (1 to 40 characters)' });
+    if (stored.length >= MAX_KEYS) return res.status(400).json({ error: `At most ${MAX_KEYS} keys` });
+    const secret = newSecret();
+    const key = { id: crypto.randomBytes(8).toString('hex'), name, hash: sha256hex(secret), created: Date.now(), lastUsed: null, bootstrap: false };
+    stored.push(key);
+    saveKeys();
+    audit(req.admin.actor, peerOf(req), 'key.create', name);
+    console.log(`[admin] ${req.admin.actor} created the key "${name}"`);
+    notify('keys');
+    res.json({ ok: true, key: keyView(key, req.admin.keyId), secret });
+  });
+
+  api.delete('/keys/:id', (req, res) => {
+    const k = stored.find((x) => x.id === req.params.id);
+    if (!k) return res.status(400).json({ error: req.params.id === 'env' ? 'The ADMIN_KEY key is set in the server environment; remove it there' : 'No such key' });
+    stored = stored.filter((x) => x !== k);
+    saveKeys();
+    revokeSessions(k.id);
+    audit(req.admin.actor, peerOf(req), 'key.revoke', k.name);
+    console.log(`[admin] ${req.admin.actor} revoked the key "${k.name}"`);
+    notify('keys');
+    res.json({ ok: true });
+  });
+
+  api.get('/audit', (req, res) => {
+    const before = Number.isFinite(Number(req.query.before)) && req.query.before !== undefined && req.query.before !== '' ? Number(req.query.before) : Infinity;
+    res.json(readAudit(before, clampInt(req.query.limit, 200, 1000)));
+  });
+
+  api.use((_req, res) => res.status(404).json({ error: 'No such admin API route' }));
+  api.use((err, _req, res, _next) => {
+    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.type === 'entity.too.large' ? 'Request too large' : 'Invalid request' });
+    console.error('[admin]', err);
+    if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+  });
+
+  // The dashboard's files; util.js is shared with the desktop client
+  app.get('/admin/js/util.js', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
+  app.use('/admin', express.static(UI_DIR, { index: 'index.html', redirect: false }));
+
+  return {
+    notify,
+    close() {
+      clearInterval(pruneTimer);
+      clearInterval(pingTimer);
+      for (const t of pending.values()) clearTimeout(t);
+      pending.clear();
+      unsubscribeLogs();
+      for (const st of [...streams]) endStream(st, 'closed');
+    },
+  };
+}
+
+module.exports = { createAdmin };

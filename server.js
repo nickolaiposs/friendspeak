@@ -13,10 +13,14 @@ const express = require('express');
 const { Server } = require('socket.io');
 const { startGame } = require('./game');
 const { createUpdater } = require('./updater');
+const logbuffer = require('./logbuffer');
+const { createAdmin } = require('./admin');
 
 const VERSION = require('./package.json').version;
 
 async function startServer(opts = {}) {
+  // Keep the last console lines for the admin dashboard (D34)
+  const logs = opts.captureLogs === false ? null : logbuffer.install();
   const PORT = opts.port ?? 3000;
   const HOST = opts.host;
   const USE_HTTPS = !!opts.https;
@@ -50,7 +54,15 @@ async function startServer(opts = {}) {
   // Self-update from GitHub Releases (updater.js, D29). Clients learn about a
   // scheduled update from `server:update` and show a maintenance warning.
   const ioRef = { current: null };
-  const updater = createUpdater({ ...opts.update, version: VERSION, onChange: (info) => ioRef.current?.emit('server:update', info) });
+  const adminRef = { current: null }; // the admin dashboard, created once everything it reads exists
+  const updater = createUpdater({
+    ...opts.update,
+    version: VERSION,
+    onChange: (info) => {
+      ioRef.current?.emit('server:update', info);
+      adminRef.current?.notify('update');
+    },
+  });
 
   // ---------- persistent state ----------
 
@@ -94,6 +106,7 @@ async function startServer(opts = {}) {
   function save() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(writeState, 500);
+    adminRef.current?.notify('state');
   }
   save();
 
@@ -186,7 +199,8 @@ async function startServer(opts = {}) {
   // ---------- http ----------
 
   const app = express();
-  // The server hosts no UI: the client ships only in the desktop app (D26).
+  // The server hosts no chat UI: the client ships only in the desktop app (D26).
+  // The admin dashboard at /admin is the one exception (D34).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
   app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, password: !!PASSWORD, version: VERSION }));
 
@@ -392,7 +406,10 @@ async function startServer(opts = {}) {
       destroyUpgrade: false, // the game worlds share this http server on other paths
     });
 
-    const broadcastUsers = () => io.emit('users', userList());
+    const broadcastUsers = () => {
+      io.emit('users', userList());
+      adminRef.current?.notify('users');
+    };
 
     // Disconnect every chat and DM-signaling socket that matches, telling it why
     // ('banned' or 'removed'). Clients don't auto-reconnect after this.
@@ -926,6 +943,27 @@ async function startServer(opts = {}) {
           return { available: false, reason: 'The game server failed to start: ' + err.message };
         });
   gameRef.current = game;
+  const adminOn = opts.admin?.enabled !== false;
+  const admin = adminOn
+    ? (adminRef.current = createAdmin({
+        app,
+        express,
+        dataDir: DATA_DIR,
+        version: VERSION,
+        https: USE_HTTPS,
+        fingerprint: () => fingerprint,
+        passwordSet: !!PASSWORD,
+        inDocker: !!opts.update?.inDocker,
+        startedAt: Date.now(),
+        state: () => state,
+        users,
+        usage,
+        gameInfo,
+        updater,
+        logs: logs || { lines: () => ({ lines: [], more: false }), on: () => () => {} },
+        options: { local: opts.admin?.local, key: opts.admin?.key },
+      }))
+    : null;
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(PORT, HOST, resolve);
@@ -939,6 +977,7 @@ async function startServer(opts = {}) {
     https: USE_HTTPS,
     fingerprint,
     name: state.name,
+    admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false },
     game,
     get gameEnabled() {
       return gameInfo().enabled;
@@ -954,6 +993,7 @@ async function startServer(opts = {}) {
         clearInterval(mailSweepTimer);
         if (mailTimer) writeMail();
         updater.stop();
+        admin?.close();
         writeState();
         io.close();
         server.close(() => resolve());
@@ -1002,6 +1042,7 @@ if (require.main === module) {
     maxStorage: env.MAX_STORAGE,
     dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
+    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY },
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
       repo: env.UPDATE_REPO || 'nickolaiposs/friendspeak',
@@ -1018,6 +1059,7 @@ if (require.main === module) {
     console.log(`  Local address:     ${scheme}://localhost:${s.port}  (connect with the desktop app)`);
     for (const ip of lanAddresses()) console.log(`  Friends connect:   ${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
+    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}/admin  (${s.admin.local ? 'no key needed from this machine' : 'admin key required'})`}`);
     if (env.PASSWORD) console.log('  Password protected: yes');
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');
     console.log(`  Version:           ${s.version}` + (s.update.mode === 'off' ? '' : `  (updates: ${s.update.mode === 'on' ? 'automatic, cron "' + s.update.cron + '"' : 'notify only'})`));
