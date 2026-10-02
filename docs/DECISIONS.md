@@ -107,8 +107,9 @@ Without a mic, users join **listen-only** instead of failing.
 
 ## D14: Accountless penguins via auth tokens · Active
 **Decision:**
-- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId)` table, creating the user on first use.
-  - The username is derived from the display name: 4–12 printable ASCII characters, unique, and padded with " Penguin" if too short.
+- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId, baseName)` table, creating the user on first use.
+  - The username is derived from the display name: 4–12 printable ASCII characters, unique (a number is appended if taken), and padded with " Penguin" if too short.
+  - `baseName` stores the derived name before the uniqueness suffix. When a later `game:login` derives a different one, the penguin is renamed. Comparing derived names rather than usernames keeps a penguin from flipping between `Name` and `Name2`.
   - The penguin color is the nearest classic color to the profile color.
   - The password is random and never used.
 - Each `game:login` then mints a Yukon auth token (`selector:validator`, with the validator bcrypt-hashed in `auth_tokens`) and deletes that user's older tokens.
@@ -118,7 +119,7 @@ Without a mic, users join **listen-only** instead of failing.
 - It reuses Yukon's own "remember me" login path instead of inventing an auth bypass.
 - The token is in the fragment, so it's never sent in HTTP requests or logs.
 - A penguin belongs to a profile *per server*.
-- Renaming a friendspeak profile doesn't rename the penguin.
+- Renaming a friendspeak profile renames the penguin the next time the game is launched, not in real time.
 
 ## D15: The game runs in an iframe, kept alive · Active
 **Decision:**
@@ -274,6 +275,17 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** while the repo is private, servers need `GITHUB_TOKEN` (and Watchtower `GHCR_USER`/`GHCR_TOKEN`), and installed apps can't see releases at all: in-app updates start working when the repo goes public. Releases use GitHub Actions minutes, and macOS minutes count 10× on private repos. Watchtower recreates the container from the same config, so compose changes (new env vars) still need a stack redeploy. A server and its clients can briefly run different versions, which the protocol has to tolerate (add fields; don't repurpose them).
 **Alternatives:** CI deploying over SSH on every push (no maintenance window, and CI would need credentials for every host); giving friendspeak the Docker socket (root-equivalent access for a chat server); Watchtower polling on its own schedule (no warnings, and no tie to a published release); a signed auto-updater for macOS (needs the $99/yr Apple Developer ID, so later).
 
+## D30: Themes are sets of CSS variables, stored per device · Active
+**Context:** issue #8 asked for themes, a custom palette, and font size and density. The stylesheet already drew almost everything from custom properties on `:root`, and the client has no build step (D1).
+**Decision:**
+- A theme is a value for each of the 17 color variables, and nothing else. `theme.js` sets them on `<html>`. There are three built-in themes (dark, which is the stylesheet's defaults, light and high contrast) and one custom palette in `settings.themeColors` with a color picker per variable. Hard-coded tints in the stylesheet became `color-mix()` of the variables, and text on a filled accent/green/red/yellow surface uses `--on-*`, which `theme.js` picks by contrast.
+- Color schemes come from [Gogh](https://github.com/Gogh-Co/Gogh) (MIT or Apache-2.0): 50 well-known ones are copied into `gogh.js` as seven colors each. Gogh has no popularity data, so the 50 are a hand-picked list. They're terminal palettes, so the UI palette is derived: surfaces are shades of the background, the accent is the scheme's magenta, links are its blue, and any color that doesn't read on the background is pushed toward white or black until it does (Solarized's and One Dark's foregrounds are too dim for body text as published). Clicking a scheme fills the custom palette, so a scheme is a starting point you can edit and there's no "scheme" state to keep in sync.
+- Text size multiplies every `font-size` (`--font-scale`), density multiplies row padding and line height (`--density`), and fonts are stacks of fonts that ship with operating systems, plus a free-text name for one the user has installed.
+- It's all per device in `fs.settings`, like the other settings. Nothing is sent to the server, and other people's profile colors are theirs, not part of a theme.
+
+**Consequences:** a new color in the stylesheet must be one of the variables or a `color-mix()` of them, or it will be wrong in light themes. A new `font-size` must use `calc(… * var(--font-scale))`. Fixed layout sizes (header heights, the rail) don't scale with text size, which is why the slider stops at 20px. No web fonts are bundled, so the font list depends on the OS. The game iframe, video stages and the Electron window's pre-load background keep their own fixed colors.
+**Alternatives:** a stylesheet per theme (can't express a custom palette); fetching schemes from Gogh at runtime (the client would depend on a third-party host, and the app works offline on a LAN today); `zoom` or `webFrame.setZoomFactor` for text size (scales the whole layout, which the View menu's zoom already does); letting a server set a theme for everyone (it's a personal preference, and D3's trust model would let anyone change it).
+
 ## D31: A voice call keeps its own server connection · Active
 **Context:** the client assumed one connected server: clicking another server in the rail closed the socket and with it the call (issue #9). Friends who share several servers want to stay in voice on one while reading another, like Discord.
 **Decision:**
@@ -284,4 +296,3 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
 **Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
-
