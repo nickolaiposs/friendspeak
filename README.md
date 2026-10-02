@@ -13,7 +13,7 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Embeds:** links to YouTube, Vimeo, Streamable, Spotify, SoundCloud and direct image/video/audio files embed a player under the message. Wrap a link in `<angle brackets>` to post it without an embed.
 - **Voice channels:** peer-to-peer WebRTC voice with mute, deafen (with optional shortcuts), push-to-talk, a master volume, per-user volume (0–300%) and mute, speaking indicators, device selection, and echo/noise suppression. The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
 - **Screen sharing:** share an entire screen or a single window, with audio, at up to 1080p 60 fps, from the monitor button in the voice panel. Friends click the red **LIVE** badge to watch. Video is only sent to people who are watching.
-- **Cameras:** the camera button next to it turns on your webcam (720p 30 fps). Right-click it, or go to **Settings → Voice & video**, to pick a device or blur your background. The blur is made on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
+- **Cameras:** the camera button next to it turns on your webcam (720p 30 fps). Right-click it, or go to **Settings → Voice & video**, to pick a device. Before the camera goes on you get a preview, where you can blur your background (with a strength slider) or replace it with a picture: one that comes with the app, or your own. Right-click the camera button to change it mid-call. The background is replaced on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
 - **Emojis:** a full searchable emoji picker, plus **custom server emojis** that you upload and use as `:name:`. Channel names can have emojis too: use the emoji button in the create/rename dialog.
 - **GIFs:** GIPHY search built into the composer.
 - **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON.
@@ -280,9 +280,9 @@ public/js/voice.js  WebRTC mesh voice
 public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server mailboxes)
 public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
 public/js/call.js   Calls in direct messages (voice, camera, screen share)
-public/js/background.js  Camera backgrounds (blur), with MediaPipe person segmentation
+public/js/background.js  Camera backgrounds (blur and pictures), with MediaPipe person segmentation
 public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
-public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
+public/js/store.js  Local profiles, servers, settings (localStorage), sounds, DMs and camera background pictures (IndexedDB)
 public/js/theme.js  Themes, fonts, text size and density (CSS variables)
 public/js/gogh.js   The 50 bundled color schemes
 public/js/util.js   Helpers: markdown, avatars, formatting
