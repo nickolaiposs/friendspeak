@@ -46,7 +46,9 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
   js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
-  js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
+  js/audio.js          Web Audio graph: mic → noise reduction → noise gate → mute/PTT gate → outgoing track, soundboard mixing
+  js/mic-worklet.js    AudioWorklet (audio thread): the mic's noise gate and speaker-mode ducking (D35)
+  vendor/              prebuilt third-party files loaded as-is: the RNNoise worklet and wasm (see its README)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
   js/gogh.js           data: 50 terminal color schemes from Gogh
@@ -104,7 +106,7 @@ See `docs/GAME.md`. In short: edit under `game/*/src`, mark the change, `npm run
 There are no unit tests. Verification so far has been scripted with **puppeteer-core** driving the system Chrome (and Electron via `--remote-debugging-port`). Those scripts lived in a scratch directory and are not in the repo. Reproduce the approach:
 
 - **Server protocol:** a Node script with `socket.io-client` that runs `hello` → exercises events → asserts broadcasts.
-- **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll.
+- **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll. To feed a recording instead, add `--use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox` (without the second flag the sandboxed audio service can't read the file and the mic is silent). Mic processing can also be rendered offline: an `OfflineAudioContext` at 48 kHz with the same worklets.
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
 - **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
 - **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`.
