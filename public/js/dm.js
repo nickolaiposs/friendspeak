@@ -21,6 +21,7 @@
 //   { t: 'msg', op, m: { id, text, gif, replyTo, ts, files? } }
 //   { t: 'edit', op, id, text, edited }  { t: 'del', op, id }  { t: 'react', op, id, emoji, on }
 //   { t: 'ack', op }   { t: 'typing' }
+//   { t: 'call', d }   call signaling, handed to call.js (D33); sealed only, never queued or mailed
 //   { t: 'want', id }  { t: 'file', id, x, size, n }  { t: 'gone', id }   image transfer
 // Every op with an `op` id is queued until acked, so it survives restarts.
 // Applying one twice is harmless: the last few hundred ids are remembered.
@@ -49,7 +50,7 @@ const warn = (what) => (e) => console.warn(what, e);
 const wire = ({ at, mailed, ...op }) => op;
 
 export class DirectMessages {
-  // on: { change(), presence(), message(peerId, m), update(peerId, m), deleted(peerId, id), typing(peerId), progress(peerId, fileId, fraction) }
+  // on: { change(), presence(), message(peerId, m), update(peerId, m), deleted(peerId, id), typing(peerId), progress(peerId, fileId, fraction), call(peerId, d) }
   constructor(on) {
     this.on = on;
     this.me = null;
@@ -673,11 +674,12 @@ export class DirectMessages {
   async deleteMessage(peerId, id) {
     const list = await this.history(peerId);
     const i = list.findIndex((x) => x.id === id);
-    if (i < 0 || list[i].author !== this.me.id) return;
+    if (i < 0 || !(list[i].author === this.me.id || list[i].note)) return;
     const [m] = list.splice(i, 1);
     await dmStore.removeMessage(m.key);
     await this.removeFiles(peerId, m);
     this.on.deleted(peerId, id);
+    if (m.note) return; // they never had it
     const c = this.contacts.get(peerId);
     // Never sent: just take it (and anything queued about it) back out of the outbox
     const queued = c.outbox.find((op) => op.t === 'msg' && op.m.id === id);
@@ -698,6 +700,27 @@ export class DirectMessages {
 
   typing(peerId) {
     this.send(peerId, { t: 'typing' });
+  }
+
+  // Call signaling (call.js): only while connected, never queued
+  sendCall(peerId, d) {
+    return this.send(peerId, { t: 'call', d });
+  }
+
+  // A line that only this device keeps in the thread, e.g. "Missed call"
+  async note(peerId, author, text, unread = false) {
+    const c = this.contacts.get(peerId);
+    if (!c) return;
+    const list = await this.history(peerId);
+    if (this.contacts.get(peerId) !== c) return; // conversation deleted, or another profile now
+    const id = uid();
+    const m = { key: c.key + '|' + id, thread: c.key, id, author, name: author === peerId ? c.name : this.me.name, text, gif: null, replyTo: null, reactions: {}, ts: Date.now(), note: true };
+    list.push(m);
+    c.last = m.ts;
+    if (unread) c.unread = (c.unread || 0) + 1;
+    this.saveContact(c);
+    await dmStore.putMessage(m);
+    this.on.message(peerId, m);
   }
 
   // ---------- their actions ----------
@@ -773,6 +796,7 @@ export class DirectMessages {
     if (op.t === 'want') return peer?.key && this.serve(peerId, peer, str(op.id, 64));
     if (op.t === 'file') return peer?.key && this.startFile(peerId, peer, op);
     if (op.t === 'gone') return peer?.key && this.fileGone(peerId, str(op.id, 64));
+    if (op.t === 'call') return peer?.key && this.on.call?.(peerId, op.d); // only from a friend whose key we know
     let c = this.contacts.get(peerId);
     if (op.t === 'ack') {
       if (!c) return;

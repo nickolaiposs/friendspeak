@@ -5,6 +5,7 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 
 - **Text channels:** markdown (`# heading` / `##` / `###`, `-# small text`, `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `- lists`, `1. lists`, `> quotes`, `` `code` ``, ```` ``` ```` blocks), replies, edits, deletes, reactions, @mentions, typing indicators, and history that persists on the server.
 - **Direct messages:** peer to peer and end-to-end encrypted, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**, or swap **friend codes** (the **+** under **DMs**) to message someone you share no server with. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and opening one doesn't disconnect you from the server or its voice channel. Text, images (up to 4 per message, 10 MB each), GIFs, replies, edits and reactions. Messages are stored only on your two devices. If your friend is offline, the message waits, still encrypted, in their mailbox on a server they use, and arrives the next time they open the app. Images come straight from your friend's device, so the full picture loads once you're both online (a small preview arrives with the message).
+- **Calls in DMs:** the phone and camera buttons at the top of a conversation start a voice or video call with that friend. During a call you can mute, turn on your camera, share your screen (with audio) and use the soundboard, like in a voice channel. Calls are peer to peer, like the messages. You can keep browsing servers and other conversations while you're in one; joining a voice channel hangs up, and starting or accepting a call leaves the voice channel.
 - **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible).
 - **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
@@ -212,6 +213,7 @@ public/js/main.js   UI and app logic
 public/js/voice.js  WebRTC mesh voice
 public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server mailboxes)
 public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
+public/js/call.js   Calls in direct messages (voice, camera, screen share)
 public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
 public/js/theme.js  Themes, fonts, text size and density (CSS variables)

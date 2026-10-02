@@ -172,6 +172,8 @@ class AudioEngine {
       mute: [440],
       unmute: [660],
       message: [988],
+      ring: [659, 880, 659, 880],
+      calling: [494, 494],
     }[kind];
     if (!tones) return;
     const t0 = this.ctx.currentTime;
