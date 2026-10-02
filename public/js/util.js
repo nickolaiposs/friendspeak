@@ -209,7 +209,7 @@ export function avatarEl(profile, size = 40) {
     return h('div', { class: 'avatar', style }, h('img', { src: p.avatar, alt: '', referrerpolicy: 'no-referrer' }));
   }
   const label = p.avatar || (p.name || '?').slice(0, 1).toUpperCase();
-  return h('div', { class: 'avatar', style: { ...style, background: p.color || '#5865f2' } }, label);
+  return h('div', { class: 'avatar', style: { ...style, background: p.color || '#8b6cf6' } }, label);
 }
 
 // A channel name with :custom: server emojis shown as images (unicode emojis are just text)
