@@ -3158,7 +3158,7 @@ function editSound(s, redraw) {
 
 // Pick what to share. Browsers show their own picker after this (we hint which
 // tab it opens on); the desktop app has none, so we list sources ourselves.
-const SHARE_TIERS = { auto: 'Auto (up to 1440p60)', '720p30': '720p 30 fps', '1080p60': '1080p 60 fps', '1440p60': '1440p 60 fps', source: 'Source (up to 4K 120 fps)' };
+const SHARE_TIERS = { auto: 'Auto (up to 1440p60)', '720p30': '720p 30 fps', '1080p60': '1080p 60 fps', '1440p60': '1440p 60 fps' };
 const SHARE_MODES = { smooth: 'Smooth: games and video', sharp: 'Sharp: text and code' };
 
 // The saved share quality: { tier, mode }
@@ -3676,11 +3676,12 @@ function statsView(tile, info) {
   if (!Array.isArray(info)) {
     const rows = [
       ['Codec', `${info.codec} (${hw(info.hw) || '?'} decode${info.decoder ? ', ' + info.decoder : ''})`],
-      ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps`],
+      ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps, QP ${f(info.qp, 0)}`],
+      ['Shown at', info.view ? (info.view.hidden ? 'hidden' : size(info.view.w, info.view.h)) : '–'],
       ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
-      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s)`],
-      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}`],
-      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms, available ${f(info.availMbps, 1)} Mbps`],
+      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`],
+      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`],
+      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`],
     ];
     return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))));
   }
@@ -3692,7 +3693,7 @@ function statsView(tile, info) {
     return [
       name + (v.paused ? ' (away)' : ''),
       `${size(v.capW, v.capH)} @ ${f(v.capFps, 0)}`,
-      v.rung ? `${v.rung.h}p${v.rung.fps}` : '–',
+      v.rung ? `${v.rung.h}p${v.rung.fps}` + (v.needMbps != null ? `, needs ${f(v.needMbps)}` + (v.upMbps != null ? `, up at ${f(v.upMbps)}` : '') : '') : '–',
       `${size(v.w, v.h)} @ ${f(v.fps, 0)}`,
       `${f(v.sentMbps, 2)} / ${f(v.mbps, 2)} / ${f(v.availMbps, 1)}`,
       `${v.codec} ${hw(v.hw)} ${v.impl || ''}`.trim() + (v.note ? ` (${v.note})` : ''),
