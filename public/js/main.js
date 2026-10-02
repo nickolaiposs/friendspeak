@@ -4735,7 +4735,13 @@ function settingsVoice(body) {
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
-    h('p', { class: 'muted small' }, 'Test mic plays your microphone back to you. While it runs you hear nobody else, and nobody hears you. Use headphones, or your speakers feed back into the mic.'),
+    h(
+      'div',
+      { class: 'alert danger', role: 'alert' },
+      icon('head'),
+      h('div', {}, h('strong', {}, 'Only test your mic with headphones on. '), 'On speakers your mic picks up its own playback and makes a loud feedback screech.')
+    ),
+    h('p', { class: 'muted small' }, 'Test mic plays your microphone back to you. While it runs you hear nobody else, and nobody hears you.'),
     h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
