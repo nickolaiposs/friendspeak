@@ -85,13 +85,23 @@ const DEFAULT_SETTINGS = {
   outputDevice: '',
   videoDevice: '', // camera
   micVolume: 1,
+  masterVolume: 1, // everything this app plays: voices, streams, soundboard, cues
+  voiceVolume: 1, // other people's voices
+  cueVolume: 1, // join/leave/mute/message sounds
   soundboardVolume: 0.8,
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
   echoCancellation: true,
-  noiseSuppression: true,
-  userVolumes: {}, // profileId -> 0..2
+  autoGainControl: true,
+  noiseReduction: 'high', // 'off' | 'standard' (the browser's) | 'high' (RNNoise, D35)
+  noiseGate: 'off', // 'off' | 'auto' (follows the room's noise) | 'manual' (noiseGateThreshold)
+  noiseGateThreshold: -50, // dB
+  speakerMode: false, // turn the mic down while friends are heard, for people on speakers
+  userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
+  userMutes: {}, // profileId -> true: muted for us only
+  muteHotkey: '', // combos like the soundboard's (comboFromEvent)
+  deafenHotkey: '',
   lastChannel: {}, // serverId -> channelId
   showMembers: true,
   shareTier: 'auto', // screen share quality ceiling: a key of TIERS (voice.js)
@@ -111,7 +121,13 @@ const DEFAULT_SETTINGS = {
 };
 
 export const settings = {
-  get: () => ({ ...DEFAULT_SETTINGS, ...read('fs.settings', {}) }),
+  get() {
+    const saved = read('fs.settings', {});
+    const s = { ...DEFAULT_SETTINGS, ...saved };
+    // noiseReduction replaced a "Noise suppression" checkbox: keep an explicit off
+    if (saved.noiseSuppression === false && !saved.noiseReduction) s.noiseReduction = 'off';
+    return s;
+  },
   set(patch) {
     const s = { ...this.get(), ...patch };
     write('fs.settings', s);

@@ -5,7 +5,8 @@ data
 release
 build
 desktop
-public
+public/**
+!public/js/util.js
 docs
 *.md
 docker-compose*.yaml
