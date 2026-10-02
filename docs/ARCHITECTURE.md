@@ -302,10 +302,11 @@ Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail
 | `fs.keys` | `{ <profileId>: { sign: { pub, priv }, dh: { pub, priv } } }`: the profile's key pairs (base64url; raw public, PKCS#8 private). Included in profile export files as `keys` |
 | `fs.servers` | `[{ id, address (origin), password, serverName, serverIcon }]` (name and icon are cached from the server for the rail; there are no per-user nicknames) |
 | `fs.lastServer` | server bookmark id |
-| `fs.settings` | see `DEFAULT_SETTINGS` (devices, volumes, mic processing, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
+| `fs.settings` | see `DEFAULT_SETTINGS` (devices, camera background, volumes, mic processing, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
 | IndexedDB `friendspeak/sounds` | `{ id, name, emoji, volume, hotkey, blob, type, created }` |
 | IndexedDB `friendspeak/dmContacts` | `{ key: "<myId>\|<theirId>", owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, relays: [address], seen: [opId], wants: [fileId], conflict? }` (index `owner`). Queued ops also carry `at` and `mailed` (timestamps) |
 | IndexedDB `friendspeak/dmMessages` | `{ key: "<thread>\|<msgId>", thread, id, author, name, text, gif, replyTo, reactions, ts, edited?, pending?, mailed?, files?, note? }` (index `thread`); `note` marks a local-only line such as a call result |
+| IndexedDB `friendspeak/backgrounds` | `{ id, name, blob (JPEG, at most 1920×1080), created }`: your own camera background pictures (D37) |
 | IndexedDB `friendspeak/dmFiles` | `{ key: "<thread>\|<fileId>", thread, id, msg, blob, type, name, size }` (index `thread`): DM images, sent and received |
 
 Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`).
@@ -344,6 +345,8 @@ flowchart LR
 - **Screen sharing and cameras (D22):** there are two media kinds, `screen` and `camera`, with limits in `MEDIA`:
   - `screen` comes from `getDisplayMedia`: up to 1920×1080 at 60 fps, plus audio when the platform allows, with an 8 Mbps cap.
   - `camera` comes from `getUserMedia` (`settings.videoDevice`): 1280×720 at 30 fps with no audio (your voice already carries it), with a 2.5 Mbps cap.
+  - **Camera backgrounds (`background.js`, D37):** `settings.cameraBackground` is `none`, `blur` (strength `cameraBlur`) or `image` (picture `cameraImage`: a preset's id, or one of your own in IndexedDB). With a background, `openCamera` in `main.js` captures at 720p30 and passes the stream through `withBackground`. Each frame goes `MediaStreamTrackProcessor` → MediaPipe selfie segmentation (WebAssembly from `/vendor/mediapipe/`, model from `/models/`, both loaded on first use) → a canvas that draws the person over a painter from `BACKGROUNDS` → `MediaStreamTrackGenerator`. `VoiceClient` gets that track like any camera, so nothing changes on the wire. Stopping the track stops the real camera.
+  - **Camera preview (`cameraDialog`):** turning the camera on always opens a dialog first, with a mirrored preview (`cameraPreview`) and the background tiles (`backgroundPicker`: None, Blur with its strength, the presets, your pictures, Add a picture). Nobody receives anything until "Turn on camera", which hands the preview's own capture to `VoiceClient.setMedia`. The caller of a DM video call gets the dialog when the call connects. Opened from the camera button's right-click menu while the camera is on, the dialog shows and changes the live camera. Changes go through `setCameraBackground`: strength, picture and blur ↔ picture apply to the running pipeline at once; to or from `none` it swaps in a new capture with `replaceMedia`. Switching devices mid-call restarts the camera without the dialog (`startCamera`). Settings → Voice & video has the same tiles and a preview.
 
   `VoiceClient.setMedia(kind, stream)` only announces the media (`voice:media`). A viewer sends `{ watch: kind, on: true }`. The sender replies with `{ media: kind, id: streamId }` and adds `sendonly` transceivers for that viewer only (`contentHint = 'motion'`, hardware-friendly codec order, per-viewer `scaleResolutionDownBy`/`maxBitrate`/`active` from their `{ view }` reports; see D22). Stopping calls `transceiver.stop()` and sends `{ media: kind, id: null }`. The receiver matches incoming tracks to a kind by the announced stream id; unannounced audio is voice.
 - **Video stage (`#stream-view`, `openStage`/`syncStage`/`layoutStage`):** one Discord-style view per voice channel, open while anyone in it shares or has a camera on. It shows the call's channel (`S.call`), so it also works while another server is in view.
@@ -361,7 +364,7 @@ flowchart LR
 
 ## Desktop app (`desktop/`)
 
-- **App origin:** a privileged custom scheme `friendspeak://app/` (standard, secure, fetch, CORS) serves `public/`, the emoji vendor files and the socket.io client file. This gives a secure context (the mic works), a fixed origin (stable storage), and no mixed-content blocking when connecting to `http://` servers.
+- **App origin:** a privileged custom scheme `friendspeak://app/` (standard, secure, fetch, CORS) serves `public/`, the emoji and MediaPipe vendor files (from `node_modules`) and the socket.io client file. This gives a secure context (the mic works), a fixed origin (stable storage), and no mixed-content blocking when connecting to `http://` servers.
 - **Client only (D23):** the app never runs `startServer()`. Hosting is `npm start` or Docker on some machine, which the app connects to like any other server.
 - **Self-signed certificates (D20):** before connecting to an `https://` server, the renderer calls `trustServer(address)`. Main peeks at the certificate over `tls`. If it isn't CA-signed or pinned, a dialog shows the fingerprint and asks. Answers are pinned per hostname in `userData/trusted-certs.json`. `setCertificateVerifyProc` then accepts pinned certificates for all requests, including socket.io, the game iframe and pop-out.
 - **Bridge:** `window.friendspeakDesktop` (preload, `contextIsolation`, `sandbox: true`) exposes:
