@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME } from './audio.js';
 import { VoiceClient, SCREEN, MEDIA } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
@@ -99,6 +99,7 @@ const I = {
   headOff: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.4"/></svg>',
   gear: '<svg viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2.4h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>',
   hash: '<svg viewBox="0 0 24 24"><path d="M5.88 21 6.6 17H3l.35-2h3.6l1.06-6H4.4l.35-2h3.6l.72-4h2l-.72 4h6l.72-4h2l-.72 4H22l-.35 2h-3.6l-1.06 6h3.61l-.35 2h-3.6l-.72 4h-2l.72-4h-6l-.72 4h-2zm4.13-12-1.06 6h6l1.06-6h-6z"/></svg>',
+  speakerOff: '<svg viewBox="0 0 24 24"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg>',
   speaker: '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
   phone: '<svg viewBox="0 0 24 24"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>',
@@ -260,6 +261,14 @@ const DMCALL = new DmCalls(DM, {
 
 // Whichever is live, the DM call or the voice channel's call (S.call): its VoiceClient takes the camera and the screen share
 const liveVoice = () => DMCALL.voice || (S.voiceChannel ? S.voice : null);
+
+// A watched stream's sound plays through its <video>, outside the audio graph
+// (audio.js), so the master volume and the output device are set on each one.
+const streamVolume = (v) => v * settings.get().masterVolume;
+function applyOutputDevice(deviceId) {
+  audio.setOutputDevice(deviceId);
+  for (const t of [...(S.stage?.tiles.values() || []), ...dmCallUi.tiles.values()]) if (t.kind === 'screen') t.video?.setSinkId?.(deviceId || '').catch(() => {});
+}
 
 const clock = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
@@ -459,7 +468,7 @@ function renderDmCall() {
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
       t.video.muted = !theirs || S.deafened;
-      t.video.volume = ui.volume;
+      t.video.volume = streamVolume(ui.volume);
     }
     t.report?.();
   }
@@ -514,7 +523,7 @@ function dmCallTile(key, who, kind) {
         'label',
         { class: 'stream-volume', title: 'Stream volume' },
         icon('speaker'),
-        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => (video.volume = ui.volume = +e.target.value) })
+        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => ((ui.volume = +e.target.value), (video.volume = streamVolume(ui.volume))) })
       )
     );
   }
@@ -1747,35 +1756,65 @@ function voiceUserEl(u) {
           icon('cam')
         )
       : null,
-    u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null
+    u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null,
+    isMe ? null : userVolumeBadge(u)
   );
 }
 
-function userVolumePopover(anchor, u) {
-  const vols = settings.get().userVolumes;
-  const val = h('span', {}, Math.round((vols[u.id] ?? 1) * 100) + '%');
+// What we did to someone's volume, next to their name: muted for us, or a
+// percentage when it isn't 100%
+function userVolumeBadge(u) {
+  const st = settings.get();
+  if (st.userMutes[u.id]) return h('span', { class: 'icon state', title: 'Muted for you', html: I.speakerOff });
+  const v = st.userVolumes[u.id] ?? 1;
+  if (v === 1) return null;
+  return h('span', { class: 'vol-badge' + (v > 1 ? ' boost' : ''), title: v > 1 ? 'Boosted for you' : 'Turned down for you' }, Math.round(v * 100) + '%');
+}
+
+// Volume and mute for one person, for us only (stored by profile id). Above
+// 100% boosts them.
+function userVolumePopover(anchor, u, align = 'right') {
+  const val = h('span', {});
+  const slider = h('input', {
+    type: 'range',
+    min: 0,
+    max: MAX_USER_VOLUME,
+    step: 0.01,
+    title: 'Double-click to reset',
+    oninput: (e) => apply({ userVolumes: { ...settings.get().userVolumes, [u.id]: +e.target.value } }),
+    onchange: renderChannels, // the badge next to their name
+    ondblclick: () => reset(),
+  });
+  const muteBtn = h('button', { class: 'btn small ghost', onclick: () => (apply({ userMutes: { ...settings.get().userMutes, [u.id]: !settings.get().userMutes[u.id] } }), renderChannels()) });
+  const resetBtn = h('button', { class: 'btn small ghost', onclick: () => reset() }, 'Reset');
+  const draw = () => {
+    const st = settings.get();
+    const v = st.userVolumes[u.id] ?? 1;
+    const muted = !!st.userMutes[u.id];
+    slider.value = v;
+    slider.classList.toggle('boost', v > 1);
+    val.textContent = Math.round(v * 100) + '%' + (muted ? ' (muted)' : v > 1 ? ' (boosted)' : '');
+    muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    resetBtn.disabled = v === 1;
+  };
+  const apply = (patch) => {
+    settings.set(patch);
+    S.voice?.applyVolume(u.sid);
+    draw();
+  };
+  const reset = () => (apply({ userVolumes: { ...settings.get().userVolumes, [u.id]: 1 } }), renderChannels());
+  draw();
   popover(
     anchor,
     h(
       'div',
       { class: 'user-pop' },
       h('div', { class: 'profile-card' }, profileCardHead(fullProfile(u))),
-      h('label', { class: 'field' }, h('span', {}, 'User volume ', val)),
-      h('input', {
-        type: 'range',
-        min: 0,
-        max: 1,
-        step: 0.01,
-        value: vols[u.id] ?? 1,
-        oninput: (e) => {
-          const v = +e.target.value;
-          settings.set({ userVolumes: { ...settings.get().userVolumes, [u.id]: v } });
-          val.textContent = Math.round(v * 100) + '%';
-          S.voice?.applyVolume(u.sid);
-        },
-      })
+      h('label', { class: 'field' }, h('span', {}, 'User volume ', val), slider),
+      h('div', { class: 'row' }, muteBtn, resetBtn),
+      h('p', { class: 'muted small' }, 'Only changes what you hear.')
     ),
-    { align: 'right' }
+    { align }
   );
 }
 
@@ -1922,13 +1961,16 @@ function renderMembers() {
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
     .sort(byName);
   const hideOffline = settings.get().hideOffline;
-  const menu = (u) => (e) =>
-    u.id !== me().id &&
+  const menu = (u) => (e) => {
+    const el = e.currentTarget;
+    if (u.id === me().id) return;
     contextMenu(e, [
+      inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') },
       { label: 'Message', run: () => openDm(u.id) },
       { label: 'Remove from server…', danger: true, run: () => removePrompt(u.id) },
       !isBanned(u.id) && { label: 'Ban…', danger: true, run: () => banPrompt(u.id) },
     ]);
+  };
   const row = (u) => {
     const roles = rolesOf(u.id);
     return h(
@@ -2991,11 +3033,26 @@ function openGifPicker(anchor, onPick) {
 
 async function loadSounds() {
   S.sounds = await sounds.all();
-  desktop?.setHotkeys(S.sounds.map((s) => s.hotkey).filter(Boolean));
+  syncHotkeys();
 }
 
-// Desktop app: soundboard hotkeys registered as global shortcuts
+// Desktop app: soundboard, mute and deafen hotkeys registered as global shortcuts
+function syncHotkeys() {
+  const st = settings.get();
+  desktop?.setHotkeys([st.muteHotkey, st.deafenHotkey, ...S.sounds.map((s) => s.hotkey)].filter(Boolean));
+}
+
+// The same toggles as the buttons in the user panel
+function voiceHotkey(combo) {
+  const st = settings.get();
+  if (combo === st.muteHotkey) toggleMute();
+  else if (combo === st.deafenHotkey) toggleDeafen();
+  else return false;
+  return true;
+}
+
 desktop?.onHotkey((combo) => {
+  if (voiceHotkey(combo)) return;
   const s = S.sounds.find((x) => x.hotkey === combo);
   if (!s) return;
   audio.ensure();
@@ -3572,7 +3629,7 @@ function stageTile(key, sid, kind, live) {
             max: 1,
             step: 0.01,
             value: S.stage.volumes.get(sid) ?? 1,
-            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = +e.target.value)),
+            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = streamVolume(+e.target.value))),
           })
         ),
         h('button', { class: 'btn small ghost', onclick: () => watchScreen(sid, false) }, 'Stop watching')
@@ -3680,7 +3737,7 @@ function syncStage() {
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
       t.video.muted = t.sid === c.sid || S.deafened;
-      t.video.volume = st.volumes.get(t.sid) ?? 1;
+      t.video.volume = streamVolume(st.volumes.get(t.sid) ?? 1);
     }
   }
 
@@ -3853,6 +3910,7 @@ function handleKeyDown(e, typing) {
   if (typing && !hasMod) return false;
   // The desktop app registers these as global shortcuts; don't play twice
   if (desktop?.hasGlobalHotkey?.(combo)) return false;
+  if (voiceHotkey(combo)) return true;
   const s = S.sounds.find((x) => x.hotkey === combo);
   if (!s) return false;
   audio.ensure();
@@ -4169,7 +4227,7 @@ function settingsAppearance(body) {
 function settingsVoice(body) {
   const st = settings.get();
   const inSel = h('select', { onchange: (e) => (settings.set({ inputDevice: e.target.value }), restartMic()) }, h('option', { value: '' }, 'Default'));
-  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), liveVoice()?.applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
+  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
   const camSel = h(
     'select',
     {
@@ -4236,6 +4294,24 @@ function settingsVoice(body) {
     };
     window.addEventListener('keydown', onKey, true);
   };
+  const hotkeyBtn = (key) => {
+    const btn = h('button', { class: 'btn ghost small hotkey-btn' }, st[key] || 'Click to set');
+    btn.onclick = () => {
+      btn.textContent = 'Press a key… (Esc clears)';
+      const onKey = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const c = e.key === 'Escape' ? '' : comboFromEvent(e);
+        if (c === null) return; // a modifier on its own
+        settings.set({ [key]: c });
+        syncHotkeys();
+        btn.textContent = c || 'Click to set';
+        window.removeEventListener('keydown', onKey, true);
+      };
+      window.addEventListener('keydown', onKey, true);
+    };
+    return btn;
+  };
   const check = (key, label, after) =>
     h(
       'label',
@@ -4257,6 +4333,12 @@ function settingsVoice(body) {
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
+    h('h3', {}, 'Volume'),
+    slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
+    slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
+    slider('cueVolume', 'Notification sounds', 1, (v) => audio.setCueVolume(v)),
+    h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
+    h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
     check('echoCancellation', 'Echo cancellation', restartMic),
     check('noiseSuppression', 'Noise suppression', restartMic),
@@ -4264,6 +4346,13 @@ function settingsVoice(body) {
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
     h('div', { class: 'field' }, h('span', {}, 'Push-to-talk key'), pttBtn),
     h('p', { class: 'muted small' }, 'Browsers only see keys while the friendspeak window is focused.'),
+    h('h3', {}, 'Shortcuts'),
+    h('div', { class: 'row' }, h('div', { class: 'field grow' }, h('span', {}, 'Mute'), hotkeyBtn('muteHotkey')), h('div', { class: 'field grow' }, h('span', {}, 'Deafen'), hotkeyBtn('deafenHotkey'))),
+    h(
+      'p',
+      { class: 'muted small' },
+      desktop ? 'Shortcuts with Ctrl/Alt/Cmd, F-keys or the numpad work even while other apps are focused.' : 'Shortcuts work while friendspeak is the focused window.'
+    ),
     h('h3', {}, 'Soundboard'),
     slider('soundboardVolume', 'Soundboard volume', 1, (v) => audio.setSoundboardVolume(v)),
     check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened)),

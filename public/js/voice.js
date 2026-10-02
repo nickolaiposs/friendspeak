@@ -8,7 +8,7 @@
 // id ({ media: kind, id }) so the receiver can tell them apart. Tracks come
 // and go mid-call, so signaling uses the "perfect negotiation" pattern: either
 // side may offer, and on a collision the polite peer (lower socket id) yields.
-import { audio, Level } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME } from './audio.js';
 import { settings } from './store.js';
 
 export const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
@@ -63,7 +63,7 @@ export class VoiceClient {
   constructor(socket, { onPeersChange, onMediaChange } = {}) {
     this.socket = socket;
     this.channelId = null;
-    // sid -> { pc, audioEl, analyser, dispose, chain, state, polite,
+    // sid -> { pc, audioEl, analyser, setGain, dispose, chain, state, polite,
     //          out: { kind -> transceivers sending our media to them },
     //          in: { kind -> { id, stream } they send us } }
     this.peers = new Map();
@@ -148,20 +148,19 @@ export class VoiceClient {
         return;
       }
       if (e.track.kind === 'video') return; // unannounced; shouldn't happen
+      // Chromium only delivers a remote stream to the audio graph while a
+      // media element plays it. The element stays silent: the voice is heard
+      // through audio.voiceInput, where its volume can go above 100%.
       if (!peer.audioEl) {
         peer.audioEl = new Audio();
         peer.audioEl.autoplay = true;
+        peer.audioEl.muted = true;
       }
       peer.audioEl.srcObject = stream;
-      peer.audioEl.muted = this.deafened;
-      this.applyVolume(sid);
-      const out = settings.get().outputDevice;
-      if (out && peer.audioEl.setSinkId) peer.audioEl.setSinkId(out).catch(() => {});
       peer.audioEl.play().catch(() => {});
       peer.dispose?.();
-      const a = audio.analyserFor(stream);
-      peer.analyser = a.analyser;
-      peer.dispose = a.dispose;
+      Object.assign(peer, audio.voiceInput(stream));
+      this.applyVolume(sid);
     };
     return peer;
   }
@@ -445,20 +444,17 @@ export class VoiceClient {
 
   setDeafened(d) {
     this.deafened = d;
-    for (const p of this.peers.values()) if (p.audioEl) p.audioEl.muted = d;
+    for (const sid of this.peers.keys()) this.applyVolume(sid);
   }
 
-  // Per-user volume is keyed by profile id so it survives reconnects.
+  // Per-user volume and mute are keyed by profile id so they survive reconnects.
   applyVolume(sid) {
     const peer = this.peers.get(sid);
+    if (!peer?.setGain) return;
     const pid = this.profileIdFor?.(sid);
-    if (!peer?.audioEl) return;
-    const v = settings.get().userVolumes[pid] ?? 1;
-    peer.audioEl.volume = Math.min(1, Math.max(0, v));
-  }
-
-  applyOutputDevice(deviceId) {
-    for (const p of this.peers.values()) p.audioEl?.setSinkId?.(deviceId || '').catch(() => {});
+    const st = settings.get();
+    const v = this.deafened || st.userMutes[pid] ? 0 : (st.userVolumes[pid] ?? 1);
+    peer.setGain(Math.min(MAX_USER_VOLUME, Math.max(0, +v || 0)));
   }
 
   levels() {

@@ -304,8 +304,12 @@ flowchart LR
   SB["soundboard clips<br/>(per-sound gain)"] --> Bus["sbBus<br/>(soundboard volume)"]
   Bus --> Out
   Bus --> SelfA
-  Bus --> Mon["monitor"] --> Speakers["speakers"]
+  Bus --> Mon["monitor"] --> Master["master<br/>(master volume)"] --> Speakers["speakers<br/>(output device)"]
   Out --> PCs["one RTCPeerConnection per peer"]
+  Remote["a friend's voice<br/>(remote track)"] --> UserGain["user gain<br/>(0–300%, local mute, deafen)"]
+  Remote --> PeerA["analyser<br/>(their speaking ring)"]
+  UserGain -- "above 100%: limiter" --> VoiceBus["voiceBus<br/>(voices volume)"] --> Master
+  Cues["cues"] --> CueBus["cueBus<br/>(notification volume)"] --> Master
 ```
 
 - **Full mesh:** the newcomer calls everyone already in the channel (`voice:join` ack lists their socket ids). Existing members answer.
@@ -324,7 +328,9 @@ flowchart LR
 - **Changing source:** while sharing, the screen button in the voice panel (or "Change source" in the stage header) opens the picker again. `VoiceClient.replaceMedia` swaps the tracks inside the same `MediaStream` and calls `replaceTrack` on each viewer's senders. No renegotiation is needed (unless the new source adds audio) and the stream id stays the same, so viewers keep watching without a gap.
 - **One outgoing track for all peers:** it's the Web Audio destination, so the soundboard reaches everyone even while muted, and changing the mic device (`audio.startMic()`) doesn't renegotiate.
 - **Listen-only fallback:** if the mic fails (denied, missing, insecure origin), the user still joins listen-only (`voice.micError`).
-- **Remote audio:** played through `<audio>` elements, which gives per-user volume and output device selection (`setSinkId`). Each remote stream also gets an analyser; a 90 ms interval toggles `.voice-user.speaking`.
+- **Remote audio:** each friend's voice goes through the audio graph (`audio.voiceInput`), not an `<audio>` element, because an element's volume stops at 100%. Per-user volume (`settings.userVolumes`, by profile id, 0–3) and local mute (`settings.userMutes`) set the user gain; deafen sets it to 0. Above 100% a `DynamicsCompressorNode` set up as a limiter follows the gain (with its automatic makeup gain trimmed back out), so a boosted voice doesn't clip; at or below 100% it is not in the path. A muted `<audio>` element still holds each remote stream, because Chromium only feeds a remote stream to the graph while a media element plays it. The output device is set on the `AudioContext` (`setSinkId`), and Chromium's echo canceller takes the graph's output as its reference like any other playback. Each remote stream also gets an analyser; a 90 ms interval toggles `.voice-user.speaking`.
+- **Volumes:** `master` scales everything the graph plays (voices, soundboard monitor, cues). The sound of a watched screen share plays through its `<video>`, so `streamVolume()` in `main.js` multiplies the master volume into each one's own slider, and `applyOutputDevice()` moves them with the graph. The game is a cross-origin iframe and is not covered.
+- **Mute and deafen shortcuts:** `settings.muteHotkey` / `deafenHotkey` are combos like the soundboard's. They call the same `toggleMute` / `toggleDeafen` as the buttons, and the desktop app registers them as global shortcuts along with the soundboard's (`syncHotkeys`).
 - **ICE:** Google public STUN only. There's no TURN, so strict NATs may fail.
 
 ## Desktop app (`desktop/`)
