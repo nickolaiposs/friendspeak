@@ -1,7 +1,8 @@
 # friendspeak for Docker / Portainer (Stacks → Add stack → Web editor).
 #
 # Everything (chat, voice signaling, the penguin game) runs on ONE port. There is no
-# web UI: friends connect with the friendspeak desktop app.
+# chat web UI: friends connect with the friendspeak desktop app. The admin
+# dashboard is at https://<host>:<port>/admin (see ADMIN_KEY below).
 # Set the variables below in Portainer's "Environment variables" section, or in
 # a .env file next to this file when using `docker compose` directly.
 #
@@ -43,6 +44,9 @@ services:
       # off = only people with the password can pass direct messages through this server
       DM_GUESTS: ${DM_GUESTS:-on}
       HTTPS: ${HTTPS:-1}
+      # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
+      # and printed once in the container log on first start (docker logs friendspeak).
+      ADMIN_KEY: ${ADMIN_KEY:-}
       # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
       GAME: ${GAME:-on}
       GAME_WORLD: ${GAME_WORLD:-Blizzard}

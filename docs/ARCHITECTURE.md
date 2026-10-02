@@ -15,7 +15,7 @@ flowchart LR
   end
 
   subgraph Server["friendspeak server (one Node process, one port)"]
-    Express["Express static<br/>public/, /vendor, /game, /assets"]
+    Express["Express<br/>/api, /files, /admin, /game, /assets"]
     IO["Socket.IO /socket.io<br/>chat, presence, signaling"]
     LoginW["Socket.IO /world/login<br/>Yukon Login world"]
     GameW["Socket.IO /world/blizzard<br/>Yukon game world"]
@@ -40,6 +40,8 @@ flowchart LR
 | `/` | Express | a plain-text notice; the server hosts no chat UI (D26) |
 | `/socket.io/*` | Socket.IO (friendspeak, `serveClient: false`) | chat, presence, voice signaling, game login tokens |
 | `/api/info` | Express | `{ name, password: bool }` |
+| `/admin/*` | Express (`admin.js`) | the admin dashboard's files: `admin-ui/`, plus `public/js/util.js` as `/admin/js/util.js` (D34) |
+| `/admin/api/*` | Express (`admin.js`) | the dashboard's JSON API and event stream (see "Admin dashboard") |
 | `/game/*` | `game/client/dist` | the built Yukon client |
 | `/game/friendspeak.js` | `game/index.js` | tells the game client its world paths |
 | `/game/lib/*` | `node_modules/phaser/dist` | Phaser 3.80.1 |
@@ -51,7 +53,7 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 
 ## Server (`server.js`)
 
-`startServer(opts) → Promise<{ port, version, https, fingerprint, name, game, update, close() }>` is the only export used by callers (plus `lanAddresses()`). Running `node server.js` maps env vars to options (Docker runs the same CLI). The desktop app never runs a server.
+`startServer(opts) → Promise<{ port, version, https, fingerprint, name, admin: { enabled, local }, game, update, close() }>` is the only export used by callers (plus `lanAddresses()`). Running `node server.js` maps env vars to options (Docker runs the same CLI). The desktop app never runs a server.
 
 ### Configuration
 
@@ -60,7 +62,7 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 | `port` | `PORT` | 3000 | `0` = any free port |
 | `host` | none | all interfaces | |
 | `https` | `HTTPS=1` | off | self-signed cert generated into `dataDir` |
-| `dataDir` | `DATA_DIR` | `./data` | `state.json`, `mail.json`, `game.sqlite`, `game-secret`, certs |
+| `dataDir` | `DATA_DIR` | `./data` | `state.json`, `mail.json`, `admin.json`, `admin-audit.log`, `game.sqlite`, `game-secret`, certs |
 | `serverName` | `SERVER_NAME` | `friendspeak` | name for a *new* server only; after that the name in `state.json` wins (renamed from Settings → Server) |
 | `password` | `PASSWORD` | none | checked in `hello` |
 | `giphyKey` | `GIPHY_API_KEY` | none | server-side GIF search |
@@ -72,6 +74,9 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 | none | `GAME_MAX_USERS` | 300 | |
 | none | `GAME_SPAWN` | 100 (Town) | `0` = random spawn room (upstream default) |
 | none | `GAME_DEBUG=1` | off | logs every Yukon packet |
+| `admin.enabled` | `ADMIN=off` (also `0`/`false`/`no`) | on | `false` = `/admin` isn't mounted at all (D34) |
+| `admin.local` | `ADMIN_LOCAL=off` (also `0`/`false`/`no`) | on | `false` = even a request from this machine needs a key. The Docker image sets `ADMIN_LOCAL=off` |
+| `admin.key` | `ADMIN_KEY` | none | an admin key from the environment (16+ characters, shorter is ignored with a log line). While set, the generated first-boot key stops working |
 | `update.mode` | `AUTO_UPDATE` | `off` | `notify` = check GitHub Releases and tell clients; `on` = also install at the maintenance window (Docker only, needs `WATCHTOWER_TOKEN`; otherwise falls back to `notify`). See "Updates" below |
 | `update.cron` | `MAINTENANCE_CRON` | `0 6 * * 0` | 5-field cron in local time (`TZ`): when an update is installed. Invalid → default |
 | `update.warn` | `MAINTENANCE_WARN` | `24h` | how long before the window clients show the warning (`90m`, `2d`, seconds) |
@@ -155,6 +160,58 @@ Stored profiles (`server.profiles`) carry `status` and `seen` (last time online)
 ### Updates (`updater.js`, D29)
 
 With `AUTO_UPDATE` set to `notify` or `on`, the server asks the GitHub API for the latest release 30 s after start and then every 6 h. When a newer version appears in `on` mode, it schedules the install for the first cron match at least 10 min away, then broadcasts `server:update`. Clients show a closeable warning from `warnFrom` on. If it was closed, it shows again from `finalFrom` (10 min before). At `at`, the server broadcasts `installing: true` and sends `POST /v1/update` (bearer `WATCHTOWER_TOKEN`) to the Watchtower sidecar. Watchtower pulls `:latest`, stops this container (SIGTERM → normal shutdown) and starts the new one, and clients reconnect on their own. If the process is still alive 15 min later, the update counts as failed and is rescheduled for the next window. A window is only scheduled when Watchtower answers HTTP (any status) at check time. Without it, or without `WATCHTOWER_TOKEN`, `on` acts like `notify`. In the compose file Watchtower is opt-in (`COMPOSE_PROFILES=autoupdate`). `npm start` installs never install anything: `on` degrades to `notify`.
+
+### Admin dashboard (`admin.js`, `admin-ui/`, D34)
+
+A web page at `/admin`, served by the server itself, with a JSON API and one event stream behind it. `createAdmin(ctx)` in `admin.js` mounts it from `startServer()` and returns `{ notify(topic), close() }`. With `ADMIN=off` it isn't created and `/admin` is a 404.
+
+**Who may open it.** A request is **local** when the peer address is loopback, the `Host` is `localhost`, `127.0.0.1` or `[::1]`, there is no `X-Forwarded-For`, `Forwarded` or `X-Real-IP` header, and `ADMIN_LOCAL` isn't off. Local requests need no key. Every other request needs a session from an admin key, and a key is only accepted over TLS (`req.secure` or `X-Forwarded-Proto: https`) or on a direct loopback connection. `canLogin` in the session reply says which. Forwarded headers are never used to pick an address.
+
+**Keys.** `DATA_DIR/admin.json` (mode 0600) holds `{ keys: [{ id, name, hash, created, lastUsed, bootstrap? }] }`, where `hash` is the SHA-256 of the key (`fsa_` + 32 random bytes, base64url). Keys are compared in constant time against every active key. With no stored key and no `ADMIN_KEY`, the first start makes one named "First-boot key" and prints it once on stdout, not through `console`, so it never reaches the log buffer. `ADMIN_KEY` becomes a key with id `env`, which can't be revoked in the dashboard, and the first-boot key stops being active. At most 50 stored keys.
+
+**Sessions.** A successful `login` makes a random token and sets the cookie `fs_admin` (`HttpOnly; SameSite=Strict; Path=/admin`, plus `Secure` on TLS). Only the token's SHA-256 is kept, in memory, with its key id, so restarts end all sessions. A session ends 12 h after sign-in or after 1 h idle, whichever comes first, or when its key is revoked. An open event stream counts as activity (the 12 h limit still applies).
+
+**Cross-site rules.** Every API request with `Sec-Fetch-Site: cross-site` or `same-site` is refused (403). `POST`, `PUT`, `PATCH` and `DELETE` also need `Content-Type: application/json` and an `Origin` whose host equals the request's `Host` header, so behind a reverse proxy the original `Host` has to be passed on. These checks apply to local requests too. There is no CORS on `/admin`.
+
+**Rate limit.** Per IP, five failed sign-ins are free. Then the address is locked out for 30 s, doubling per failure up to 1 h (`429` with `retryAfter` and a `Retry-After` header). More than 100 failures in 10 minutes from any address also lock sign-in for 60 s, but only for addresses that already have a failure on record. Behind a proxy every request has the proxy's address, so the lockouts are shared.
+
+**Response headers.** Every `/admin` response has the CSP `default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The dashboard's HTML therefore has no inline scripts, styles or `style` attributes. Setting styles from JS (what `h()` does) is fine.
+
+**Audit log.** `audit(actor, ip, action, detail)` appends a JSON line to `DATA_DIR/admin-audit.log` and rotates it to `.1` at 5 MB. The IP is the peer address.
+
+**Log buffer.** `logbuffer.js` wraps `console.log/info/warn/error/debug` once at startup (`startServer` option `captureLogs: false` skips it). Output still goes where it did. Each call is also kept as `{ id, ts, level, source, text }` in a ring of the last 2000 lines (text cut at 4096 characters, ANSI codes removed). `id` rises by one per line, `source` is the lowercased leading `[tag]`. It is memory only.
+
+**Change hints.** `admin.notify(topic)` tells open event streams that something changed, after a 250 ms delay that merges bursts. `server.js` calls it from `save()` (`state`), `broadcastUsers()` (`users`) and the updater's `onChange` (`update`); `admin.js` itself sends `keys`.
+
+**Routes** (all JSON; errors are `{ error }`; `401 { error, login: true }` means no session):
+
+| Route | Auth | Payload / reply |
+|---|---|---|
+| `GET /admin` | none | 302 to `/admin/` |
+| `GET /admin/`, `/admin/admin.css`, `/admin/js/**` | none | the dashboard's files |
+| `GET /admin/api/session` | none | `{ authed, local, actor, tls, canLogin, fingerprint, name, version }`. `actor` is the key's name, `"local"` or null. `fingerprint` is the server certificate's, or null when the server isn't serving HTTPS |
+| `POST /admin/api/login` | none | `{ key }` → `{ ok, actor }` and the cookie. 401 wrong key, 429 locked out, 400 when `canLogin` is false |
+| `POST /admin/api/logout` | session | `{ ok }`; clears the cookie, the session and its event streams |
+| `GET /admin/api/overview` | session | `{ name, icon, version, startedAt, uptime, node, platform, memory: { rss, heapUsed }, docker, https, fingerprint, password, adminLocal, counts: { online, profiles, bans, channels }, storage: { used, max }, game, update }`. `game` is the `game` object clients get, `update` is `updater.info()` |
+| `GET /admin/api/logs?before=<id>&limit=<n>` | session | `{ lines: [{ id, ts, level, source, text }], more }`, oldest first. `limit` defaults to 500 (max 2000). Without `before` it returns the newest lines, with it the lines just older than that id. `level` is `debug`, `info`, `warn` or `error` |
+| `GET /admin/api/events` | session | Server-Sent Events, below |
+| `GET /admin/api/keys` | session | `{ keys: [{ id, name, created, lastUsed, env, bootstrap, active, current }] }`. `current` is the key this session signed in with |
+| `POST /admin/api/keys` | session | `{ name }` (1 to 40 characters) → `{ ok, key, secret }`. The secret is returned this once |
+| `DELETE /admin/api/keys/:id` | session | `{ ok }`; its sessions end at once. 400 for the `env` key or an unknown id |
+| `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke` |
+
+Timestamps are milliseconds since the epoch. "session" means a valid session or a local request (then the actor is `"local"`).
+
+**Event stream** (`/admin/api/events`). It starts with `retry: 5000`. Log events carry an SSE `id:`, and a browser that reconnects with `Last-Event-ID` is sent the buffered lines it missed.
+
+| `event:` | `data:` | Meaning |
+|---|---|---|
+| `log` | one line, as in `logs` | a new log line |
+| `change` | `{ topic }` | something changed; refetch if the visible view shows it. Topics: `users`, `state`, `update`, `keys` |
+| `ping` | `{}` | every 25 s |
+| `bye` | `{ reason }` | the session ended (`expired`) or the server is closing; the stream then closes and the dashboard shows the sign-in page |
+
+**The UI** (`admin-ui/`): `index.html`, `admin.css` and plain ES modules. `js/admin.js` loads the session, shows the sign-in page (with the certificate fingerprint) or the app, keeps one event stream and routes by URL hash. `js/api.js` wraps `fetch` and the event stream, and `js/ui.js` has shared bits. Each view is one module in `js/views/` (`overview`, `log`, `keys`, `audit`) exporting `{ id, title, mount(root, ctx) }`, registered in the `views` array in `js/admin.js`. `util.js` is not copied: `/admin/js/util.js` is `public/js/util.js`.
 
 ### DM signaling and mailboxes (Socket.IO namespace `/dm`, D28, D32)
 

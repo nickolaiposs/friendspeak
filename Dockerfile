@@ -30,17 +30,23 @@ FROM ${NODE_IMAGE}
 LABEL org.opencontainers.image.source=https://github.com/nickolaiposs/friendspeak
 WORKDIR /app
 # FRIENDSPEAK_DOCKER: AUTO_UPDATE=on is only allowed here, where a Watchtower
-# sidecar can replace the container (updater.js)
+# sidecar can replace the container (updater.js).
+# ADMIN_LOCAL=off: inside a container, loopback is never the admin's own machine
+# (with host networking or a proxy it could be anyone), so the admin dashboard
+# always asks for a key (admin.js, D34).
 ENV NODE_ENV=production \
     PORT=3000 \
     DATA_DIR=/data \
-    FRIENDSPEAK_DOCKER=1
+    FRIENDSPEAK_DOCKER=1 \
+    ADMIN_LOCAL=off
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force \
     && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins
 
-COPY server.js updater.js ./
+COPY server.js updater.js admin.js logbuffer.js ./
+COPY admin-ui ./admin-ui
+COPY public/js/util.js ./public/js/util.js
 COPY docker/healthcheck.js ./docker/healthcheck.js
 COPY game/index.js ./game/index.js
 COPY game/server/data ./game/server/data
