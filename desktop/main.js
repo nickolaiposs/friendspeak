@@ -50,7 +50,7 @@ if (process.platform === 'darwin') app.commandLine.appendSwitch('enable-features
 
 // Screen capture on Windows: keep frames on the GPU instead of copying each one
 // through memory. Chromium's capturer spends at most half its time capturing,
-// so the copy capped a 1440p share at about 30 fps in motion (D34).
+// so the copy capped a 1440p share at about 30 fps in motion (D36).
 // FRIENDSPEAK_LEGACY_CAPTURE=1 turns this off if a share comes out black or frozen.
 if (process.platform === 'win32' && process.env.FRIENDSPEAK_LEGACY_CAPTURE !== '1') app.commandLine.appendSwitch('enable-features', 'WebRtcAllowWgcUsingTexture,ZeroCopyDesktopCapture');
 

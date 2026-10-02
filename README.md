@@ -6,12 +6,12 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Text channels:** markdown (`# heading` / `##` / `###`, `-# small text`, `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `- lists`, `1. lists`, `> quotes`, `` `code` ``, ```` ``` ```` blocks), replies, edits, deletes, reactions, @mentions, typing indicators, and history that persists on the server.
 - **Direct messages:** peer to peer and end-to-end encrypted, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**, or swap **friend codes** (the **+** under **DMs**) to message someone you share no server with. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and opening one doesn't disconnect you from the server or its voice channel. Text, images (up to 4 per message, 10 MB each), GIFs, replies, edits and reactions. Messages are stored only on your two devices. If your friend is offline, the message waits, still encrypted, in their mailbox on a server they use, and arrives the next time they open the app. Images come straight from your friend's device, so the full picture loads once you're both online (a small preview arrives with the message).
 - **Calls in DMs:** the phone and camera buttons at the top of a conversation start a voice or video call with that friend. During a call you can mute, turn on your camera, share your screen (with audio) and use the soundboard, like in a voice channel. Calls are peer to peer, like the messages. You can keep browsing servers and other conversations while you're in one; joining a voice channel hangs up, and starting or accepting a call leaves the voice channel.
-- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible).
+- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible). Roles the host sets in the admin dashboard show as small tags next to names.
 - **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
 - **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. Anyone can delete any file. The host caps total storage with `MAX_STORAGE` (default 2 GB).
 - **Embeds:** links to YouTube, Vimeo, Streamable, Spotify, SoundCloud and direct image/video/audio files embed a player under the message. Wrap a link in `<angle brackets>` to post it without an embed.
-- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen, push-to-talk, per-user volume, speaking indicators, device selection, and echo/noise suppression. The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
+- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen (with optional shortcuts), push-to-talk, a master volume, per-user volume (0–300%) and mute, speaking indicators, device selection, echo cancellation, noise reduction (the browser's, or RNNoise for keyboards and fans), a noise gate with a live level display, and a speaker mode for people without headphones. The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
 - **Screen sharing:** share an entire screen or a single window, with audio, at up to 1440p 60 fps, from the monitor button in the voice panel. Friends click the red **LIVE** badge to watch. Video is only sent to people who are watching.
 - **Cameras:** the camera button next to it turns on your webcam (up to 1080p 60 fps). Right-click it, or go to **Settings → Voice & video**, to pick a device. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
 - **Emojis:** a full searchable emoji picker, plus **custom server emojis** that you upload and use as `:name:`. Channel names can have emojis too: use the emoji button in the create/rename dialog.
@@ -34,11 +34,12 @@ npm install
 npm start
 ```
 
-The server only hosts: it has no web UI. Everyone, including the host, uses the **desktop app** (below) and clicks **+** in the left rail to add the server. The server prints the addresses to use:
+The server only hosts: it has no chat web UI. Everyone, including the host, uses the **desktop app** (below) and clicks **+** in the left rail to add the server. The host can also open the [admin dashboard](#admin-dashboard) in a browser. The server prints the addresses to use:
 
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
   Friends connect:   192.168.1.20:3000
+  Admin dashboard:   http://localhost:3000/admin  (no key needed from this machine)
 ```
 
 ## Desktop app
@@ -102,7 +103,7 @@ Then restart the server. The startup log shows `Penguin game: ready`. The game s
 
 ## How friends connect (read this for voice to work)
 
-The client is the **desktop app**; the server does not serve a web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's `IP:port`. Plain `http://` works, and the microphone always works in the app.
+The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's `IP:port`. Plain `http://` works, and the microphone always works in the app.
 
 For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `https://HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
@@ -126,12 +127,68 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `GAME_MAX_USERS`| `300`         | Player limit for the world                                     |
 | `GAME_SPAWN`    | `100` (Town)  | Room new logins start in; `0` = random, like upstream Yukon    |
 | `GAME_DEBUG`    | off           | `1` = log every game packet                                    |
-| `AUTO_UPDATE`   | `off`         | `notify` = check for new releases and tell everyone on the server. `on` = also install them in the maintenance window (**Docker only**, see [Automatic updates](#automatic-updates)) |
-| `MAINTENANCE_CRON` | `0 6 * * 0` | When updates are installed, in cron format (minute hour day month weekday) and the server's local time (`TZ`). Default: Sundays at 06:00 |
+| `AUTO_UPDATE`   | `off`         | `notify` = check for new releases and tell everyone on the server. `on` = also install them in the maintenance window (**Docker only**, see [Automatic updates](#automatic-updates)). The admin dashboard can change it, and then takes precedence |
+| `MAINTENANCE_CRON` | `0 6 * * 0` | When updates are installed, in cron format (minute hour day month weekday) and the server's local time (`TZ`). Default: Sundays at 06:00. The admin dashboard can change it, and then takes precedence |
 | `MAINTENANCE_WARN` | `24h`      | How long before the window users see the warning (`90m`, `2d`, …) |
 | `GITHUB_TOKEN`  | none          | Lets the server read releases while the GitHub repo is private |
+| `ADMIN_KEY`     | generated     | Admin key for the [admin dashboard](#admin-dashboard) (16+ characters). If unset, a key is generated and printed once on first start |
+| `ADMIN_LOCAL`   | on (off in Docker) | `off` = even a request from the server's own machine needs a key |
+| `ADMIN`         | on            | `off` = no admin dashboard at all |
 
 Example: `SERVER_NAME="Game Night" PASSWORD=hunter2 npm start`
+
+## Admin dashboard
+
+The server hosts a small web dashboard at `/admin`, on the same port. It is for the host, not for friends. Today it shows:
+
+- **Overview:** version, uptime, memory, how it is hosted, who is online, storage used, the game and update status.
+- **Users:** who is online (with their IP, since when, and what they are doing), everyone who has been on the server before (last seen, last IP) and the bans (with the real IP). You can remove someone, ban them (and their IP) and unban them.
+- **Roles:** create labels such as *Founder* or *Mod*, give them a color, order them, and assign them to people. Roles are labels shown next to names in the app. They are **not** a security feature and grant nothing: anyone who copies someone's profile id shows their roles, and everyone on the server can still manage channels, emojis and bans in the app.
+- **Channels:** each channel's message and file counts, and who is in each voice channel. Read-only: manage channels in the app.
+- **Storage:** space used against `MAX_STORAGE`, usage by channel, the largest files and the size of the data files. Read-only.
+- **Penguin game:** whether the game is available and on, the world, and how many players are in it.
+- **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now**, and settings for the update mode and the maintenance window (see [Automatic updates](#automatic-updates)).
+- **Server settings:** the server's name, icon and the game switch, like **Settings → Server** in the app.
+- **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
+- **Admin keys:** create a named key for each admin and revoke it.
+- **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
+
+
+**Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from `PASSWORD`, which every friend knows. The dashboard doesn't change what friends can do in the app: they can still manage channels, emojis and bans there.
+
+### Getting in
+
+| Where the server runs | Open | Key |
+|---|---|---|
+| `npm start` on your own machine | `http://localhost:3000/admin` | not needed from that machine. From another machine it needs HTTPS and a key |
+| Docker / Portainer on a LAN | `https://<lan-ip>:3000/admin` | required |
+| A public host | `https://your.domain/admin` | required, with a real certificate |
+
+**1. `npm start` on your own machine.** Open `http://localhost:3000/admin`. A request counts as coming from your own machine when it arrives over loopback, to `localhost`, with no proxy headers. Any program or user on that machine gets in the same way. If that isn't what you want, start with `ADMIN_LOCAL=off`. From another machine, use `https://` (`npm run start:https`) and a key.
+
+**2. Docker / Portainer on a LAN.** Open `https://<lan-ip>:3000/admin`. The image always asks for a key (`ADMIN_LOCAL=off`). On the first start the server generates one and prints it once in the container log (`docker logs friendspeak`, or Portainer's log view). Copy it then: only its hash is stored. Or set `ADMIN_KEY` (16+ characters) in the stack's environment instead. The certificate is self-signed, so the browser shows a warning. To check you are talking to your own server, compare the fingerprint shown on the login page with the `Certificate:` line in the log before you click through. A key is never accepted over plain HTTP from another machine.
+
+**3. A public host.** Use a real certificate. A browser warning you click through on the public internet makes interception easy. Put a TLS reverse proxy in front, such as Caddy, and run friendspeak with `HTTPS=0`:
+
+```
+your.domain {
+    reverse_proxy friendspeak:3000
+}
+```
+
+- The proxy must pass the original `Host` header, or the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
+- Leave `ADMIN_LOCAL` off here (it is off in the image). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`.
+- For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit `/admin` at the proxy if you want per-visitor limits.
+- Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of `/admin`), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000/admin`.
+
+### Managing keys
+
+- Make one key per admin in **Admin keys** and revoke it there when someone leaves. A revoked key's sessions end at once. A new key is shown once, so copy it.
+- Signing in lasts up to 12 hours, or 1 hour without activity. Restarting the server signs everyone out.
+- If you lose every key, set `ADMIN_KEY` and restart, or delete `admin.json` in the data folder and restart to get a new first-boot key in the log.
+- Failed sign-ins are rate limited per address: five are free, then the wait grows up to an hour.
+- The audit log is also a file, `admin-audit.log` in the data folder (it rotates at 5 MB).
+- `ADMIN=off` turns the dashboard off completely.
 
 ## Docker / Portainer
 
@@ -153,6 +210,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
 | `PASSWORD` | none | **Set this** if the port is reachable from the internet |
+| `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
 | `HTTPS` | `1` | `1` = self-signed HTTPS on the port. `0` = plain HTTP for use behind a TLS reverse proxy |
 | `GAME_ASSETS_PATH` / `GAME_EXTRA_ASSETS_PATH` | `/opt/friendspeak/assets-*` | Absolute host paths of the game asset packs, mounted read-only |
 
@@ -162,7 +220,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 
 **TLS.** With `HTTPS=1`, desktop-app users are asked once to trust the server's certificate fingerprint (printed in the container log). Alternatively, put the container behind a reverse proxy with a real certificate (Nginx Proxy Manager, Traefik, Caddy, …), set `HTTPS=0`, **enable WebSocket support** on the proxy, and stop publishing the port publicly.
 
-**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `game.sqlite` (penguins), `game-secret`, and the TLS key/cert. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
+**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `mail.json` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
 
 ### Automatic updates
 
@@ -178,6 +236,10 @@ Only the watchtower container gets the Docker socket, and it only touches contai
 
 Examples: `0 4 * * *` is every day at 04:00. `30 3 * * 1-5` is weekdays at 03:30. `0 6 1 * *` is the 1st of each month.
 
+**From the dashboard.** With the Watchtower sidecar running and `WATCHTOWER_TOKEN` set, the **Updates** page has an **Update now** button when a newer version is out. It works with `AUTO_UPDATE=notify` too. Everyone on the server gets a two-minute warning, then the server updates as in step 3 above. You can cancel during the countdown. Without the sidecar the page shows the manual steps instead, and outside Docker the button isn't offered.
+
+**Mode and window from the dashboard.** The **Updates** page also sets the update mode (off, notify or on) and the maintenance window (a cron expression, with a preview of the next runs and the server's time zone). It applies at once, with no restart. A value set there takes precedence over `AUTO_UPDATE` and `MAINTENANCE_CRON` and is kept across restarts, so changing the variable afterwards does nothing until you press **Reset** next to it, which brings back the environment value. The page shows both. `on` still needs the Docker image and `WATCHTOWER_TOKEN`; without them the server stays on notify.
+
 To update by hand instead, set `AUTO_UPDATE=notify` (or pin `FRIENDSPEAK_IMAGE` to a version), then click **Update the stack** with "Re-pull image" checked. Hosts using `npm start` can use `AUTO_UPDATE=notify` and `git pull && npm install` themselves.
 
 ## GIFs
@@ -189,7 +251,7 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 ## Tips
 
 - Right-click a channel to rename or delete it. Right-click a server icon to edit or remove it.
-- Click someone in a voice channel to change their volume just for you.
+- Click someone in a voice channel to change their volume just for you, up to 300% for quiet friends, or to mute them. Double-click the slider to go back to 100%.
 - Sharing audio: Chrome/Edge share system audio when you share an entire screen on Windows, and tab or window audio elsewhere. The desktop app shares system audio on Windows and macOS 13+ (grant Screen Recording permission on macOS). Use headphones while sharing system audio from the desktop app, or friends may hear themselves.
 - Press ↑ in an empty composer to edit your last message. Shift-click the trash icon to delete without confirming (messages and files).
 - File links are unguessable but not password-protected: anyone you give a file's URL to can download it, like Discord attachments.
@@ -207,6 +269,10 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 
 ```
 server.js           Express + Socket.IO server: channels, history, emojis, voice signaling
+updater.js          Release check and maintenance-window updates
+admin.js            Admin dashboard: access, sessions, JSON API and event stream
+logbuffer.js        Keeps the last console lines in memory for the dashboard
+admin-ui/           The admin dashboard's pages (plain ES modules, served at /admin)
 public/index.html   App shell
 public/css/         Styles
 public/js/main.js   UI and app logic
@@ -214,7 +280,7 @@ public/js/voice.js  WebRTC mesh voice
 public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server mailboxes)
 public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
 public/js/call.js   Calls in direct messages (voice, camera, screen share)
-public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
+public/js/audio.js  Web Audio graph: mic, noise reduction and gate, mute/PTT gate, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
 public/js/theme.js  Themes, fonts, text size and density (CSS variables)
 public/js/gogh.js   The 50 bundled color schemes
