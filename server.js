@@ -35,7 +35,7 @@ async function startServer(opts = {}) {
   const MAX_STORAGE = parseSize(opts.maxStorage, 2 * 1024 ** 3); // all uploaded files together
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
-  // Mailboxes for direct messages (D30): sealed blobs the server can't read
+  // Mailboxes for direct messages (D32): sealed blobs the server can't read
   const DM_GUESTS = opts.dmGuests !== false;
   const MAIL_FILE = path.join(DATA_DIR, 'mail.json');
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
@@ -107,7 +107,7 @@ async function startServer(opts = {}) {
   const isImageRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
   const isKey = (v, len) => typeof v === 'string' && v.length === len && /^[A-Za-z0-9_-]+$/.test(v);
-  // A profile's public keys for direct messages (D30). The server only passes
+  // A profile's public keys for direct messages (D32). The server only passes
   // the card on; clients check its signature and pin it themselves.
   const cleanCard = (c, pid) => (c && typeof c === 'object' && c.id === pid && isKey(c.s, 43) && isKey(c.d, 43) && isKey(c.sig, 86) ? { id: pid, s: c.s, d: c.d, sig: c.sig } : undefined);
 
@@ -117,7 +117,7 @@ async function startServer(opts = {}) {
       id: pid,
       card: cleanCard(p.card, pid),
       name: str(p.name, 32).trim() || 'anon',
-      color: isHexColor(p.color) ? p.color : '#5865f2',
+      color: isHexColor(p.color) ? p.color : '#8b6cf6',
       avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : str(p.avatar, 16), // image or emoji
       banner: isImageRef(p.banner, MAX_BANNER_BYTES) || isHexColor(p.banner) ? p.banner : '', // profile background: image or color
       status: str(p.status, 64),
@@ -296,7 +296,7 @@ async function startServer(opts = {}) {
     return https.createServer({ key: fs.readFileSync(keyFile), cert }, app);
   }
 
-  // ---------- DM mailboxes (D30) ----------
+  // ---------- DM mailboxes (D32) ----------
 
   // Messages for people who are away, left by their friends. Each is sealed
   // end to end, so the server stores it without being able to read it. A
@@ -409,7 +409,7 @@ async function startServer(opts = {}) {
       broadcastUsers();
     }
 
-    // --- DM signaling and mailboxes (D28, D30) ---
+    // --- DM signaling and mailboxes (D28, D32) ---
     // Direct messages are peer to peer. Clients keep a socket on this
     // namespace for every server they have bookmarked, so friends who share
     // any server can find each other. The server says who is reachable,
