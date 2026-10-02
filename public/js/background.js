@@ -1,7 +1,8 @@
 // Camera backgrounds (D35): what is behind you is replaced before the camera
 // reaches anyone, on your own device. MediaPipe's selfie segmenter (a small
 // model, run in WebAssembly with the GPU when there is one) marks which pixels
-// are you. Each frame is then redrawn as "you" over a painted background.
+// are you. Each frame is then redrawn as "you" over a painted background: a
+// blur of the room, or a picture (one that comes with the app, or your own).
 //
 //   camera track → MediaStreamTrackProcessor → segment → composite on a canvas
 //                → MediaStreamTrackGenerator → the track VoiceClient sends
@@ -11,7 +12,8 @@
 // requestAnimationFrame, so the effect keeps running while the window is hidden.
 //
 // The library and the model load on first use, from the app's own files.
-import { settings } from './store.js';
+import { settings, backgroundStore } from './store.js';
+import { uid } from './util.js';
 
 const WASM = {
   wasmLoaderPath: '/vendor/mediapipe/wasm/vision_wasm_internal.js',
@@ -26,8 +28,10 @@ export const CAPTURE = { width: 1280, height: 720, fps: 30 };
 
 // The model works on a small copy of the frame (its own input is 256×256)
 const MODEL_WIDTH = 256;
-// Mask confidence below EDGE[0] is background, above EDGE[1] is you
-const EDGE = [0.35, 0.65];
+// Mask confidence below edge[0] is background, above edge[1] is you. A picture
+// behind you is cut tighter than a blur: a rim of your real room shows against
+// a picture, and is invisible against its own blur.
+const EDGE = { soft: [0.35, 0.65], tight: [0.5, 0.8] };
 // Soften the mask's outline (px at 720p), which hides its low resolution
 const FEATHER = 3;
 // Blur radius (px at 720p) at strength 0 and 1
@@ -35,14 +39,28 @@ const BLUR = [3, 28];
 // The blurred background is drawn at 1/4 size and scaled up: same look, far cheaper
 const BLUR_SCALE = 0.25;
 
+const canvas2d = (w = 1, h = 1, opts) => new OffscreenCanvas(w, h).getContext('2d', opts);
+
 // Everything that can stand in for the room behind you. `paint` fills the
 // output canvas wherever the person isn't (the compositor has already set
-// 'destination-over'). `p` is the pipeline: { ctx, w, h, scale, scratch }.
-// To add a kind (e.g. a picture): add an entry here, its options to
-// backgroundOf(), and a choice in the UI (BACKGROUND_CHOICES in main.js).
+// 'destination-over'). `p` is the pipeline: { ctx, w, h, scale, scratch }, and
+// `opts` is the background in use (see loadBackground).
+// To add a kind: add an entry here, its options to backgroundOf() and
+// loadBackground(), and a choice in the UI (backgroundPicker in main.js).
 export const BACKGROUNDS = {
   none: null, // the camera as it is: no pipeline at all
+  image: {
+    edge: EDGE.tight,
+    // A picture, scaled to cover the frame
+    paint({ ctx, w, h }, _frame, { image }) {
+      const s = Math.max(w / image.width, h / image.height);
+      const sw = w / s;
+      const sh = h / s;
+      ctx.drawImage(image, (image.width - sw) / 2, (image.height - sh) / 2, sw, sh, 0, 0, w, h);
+    },
+  },
   blur: {
+    edge: EDGE.soft,
     paint(p, frame, opts) {
       const { ctx, w, h, scratch } = p;
       const sw = Math.max(1, Math.round(w * BLUR_SCALE));
@@ -64,14 +82,86 @@ export function backgroundOf(st = settings.get()) {
   return {
     type: BACKGROUNDS[st.cameraBackground] ? st.cameraBackground : 'none',
     blur: Math.min(1, Math.max(0, +st.cameraBlur || 0)),
+    imageId: String(st.cameraImage || ''),
   };
 }
 
-// Running pipelines read this on every frame, so options (blur strength)
-// apply at once. Changing `type` to or from 'none' needs a new capture
-// (see restartCamera in main.js).
-let current = backgroundOf();
+// ---------- pictures ----------
+
+// Pictures that come with the app: gradients drawn here, so no image files ship
+export const PRESETS = [
+  { id: 'preset:dusk', name: 'Dusk', stops: ['#2b1b4f', '#8b4a8f', '#f0a36b'] },
+  { id: 'preset:ocean', name: 'Ocean', stops: ['#0b2545', '#13678a', '#45c4b0'] },
+  { id: 'preset:forest', name: 'Forest', stops: ['#10261c', '#2f6b47', '#b5c99a'] },
+  { id: 'preset:slate', name: 'Slate', stops: ['#16181d', '#2c313a', '#5a6272'] },
+];
+// The same gradient for a tile in the picker
+export const presetCss = (p) => `linear-gradient(160deg, ${p.stops.join(', ')})`;
+
+function presetBitmap(p) {
+  const c = canvas2d(CAPTURE.width, CAPTURE.height);
+  const g = c.createLinearGradient(CAPTURE.width * 0.3, 0, CAPTURE.width * 0.7, CAPTURE.height);
+  p.stops.forEach((color, i) => g.addColorStop(i / (p.stops.length - 1), color));
+  c.fillStyle = g;
+  c.fillRect(0, 0, CAPTURE.width, CAPTURE.height);
+  return c.canvas.transferToImageBitmap();
+}
+
+// Your own pictures live in IndexedDB (store.js), scaled down on the way in:
+// they are drawn into every frame, and the camera is 720p.
+const PICTURE_MAX = { width: 1920, height: 1080, bytes: 25 * 1024 * 1024 };
+export const pictures = {
+  all: () => backgroundStore.all(),
+  async add(file) {
+    if (!file.type.startsWith('image/')) throw new Error('That file is not an image.');
+    if (file.size > PICTURE_MAX.bytes) throw new Error('That image is too large (25 MB at most).');
+    const src = await createImageBitmap(file).catch(() => {
+      throw new Error('That image could not be read.');
+    });
+    const s = Math.min(1, PICTURE_MAX.width / src.width, PICTURE_MAX.height / src.height);
+    const c = canvas2d(Math.max(1, Math.round(src.width * s)), Math.max(1, Math.round(src.height * s)));
+    c.drawImage(src, 0, 0, c.canvas.width, c.canvas.height);
+    src.close();
+    const blob = await c.canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+    const pic = { id: uid(), name: file.name.replace(/\.[^.]+$/, '').slice(0, 40), blob, created: Date.now() };
+    await backgroundStore.put(pic);
+    return pic;
+  },
+  async remove(id) {
+    await backgroundStore.remove(id);
+    bitmaps.get(id)?.then((b) => b?.close()).catch(() => {});
+    bitmaps.delete(id);
+  },
+};
+
+// id -> Promise<ImageBitmap | null>, decoded once
+const bitmaps = new Map();
+function bitmapOf(id) {
+  if (!bitmaps.has(id)) {
+    const preset = PRESETS.find((p) => p.id === id);
+    bitmaps.set(
+      id,
+      (preset ? Promise.resolve(presetBitmap(preset)) : backgroundStore.get(id).then((pic) => (pic ? createImageBitmap(pic.blob) : null))).catch(() => null)
+    );
+  }
+  return bitmaps.get(id);
+}
+
+// The background in settings, ready to paint: backgroundOf() plus what its
+// kind needs loaded (`image` for a picture). A picture that is gone is 'none'.
+export async function loadBackground(st = settings.get()) {
+  const bg = backgroundOf(st);
+  if (bg.type !== 'image') return bg;
+  const image = bg.imageId ? await bitmapOf(bg.imageId) : null;
+  return image ? { ...bg, image } : { ...bg, type: 'none' };
+}
+
+// Running pipelines read this on every frame, so a change of strength, of
+// picture, or between blur and a picture applies at once. Changing to or from
+// 'none' needs a new capture (see setCameraBackground in main.js).
+let current = { type: 'none', blur: 0 };
 export const setBackground = (bg) => (current = bg);
+export const activeBackground = () => current;
 
 export const backgroundsSupported = () => typeof MediaStreamTrackProcessor === 'function' && typeof MediaStreamTrackGenerator === 'function';
 
@@ -98,8 +188,6 @@ function segmenter() {
     throw e;
   }));
 }
-
-const canvas2d = (w = 1, h = 1, opts) => new OffscreenCanvas(w, h).getContext('2d', opts);
 
 // Returns a stream that shows `raw` (a camera stream) with the current
 // background, or `raw` itself when there is none. Stopping the returned
@@ -147,8 +235,9 @@ export async function withBackground(raw) {
         maskPixels = mask.createImageData(m.width, m.height);
       }
       const px = maskPixels.data;
-      const k = 255 / (EDGE[1] - EDGE[0]);
-      for (let i = 0; i < conf.length; i++) px[i * 4 + 3] = (conf[i] - EDGE[0]) * k; // clamped to 0..255
+      const [lo, hi] = bg.edge;
+      const k = 255 / (hi - lo);
+      for (let i = 0; i < conf.length; i++) px[i * 4 + 3] = (conf[i] - lo) * k; // clamped to 0..255
       mask.putImageData(maskPixels, 0, 0);
     });
     // The mask's alpha, then the frame only where the mask is, then the background behind both
