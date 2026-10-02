@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME, GATE_RANGE } from './audio.js';
 import { VoiceClient, SCREEN, MEDIA } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
@@ -4250,10 +4250,10 @@ function settingsVoice(body) {
     camSel.value = st.videoDevice;
   });
   const restartMic = async () => {
-    if (!liveVoice()) return;
+    if (!liveVoice() && !testing) return;
     try {
       await audio.startMic();
-      liveVoice().micError = null;
+      if (liveVoice()) liveVoice().micError = null;
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -4277,9 +4277,59 @@ function settingsVoice(body) {
       toast(e.message, 'error');
     }
   };
+  // Noise gate, like Discord's input sensitivity: the bar is the mic's level
+  // before the gate, and the slider on it is the level the gate opens at. In
+  // automatic mode the slider moves on its own, following the room's noise.
+  const gatePct = (db) => Math.min(100, Math.max(0, ((db - GATE_RANGE.min) / (GATE_RANGE.max - GATE_RANGE.min)) * 100)) + '%';
+  const gateVal = h('span', {});
+  const gateSlider = h('input', {
+    type: 'range',
+    ...GATE_RANGE,
+    step: 1,
+    value: st.noiseGateThreshold,
+    'aria-label': 'Noise gate threshold',
+    oninput: (e) => (settings.set({ noiseGateThreshold: +e.target.value }), audio.applyMicProcessing(), syncGate()),
+  });
+  const gateBox = h('div', { class: 'gate' }, h('div', { class: 'gate-track' }), h('div', { class: 'gate-level' }), gateSlider);
+  const micNote = h('p', { class: 'muted small' });
+  const syncGate = () => {
+    const { noiseGate: mode, noiseGateThreshold } = settings.get();
+    const live = audio.micStream ? audio.micLevel : null;
+    const threshold = mode === 'manual' ? noiseGateThreshold : mode === 'auto' ? live?.threshold : null;
+    gateBox.classList.toggle('off', threshold == null);
+    gateBox.classList.toggle('closed', !!live && !live.open);
+    gateBox.style.setProperty('--thr', threshold == null ? '0%' : gatePct(threshold));
+    gateBox.style.setProperty('--lvl', live ? gatePct(live.level) : '0%');
+    gateSlider.disabled = mode !== 'manual';
+    if (mode === 'auto' && threshold != null) gateSlider.value = threshold;
+    const text = threshold == null ? '' : `opens above ${Math.round(threshold)} dB`.replace('-', '−');
+    if (gateVal.textContent !== text) gateVal.textContent = text;
+    const note = micStatus();
+    if (micNote.textContent !== note) micNote.textContent = note;
+    micNote.hidden = !note;
+  };
+  // What the running mic really applies: a device or OS can refuse a constraint without an error
+  const micStatus = () => {
+    const info = audio.micInfo;
+    if (!info) return 'Join a voice channel or press Test mic to see your level here.';
+    const notes = [];
+    if (info.fallback) notes.push('High noise reduction couldn’t start on this device, so the standard one is used.');
+    const refused = [
+      ['echoCancellation', 'echo cancellation'],
+      ['noiseSuppression', 'noise suppression'],
+      ['autoGainControl', 'automatic gain control'],
+    ]
+      .filter(([k]) => info.want[k] && info.got[k] === false)
+      .map(([, label]) => label);
+    if (refused.length) notes.push(`This microphone or system didn’t apply ${refused.join(' or ')}.`);
+    if (!info.got.echoCancellation) notes.push('Echo cancellation is off: use headphones, or friends will hear themselves.');
+    if (audio.micLevel?.ducked) notes.push('Speaker mode is holding your mic down.');
+    return notes.join(' ');
+  };
   const iv = setInterval(() => {
     const lvl = audio.selfAnalyser ? Level(audio.selfAnalyser) : 0;
     meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
+    syncGate();
   }, 60);
 
   const pttBtn = h('button', { class: 'btn ghost small hotkey-btn' }, st.pttKey.replace(/^Key|^Digit/, ''));
@@ -4319,6 +4369,11 @@ function settingsVoice(body) {
       h('input', { type: 'checkbox', checked: st[key], onchange: (e) => (settings.set({ [key]: e.target.checked }), after?.(e.target.checked)) }),
       h('span', {}, label)
     );
+  const select = (key, options, after) => {
+    const el = h('select', { onchange: (e) => (settings.set({ [key]: e.target.value }), after?.(e.target.value)) }, Object.entries(options).map(([k, label]) => h('option', { value: k }, label)));
+    el.value = st[key];
+    return el;
+  };
   const slider = (key, label, max, after) => {
     const val = h('span', {}, Math.round(st[key] * 100) + '%');
     return h(
@@ -4340,8 +4395,20 @@ function settingsVoice(body) {
     h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
     h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
+    h('label', { class: 'field' }, h('span', {}, 'Noise reduction'), select('noiseReduction', { off: 'Off', standard: 'Standard', high: 'High (RNNoise)' }, restartMic)),
+    h('p', { class: 'muted small' }, 'Standard is the browser’s own filter. High runs a neural network on your mic that also takes out keyboards, fans and other noise that isn’t a voice.'),
+    h(
+      'div',
+      { class: 'field' },
+      h('span', {}, 'Noise gate ', gateVal),
+      h('div', { class: 'row' }, select('noiseGate', { off: 'Off', auto: 'Automatic', manual: 'Manual' }, () => (audio.applyMicProcessing(), syncGate())), gateBox)
+    ),
+    h('p', { class: 'muted small' }, 'The gate silences your mic while it is quieter than the marker. The bar shows how loud your mic is: set the marker above your background noise and below your voice, or let Automatic follow the room.'),
     check('echoCancellation', 'Echo cancellation', restartMic),
-    check('noiseSuppression', 'Noise suppression', restartMic),
+    check('autoGainControl', 'Automatic gain control', restartMic),
+    check('speakerMode', 'Speaker mode: turn my mic down while friends are talking', () => audio.applyMicProcessing()),
+    h('p', { class: 'muted small' }, 'Echo cancellation works best with headphones. If friends still hear themselves through your speakers, speaker mode stops it, at the cost of talking over each other.'),
+    micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
     h('div', { class: 'field' }, h('span', {}, 'Push-to-talk key'), pttBtn),
