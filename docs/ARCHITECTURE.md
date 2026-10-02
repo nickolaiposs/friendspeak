@@ -302,11 +302,11 @@ Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail
 | `fs.keys` | `{ <profileId>: { sign: { pub, priv }, dh: { pub, priv } } }`: the profile's key pairs (base64url; raw public, PKCS#8 private). Included in profile export files as `keys` |
 | `fs.servers` | `[{ id, address (origin), password, serverName, serverIcon }]` (name and icon are cached from the server for the rail; there are no per-user nicknames) |
 | `fs.lastServer` | server bookmark id |
-| `fs.settings` | see `DEFAULT_SETTINGS` (devices, camera background, volumes, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
+| `fs.settings` | see `DEFAULT_SETTINGS` (devices, camera background, volumes, mic processing, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
 | IndexedDB `friendspeak/sounds` | `{ id, name, emoji, volume, hotkey, blob, type, created }` |
 | IndexedDB `friendspeak/dmContacts` | `{ key: "<myId>\|<theirId>", owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, relays: [address], seen: [opId], wants: [fileId], conflict? }` (index `owner`). Queued ops also carry `at` and `mailed` (timestamps) |
 | IndexedDB `friendspeak/dmMessages` | `{ key: "<thread>\|<msgId>", thread, id, author, name, text, gif, replyTo, reactions, ts, edited?, pending?, mailed?, files?, note? }` (index `thread`); `note` marks a local-only line such as a call result |
-| IndexedDB `friendspeak/backgrounds` | `{ id, name, blob (JPEG, at most 1920×1080), created }`: your own camera background pictures (D35) |
+| IndexedDB `friendspeak/backgrounds` | `{ id, name, blob (JPEG, at most 1920×1080), created }`: your own camera background pictures (D37) |
 | IndexedDB `friendspeak/dmFiles` | `{ key: "<thread>\|<fileId>", thread, id, msg, blob, type, name, size }` (index `thread`): DM images, sent and received |
 
 Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`).
@@ -315,7 +315,9 @@ Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`
 
 ```mermaid
 flowchart LR
-  Mic["getUserMedia"] --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT)"]
+  Mic["getUserMedia<br/>(browser echo cancellation,<br/>noise suppression, auto gain)"] -- "High only" --> RNN["RNNoise<br/>(AudioWorklet + WASM)"] --> NG["mic-worklet.js<br/>(noise gate, speaker mode)"]
+  Mic --> NG
+  NG --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT)"]
   Gate --> Out["MediaStreamDestination<br/>= outgoing track"]
   Gate --> SelfA["analyser<br/>(own speaking ring)"]
   SB["soundboard clips<br/>(per-sound gain)"] --> Bus["sbBus<br/>(soundboard volume)"]
@@ -327,7 +329,15 @@ flowchart LR
   Remote --> PeerA["analyser<br/>(their speaking ring)"]
   UserGain -- "above 100%: limiter" --> VoiceBus["voiceBus<br/>(voices volume)"] --> Master
   Cues["cues"] --> CueBus["cueBus<br/>(notification volume)"] --> Master
+  Master -. "sidechain (speaker mode)" .-> NG
 ```
+
+- **Mic processing (D35):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`; the browser resamples for other devices). `audio.startMic()` builds the mic chain from four settings, and `audio.micInfo` records what the track really applied (`track.getSettings()`), which Settings → Voice shows when a device or OS refused something.
+  - `noiseReduction`: `off`, `standard` (the browser's `noiseSuppression` constraint) or `high`: RNNoise in an `AudioWorkletNode`, with the browser's suppression turned off so the two don't fight. The worklet and its two `.wasm` builds (SIMD and plain) are prebuilt files in `public/vendor/web-noise-suppressor/` (see its README for the origin and licences); `audio.processors()` fetches the wasm, validates it and hands it to the worklet. If that fails, or the context isn't at 48 kHz, `high` falls back to `standard`. It adds about 21 ms and well under 1% of a core.
+  - `noiseGate` (`off`, `auto`, `manual`) and `noiseGateThreshold` (dB): `mic-worklet.js` passes the mic while its level is above the threshold (5 dB hysteresis, 250 ms hold, 2 ms open and 60 ms close ramps). `auto` puts the threshold 10 dB above a tracked noise floor, between −60 and −25 dB. The processor posts `{ level, threshold, open, ducked }` about 45 times a second (`audio.micLevel`), which draws the level bar under the slider in Settings.
+  - `speakerMode`: the same processor takes `master` (everything the app plays) as a second input and turns the mic down 18 dB while that is above −50 dB, with a 300 ms hold. Screen share audio plays through `<video>` elements and isn't part of it.
+  - `echoCancellation` and `autoGainControl` are the browser's, as constraints.
+  - Only the mic passes through these stages. The soundboard joins after them, at `outDest`. The gate and speaker mode settings apply live (`audio.applyMicProcessing()`); the others restart the mic.
 
 - **Full mesh:** the newcomer calls everyone already in the channel (`voice:join` ack lists their socket ids). Existing members answer.
 - **Signaling order:** each peer has a promise chain (`enqueue`), so ICE candidates never race the SDP.
@@ -335,7 +345,7 @@ flowchart LR
 - **Screen sharing and cameras (D22):** there are two media kinds, `screen` and `camera`, with limits in `MEDIA`:
   - `screen` comes from `getDisplayMedia`: up to 1920×1080 at 60 fps, plus audio when the platform allows, with an 8 Mbps cap.
   - `camera` comes from `getUserMedia` (`settings.videoDevice`): 1280×720 at 30 fps with no audio (your voice already carries it), with a 2.5 Mbps cap.
-  - **Camera backgrounds (`background.js`, D35):** `settings.cameraBackground` is `none`, `blur` (strength `cameraBlur`) or `image` (picture `cameraImage`: a preset's id, or one of your own in IndexedDB). With a background, `openCamera` in `main.js` captures at 720p30 and passes the stream through `withBackground`. Each frame goes `MediaStreamTrackProcessor` → MediaPipe selfie segmentation (WebAssembly from `/vendor/mediapipe/`, model from `/models/`, both loaded on first use) → a canvas that draws the person over a painter from `BACKGROUNDS` → `MediaStreamTrackGenerator`. `VoiceClient` gets that track like any camera, so nothing changes on the wire. Stopping the track stops the real camera.
+  - **Camera backgrounds (`background.js`, D37):** `settings.cameraBackground` is `none`, `blur` (strength `cameraBlur`) or `image` (picture `cameraImage`: a preset's id, or one of your own in IndexedDB). With a background, `openCamera` in `main.js` captures at 720p30 and passes the stream through `withBackground`. Each frame goes `MediaStreamTrackProcessor` → MediaPipe selfie segmentation (WebAssembly from `/vendor/mediapipe/`, model from `/models/`, both loaded on first use) → a canvas that draws the person over a painter from `BACKGROUNDS` → `MediaStreamTrackGenerator`. `VoiceClient` gets that track like any camera, so nothing changes on the wire. Stopping the track stops the real camera.
   - **Camera preview (`cameraDialog`):** turning the camera on always opens a dialog first, with a mirrored preview (`cameraPreview`) and the background tiles (`backgroundPicker`: None, Blur with its strength, the presets, your pictures, Add a picture). Nobody receives anything until "Turn on camera", which hands the preview's own capture to `VoiceClient.setMedia`. The caller of a DM video call gets the dialog when the call connects. Opened from the camera button's right-click menu while the camera is on, the dialog shows and changes the live camera. Changes go through `setCameraBackground`: strength, picture and blur ↔ picture apply to the running pipeline at once; to or from `none` it swaps in a new capture with `replaceMedia`. Switching devices mid-call restarts the camera without the dialog (`startCamera`). Settings → Voice & video has the same tiles and a preview.
 
   `VoiceClient.setMedia(kind, stream)` only announces the media (`voice:media`). A viewer sends `{ watch: kind, on: true }`. The sender replies with `{ media: kind, id: streamId }` and adds `sendonly` transceivers for that viewer only (`contentHint = 'motion'`, hardware-friendly codec order, per-viewer `scaleResolutionDownBy`/`maxBitrate`/`active` from their `{ view }` reports; see D22). Stopping calls `transceiver.stop()` and sends `{ media: kind, id: null }`. The receiver matches incoming tracks to a kind by the announced stream id; unannounced audio is voice.

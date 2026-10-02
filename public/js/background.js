@@ -1,4 +1,4 @@
-// Camera backgrounds (D35): what is behind you is replaced before the camera
+// Camera backgrounds (D37): what is behind you is replaced before the camera
 // reaches anyone, on your own device. MediaPipe's selfie segmenter (a small
 // model, run in WebAssembly with the GPU when there is one) marks which pixels
 // are you. Each frame is then redrawn as "you" over a painted background: a
