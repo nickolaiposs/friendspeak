@@ -403,6 +403,8 @@ body.game-visible #main { display: none; }
 .menu-item.danger { color: var(--red-text); }
 .menu-item.danger:hover { background: color-mix(in srgb, var(--red) 16%, transparent); color: var(--red-text); }
 .menu-label { font-size: calc(12px * var(--font-scale)); font-weight: 600; color: var(--muted); padding: 6px 10px; }
+.share-quality { padding: 6px 10px 0; }
+.share-quality .field { margin-bottom: 8px; }
 .menu-sep { height: 1px; background: var(--line); margin: 4px 6px; }
 .profile-item span:nth-child(2) { flex: 1; }
 .profile-item .check { color: var(--green); }
@@ -468,6 +470,12 @@ body.stream-visible #stream-view { display: flex; }
 body.stream-visible #main, body.stream-visible #game-view { display: none; }
 #stream-view .chat-header { background: var(--bg-2); gap: 10px; }
 #stream-view .chat-header .stream-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-panel { max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; }
+.stats-panel-inner { padding: 10px 12px; }
+.stats-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.stats-table { border-collapse: collapse; font-size: calc(12px * var(--font-scale)); font-variant-numeric: tabular-nums; }
+.stats-table th, .stats-table td { padding: 3px 10px 3px 0; text-align: left; white-space: nowrap; }
+.stats-table th { color: var(--muted); font-weight: 600; }
 .stream-stage { flex: 1; min-height: 0; position: relative; display: flex; background: #000; }
 .stream-stage video { flex: 1; width: 100%; height: 100%; object-fit: contain; background: #000; }
 .stream-status { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
