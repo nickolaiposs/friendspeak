@@ -1,4 +1,4 @@
-// Keypair identities for direct messages (D30).
+// Keypair identities for direct messages (D32).
 //
 // Every local profile owns two key pairs, generated on this device and kept
 // out of the profile object so they are never sent to a server:

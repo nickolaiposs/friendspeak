@@ -28,7 +28,7 @@ sequenceDiagram
 
   App->>FS: game:login
   FS->>G: login(profile)
-  G->>G: find/create penguin (friendspeak_accounts), mint auth token
+  G->>G: find/create penguin (friendspeak_accounts), rename it if the profile name changed, mint auth token
   G-->>App: { username, token, path: "/game/" }
   App->>F: open <server>/game/#u=<name>&t=<selector:validator>
   F->>F: friendspeak.js strips fragment, applies worlds + extras
@@ -54,7 +54,7 @@ What `game/index.js` does at startup:
    - SQLite lives at `dataDir/game.sqlite`.
    - Rate limiting is on.
    - `preferredSpawn` is 100 (the Town).
-5. **Creates `friendspeak_accounts`** (profile id → Yukon user id).
+5. **Creates `friendspeak_accounts`** (profile id → Yukon user id, plus the name the penguin's username was derived from), adding the `baseName` column to tables created by earlier versions.
 
 ## Assets
 
