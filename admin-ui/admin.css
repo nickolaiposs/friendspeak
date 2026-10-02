@@ -213,3 +213,13 @@ input[type='color'] { width: 48px; height: 36px; padding: 2px; }
 .msg-ok { color: var(--green); }
 .stack { display: flex; flex-direction: column; gap: 12px; max-width: 560px; }
 @media (max-width: 720px) { .nav-h { display: none; } }
+
+/* PR 4: update settings */
+fieldset.card { margin: 0; min-width: 0; }
+fieldset.card legend { padding: 0 6px; font-weight: 600; color: var(--text-strong); }
+.choice { display: flex; gap: 10px; align-items: flex-start; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+.choice:hover { background: var(--bg-hover); }
+.choice input { margin-top: 4px; accent-color: var(--accent); width: auto; }
+.choice-help { display: block; }
+.linkbtn { color: var(--link); text-decoration: underline; padding: 0; }
+#ucron { font-family: var(--mono); }

@@ -18,26 +18,58 @@ const MIN_LEAD = 10 * 60e3; // never schedule a window that starts in less than 
 const FINAL_WARNING = 10 * 60e3; // clients re-show a dismissed warning this close to the window
 const GIVE_UP_AFTER = 15 * 60e3; // still running this long after triggering → the update failed
 
-function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0', warn = 24 * 60 * 60e3, inDocker, watchtowerUrl, watchtowerToken, onChange, log = console }) {
-  mode = ['notify', 'on'].includes(mode) ? mode : 'off';
+function createUpdater({ version, mode: envMode = 'off', repo, token, cron: envCron = '0 6 * * 0', warn = 24 * 60 * 60e3, inDocker, watchtowerUrl, watchtowerToken, onChange, overrides, log = console }) {
+  const MODES = ['off', 'notify', 'on'];
+  const DEFAULT_CRON = '0 6 * * 0';
   const releasesUrl = `https://github.com/${repo}/releases`;
-  let schedule;
+  const normCron = (c) => String(c).trim().split(/\s+/).join(' ');
+  // Throws if it doesn't parse, or parses but never fires (e.g. "0 0 31 2 *")
+  const compile = (c) => {
+    const sch = parseCron(c);
+    nextRun(sch, Date.now());
+    return sch;
+  };
+
+  // The environment values and the dashboard's overrides are kept apart. The
+  // requested mode, the effective mode and the active schedule are derived from
+  // them in derive(), and nowhere else.
+  const env = { mode: MODES.includes(envMode) ? envMode : 'off', cron: normCron(envCron) };
   try {
-    schedule = parseCron(cron);
-    nextRun(schedule, Date.now()); // e.g. "0 0 31 2 *" parses but never fires
+    compile(env.cron);
   } catch (err) {
-    log.error(`[update] MAINTENANCE_CRON "${cron}" is invalid (${err.message}); using "0 6 * * 0"`);
-    cron = '0 6 * * 0';
+    log.error(`[update] MAINTENANCE_CRON "${envCron}" is invalid (${err.message}); using "${DEFAULT_CRON}"`);
+    env.cron = DEFAULT_CRON;
+  }
+  const ov = {}; // { mode?, cron? }, saved by the caller (state.json)
+  if (overrides && typeof overrides === 'object') {
+    if (MODES.includes(overrides.mode)) ov.mode = overrides.mode;
+    else if (overrides.mode !== undefined) log.warn('[update] ignoring the saved update mode (not off, notify or on)');
+    if (typeof overrides.cron === 'string') {
+      try {
+        compile(normCron(overrides.cron));
+        ov.cron = normCron(overrides.cron);
+      } catch (err) {
+        log.warn(`[update] ignoring the saved maintenance window "${overrides.cron}" (${err.message})`);
+      }
+    } else if (overrides.cron !== undefined) log.warn('[update] ignoring the saved maintenance window (not text)');
+  }
+
+  let requestedMode, mode, cron, schedule;
+  const warned = {}; // each downgrade is logged when it starts to apply, not on every change
+  function derive() {
+    requestedMode = ov.mode ?? env.mode;
+    mode = requestedMode;
+    cron = ov.cron ?? env.cron;
     schedule = parseCron(cron);
+    const why = mode === 'on' && !inDocker ? 'docker' : mode === 'on' && !watchtowerToken ? 'token' : null;
+    if (why) mode = 'notify';
+    if (why !== warned.why) {
+      if (why === 'docker') log.warn('[update] AUTO_UPDATE=on only works in the Docker image; falling back to notify');
+      if (why === 'token') log.warn('[update] AUTO_UPDATE=on without WATCHTOWER_TOKEN: new versions are announced, not installed (see README → Automatic updates)');
+      warned.why = why;
+    }
   }
-  if (mode === 'on' && !inDocker) {
-    log.warn('[update] AUTO_UPDATE=on only works in the Docker image; falling back to notify');
-    mode = 'notify';
-  }
-  if (mode === 'on' && !watchtowerToken) {
-    log.warn('[update] AUTO_UPDATE=on without WATCHTOWER_TOKEN: new versions are announced, not installed (see README → Automatic updates)');
-    mode = 'notify';
-  }
+  derive();
 
   // latest: { version, url } of a newer release; at: when it will be installed
   // manual: an install requested from the admin dashboard is counting down
@@ -45,7 +77,10 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
   const st = { latest: null, at: null, installing: false, lastError: null, lastCheck: null, watchtower: null, manual: false };
   const canInstall = !!inDocker && !!watchtowerToken; // independent of `mode`: AUTO_UPDATE=notify can still be installed by hand
   let checkTimer = null;
+  let firstTimer = null;
   let windowTimer = null;
+  let started = false; // start() was called
+  let stopped = false; // stop() was called: nothing may start timers again
 
   function info() {
     return {
@@ -61,7 +96,19 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
     };
   }
   // info() plus what the admin dashboard shows
-  const status = () => ({ ...info(), lastCheck: st.lastCheck, lastError: st.lastError, watchtower: st.watchtower, canInstall, manual: st.manual });
+  const status = () => ({
+    ...info(),
+    lastCheck: st.lastCheck,
+    lastError: st.lastError,
+    watchtower: st.watchtower,
+    canInstall,
+    manual: st.manual,
+    requestedMode,
+    env: { ...env },
+    overridden: { mode: 'mode' in ov, cron: 'cron' in ov },
+    nextWindow: nextRun(schedule, Date.now()),
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
   const changed = () => onChange?.(info());
 
   // One check at a time: a check requested while another runs shares its result
@@ -80,6 +127,7 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
       if (res.status === 404) throw new Error(token ? 'no published release yet' : 'no release found (private repo? set GITHUB_TOKEN)');
       if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
       const rel = await res.json();
+      if (mode === 'off') return; // switched off while the request was out
       const latest = String(rel.tag_name || '').replace(/^v/, '');
       st.lastError = null;
       st.lastCheck = Date.now();
@@ -93,11 +141,12 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
       // Checked again every time, so starting Watchtower later is enough.
       let scheduled = false;
       if (mode === 'on' && !st.at) {
-        if (await watchtowerUp()) {
+        const up = await watchtowerUp();
+        if (up && mode === 'on' && !st.at && st.latest) {
           st.at = nextRun(schedule, Date.now() + MIN_LEAD);
           scheduled = true;
           armWindow();
-        } else if (isNew) log.warn(`[update] can't reach Watchtower at ${watchtowerUrl}; announcing ${latest} without installing it`);
+        } else if (!up && isNew) log.warn(`[update] can't reach Watchtower at ${watchtowerUrl}; announcing ${latest} without installing it`);
       }
       if (isNew) log.log(`[update] friendspeak ${latest} is available` + (mode === 'on' ? '' : ' (AUTO_UPDATE=notify)'));
       if (scheduled) log.log(`[update] installing ${latest} at ${new Date(st.at).toString()}`);
@@ -190,20 +239,112 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
     return status();
   }
 
+  // Periodic checks exist only while checks are on, and never after stop()
+  function syncTimers() {
+    if (stopped || !started) return;
+    if (mode === 'off') {
+      clearInterval(checkTimer);
+      clearTimeout(firstTimer);
+      checkTimer = firstTimer = null;
+    } else if (!checkTimer) {
+      checkTimer = setInterval(check, CHECK_EVERY);
+      checkTimer.unref();
+    }
+  }
+
+  // `on` just became the effective mode with a newer version already known
+  async function scheduleKnown() {
+    const ready = () => mode === 'on' && st.latest && !st.at && !st.installing;
+    if (!ready() || !(await watchtowerUp()) || !ready()) return;
+    st.at = nextRun(schedule, Date.now() + MIN_LEAD);
+    armWindow();
+    log.log(`[update] installing ${st.latest.version} at ${new Date(st.at).toString()}`);
+    changed();
+  }
+
+  // Change the update mode and/or the maintenance window at runtime (the admin
+  // dashboard). A value sets the override, null removes it, undefined leaves it.
+  async function configure({ mode: m, cron: c } = {}) {
+    if (st.installing) return { error: 'An update is being installed' };
+    if (m !== undefined && m !== null && !MODES.includes(m)) return { error: 'Mode must be off, notify or on' };
+    let newCron;
+    if (c !== undefined && c !== null) {
+      try {
+        if (typeof c !== 'string') throw new Error('expected text');
+        compile((newCron = normCron(c)));
+      } catch (err) {
+        return { error: `Invalid schedule: ${err.message}` };
+      }
+    }
+    const before = { mode, cron, saved: JSON.stringify(ov) };
+    if (m === null) delete ov.mode;
+    else if (m !== undefined) ov.mode = m;
+    if (c === null) delete ov.cron;
+    else if (newCron !== undefined) ov.cron = newCron;
+    derive();
+
+    let checkAtOnce = false;
+    if (mode !== before.mode) {
+      log.log(`[update] update mode is now ${mode}` + (mode !== requestedMode ? ` (${requestedMode} requested)` : ''));
+      if (mode === 'off') {
+        Object.assign(st, { latest: null, at: null, manual: false });
+        clearTimeout(windowTimer);
+      } else if (before.mode === 'off') checkAtOnce = true;
+      else if (mode === 'notify' && st.at && !st.manual) {
+        st.at = null; // `on` is over: the scheduled window goes, a requested install stays
+        clearTimeout(windowTimer);
+      }
+    }
+    if (cron !== before.cron) {
+      log.log(`[update] maintenance window is now "${cron}"`);
+      if (mode === 'on' && st.at && !st.manual) {
+        st.at = nextRun(schedule, Date.now() + MIN_LEAD);
+        armWindow();
+      }
+    }
+    syncTimers();
+    if (mode !== before.mode || cron !== before.cron || JSON.stringify(ov) !== before.saved) changed();
+    if (checkAtOnce && started && !stopped) {
+      clearTimeout(firstTimer);
+      check();
+    } else if (mode === 'on' && before.mode !== 'on') await scheduleKnown();
+    return { ok: true };
+  }
+
+  // The next three runs of a schedule, for the dashboard; changes nothing
+  function preview(c) {
+    try {
+      if (typeof c !== 'string') throw new Error('expected text');
+      const norm = normCron(c);
+      const sch = compile(norm);
+      const first = nextRun(sch, Date.now());
+      const second = nextRun(sch, first);
+      return { ok: true, cron: norm, next: [first, second, nextRun(sch, second)] };
+    } catch (err) {
+      return { error: `Invalid schedule: ${err.message}` };
+    }
+  }
+
   return {
     info,
     status,
     checkNow,
     installSoon,
     cancelInstall,
+    configure,
+    preview,
+    overrides: () => ({ ...ov }),
     start() {
-      if (mode === 'off') return;
-      setTimeout(check, 30e3).unref();
-      checkTimer = setInterval(check, CHECK_EVERY);
-      checkTimer.unref();
+      started = true;
+      if (stopped || mode === 'off') return;
+      firstTimer = setTimeout(check, 30e3);
+      firstTimer.unref();
+      syncTimers();
     },
     stop() {
+      stopped = true;
       clearInterval(checkTimer);
+      clearTimeout(firstTimer);
       clearTimeout(windowTimer);
     },
   };
