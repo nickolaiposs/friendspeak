@@ -1,11 +1,12 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level } from './audio.js';
-import { VoiceClient, SCREEN, MEDIA } from './voice.js';
+import { audio, Level, MAX_USER_VOLUME, GATE_RANGE } from './audio.js';
+import { VoiceClient, MEDIA, TIERS, MODES } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
+import { BACKGROUNDS, CAPTURE, PRESETS, presetCss, pictures, backgroundOf, loadBackground, activeBackground, setBackground, withBackground } from './background.js';
 import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
 
 applyAppearance(); // before the first render
@@ -99,6 +100,7 @@ const I = {
   headOff: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.4"/></svg>',
   gear: '<svg viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2.4h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>',
   hash: '<svg viewBox="0 0 24 24"><path d="M5.88 21 6.6 17H3l.35-2h3.6l1.06-6H4.4l.35-2h3.6l.72-4h2l-.72 4h6l.72-4h2l-.72 4H22l-.35 2h-3.6l-1.06 6h3.61l-.35 2h-3.6l-.72 4h-2l.72-4h-6l-.72 4h-2zm4.13-12-1.06 6h6l1.06-6h-6z"/></svg>',
+  speakerOff: '<svg viewBox="0 0 24 24"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg>',
   speaker: '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
   phone: '<svg viewBox="0 0 24 24"><path d="M6.62 10.79a15.05 15.05 0 0 0 6.59 6.59l2.2-2.2a1 1 0 0 1 1.02-.24c1.12.37 2.33.57 3.57.57a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1.02l-2.2 2.2z"/></svg>',
@@ -261,6 +263,14 @@ const DMCALL = new DmCalls(DM, {
 // Whichever is live, the DM call or the voice channel's call (S.call): its VoiceClient takes the camera and the screen share
 const liveVoice = () => DMCALL.voice || (S.voiceChannel ? S.voice : null);
 
+// A watched stream's sound plays through its <video>, outside the audio graph
+// (audio.js), so the master volume and the output device are set on each one.
+const streamVolume = (v) => v * settings.get().masterVolume;
+function applyOutputDevice(deviceId) {
+  audio.setOutputDevice(deviceId);
+  for (const t of [...(S.stage?.tiles.values() || []), ...dmCallUi.tiles.values()]) if (t.kind === 'screen') t.video?.setSinkId?.(deviceId || '').catch(() => {});
+}
+
 const clock = (ms) => {
   const s = Math.max(0, Math.floor(ms / 1000));
   const mm = String(Math.floor(s / 60) % 60);
@@ -309,7 +319,7 @@ function dmCallButtons(c, compact) {
       'button',
       {
         class: 'icon-btn' + (v.local.camera ? ' sharing' : ''),
-        title: (v.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+        title: (v.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click for cameras and backgrounds)',
         onclick: toggleCamera,
         oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
       },
@@ -459,7 +469,7 @@ function renderDmCall() {
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
       t.video.muted = !theirs || S.deafened;
-      t.video.volume = ui.volume;
+      t.video.volume = streamVolume(ui.volume);
     }
     t.report?.();
   }
@@ -514,7 +524,7 @@ function dmCallTile(key, who, kind) {
         'label',
         { class: 'stream-volume', title: 'Stream volume' },
         icon('speaker'),
-        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => (video.volume = ui.volume = +e.target.value) })
+        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => ((ui.volume = +e.target.value), (video.volume = streamVolume(ui.volume))) })
       )
     );
   }
@@ -774,6 +784,23 @@ function profileCardHead(p, extra) {
   );
 }
 
+// Role labels (set by the host in the admin dashboard; they grant nothing). The server's order is the display order.
+// Everything here is server-supplied, so shapes are checked and names only ever become text nodes.
+// The text color is pulled toward the theme's text color, so a dark role stays readable on a dark theme.
+const MAX_ROLES = 10;
+function rolesOf(profileId) {
+  const sv = S.server;
+  if (!sv || !Array.isArray(sv.roles) || !sv.memberRoles || typeof sv.memberRoles !== 'object') return [];
+  const ids = sv.memberRoles[profileId];
+  if (!Array.isArray(ids) || !ids.length) return [];
+  const have = new Set(ids);
+  return sv.roles.filter((r) => r && typeof r.name === 'string' && r.name && have.has(r.id)).slice(0, MAX_ROLES);
+}
+function roleTag(r) {
+  const color = typeof r.color === 'string' && /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : 'var(--muted)';
+  return h('span', { class: 'role-tag', title: r.name, style: { color: `color-mix(in srgb, ${color} 72%, var(--text))`, background: `color-mix(in srgb, ${color} 16%, transparent)`, borderColor: `color-mix(in srgb, ${color} 55%, var(--muted))` } }, r.name);
+}
+
 function profilePopover(anchor, u, align = 'right') {
   const p = fullProfile(u);
   const live = S.users.find((x) => x.id === p.id);
@@ -783,12 +810,13 @@ function profilePopover(anchor, u, align = 'right') {
       ? 'Last seen ' + fmtTime(p.seen)
       : '';
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
+  const roles = rolesOf(p.id);
   const pop = popover(
     anchor,
     h(
       'div',
       { class: 'profile-card' },
-      profileCardHead(p, doing ? h('div', { class: 'small pc-doing' }, doing) : null),
+      profileCardHead(p, [doing ? h('div', { class: 'small pc-doing' }, doing) : null, roles.length ? h('div', { class: 'role-tags' }, roles.map(roleTag)) : null]),
       other
         ? h(
             'div',
@@ -1223,6 +1251,14 @@ function openSocket(entry, rejoinVoice = null) {
 
   socket.on('bans', (bans) => {
     c.server.bans = bans;
+    if (viewed()) renderMembers();
+  });
+
+  socket.on('roles', (msg) => {
+    if (!c.server) return;
+    const { roles, memberRoles } = msg && typeof msg === 'object' ? msg : {};
+    c.server.roles = Array.isArray(roles) ? roles : [];
+    c.server.memberRoles = memberRoles && typeof memberRoles === 'object' && !Array.isArray(memberRoles) ? memberRoles : {};
     if (viewed()) renderMembers();
   });
 
@@ -1721,35 +1757,65 @@ function voiceUserEl(u) {
           icon('cam')
         )
       : null,
-    u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null
+    u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null,
+    isMe ? null : userVolumeBadge(u)
   );
 }
 
-function userVolumePopover(anchor, u) {
-  const vols = settings.get().userVolumes;
-  const val = h('span', {}, Math.round((vols[u.id] ?? 1) * 100) + '%');
+// What we did to someone's volume, next to their name: muted for us, or a
+// percentage when it isn't 100%
+function userVolumeBadge(u) {
+  const st = settings.get();
+  if (st.userMutes[u.id]) return h('span', { class: 'icon state', title: 'Muted for you', html: I.speakerOff });
+  const v = st.userVolumes[u.id] ?? 1;
+  if (v === 1) return null;
+  return h('span', { class: 'vol-badge' + (v > 1 ? ' boost' : ''), title: v > 1 ? 'Boosted for you' : 'Turned down for you' }, Math.round(v * 100) + '%');
+}
+
+// Volume and mute for one person, for us only (stored by profile id). Above
+// 100% boosts them.
+function userVolumePopover(anchor, u, align = 'right') {
+  const val = h('span', {});
+  const slider = h('input', {
+    type: 'range',
+    min: 0,
+    max: MAX_USER_VOLUME,
+    step: 0.01,
+    title: 'Double-click to reset',
+    oninput: (e) => apply({ userVolumes: { ...settings.get().userVolumes, [u.id]: +e.target.value } }),
+    onchange: renderChannels, // the badge next to their name
+    ondblclick: () => reset(),
+  });
+  const muteBtn = h('button', { class: 'btn small ghost', onclick: () => (apply({ userMutes: { ...settings.get().userMutes, [u.id]: !settings.get().userMutes[u.id] } }), renderChannels()) });
+  const resetBtn = h('button', { class: 'btn small ghost', onclick: () => reset() }, 'Reset');
+  const draw = () => {
+    const st = settings.get();
+    const v = st.userVolumes[u.id] ?? 1;
+    const muted = !!st.userMutes[u.id];
+    slider.value = v;
+    slider.classList.toggle('boost', v > 1);
+    val.textContent = Math.round(v * 100) + '%' + (muted ? ' (muted)' : v > 1 ? ' (boosted)' : '');
+    muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    resetBtn.disabled = v === 1;
+  };
+  const apply = (patch) => {
+    settings.set(patch);
+    S.voice?.applyVolume(u.sid);
+    draw();
+  };
+  const reset = () => (apply({ userVolumes: { ...settings.get().userVolumes, [u.id]: 1 } }), renderChannels());
+  draw();
   popover(
     anchor,
     h(
       'div',
       { class: 'user-pop' },
       h('div', { class: 'profile-card' }, profileCardHead(fullProfile(u))),
-      h('label', { class: 'field' }, h('span', {}, 'User volume ', val)),
-      h('input', {
-        type: 'range',
-        min: 0,
-        max: 1,
-        step: 0.01,
-        value: vols[u.id] ?? 1,
-        oninput: (e) => {
-          const v = +e.target.value;
-          settings.set({ userVolumes: { ...settings.get().userVolumes, [u.id]: v } });
-          val.textContent = Math.round(v * 100) + '%';
-          S.voice?.applyVolume(u.sid);
-        },
-      })
+      h('label', { class: 'field' }, h('span', {}, 'User volume ', val), slider),
+      h('div', { class: 'row' }, muteBtn, resetBtn),
+      h('p', { class: 'muted small' }, 'Only changes what you hear.')
     ),
-    { align: 'right' }
+    { align }
   );
 }
 
@@ -1796,7 +1862,7 @@ function renderVoicePanel() {
           'button',
           {
             class: 'icon-btn' + (c.voice.local.camera ? ' sharing' : ''),
-            title: (c.voice.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+            title: (c.voice.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click for cameras and backgrounds)',
             onclick: toggleCamera,
             oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
           },
@@ -1896,15 +1962,19 @@ function renderMembers() {
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
     .sort(byName);
   const hideOffline = settings.get().hideOffline;
-  const menu = (u) => (e) =>
-    u.id !== me().id &&
+  const menu = (u) => (e) => {
+    const el = e.currentTarget;
+    if (u.id === me().id) return;
     contextMenu(e, [
+      inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') },
       { label: 'Message', run: () => openDm(u.id) },
       { label: 'Remove from server…', danger: true, run: () => removePrompt(u.id) },
       !isBanned(u.id) && { label: 'Ban…', danger: true, run: () => banPrompt(u.id) },
     ]);
-  const row = (u) =>
-    h(
+  };
+  const row = (u) => {
+    const roles = rolesOf(u.id);
+    return h(
       'div',
       { class: 'member' + (u.offline ? ' offline' : ''), onclick: (e) => profilePopover(e.currentTarget, u, 'left'), oncontextmenu: menu(u) },
       h('div', { class: 'member-av' }, avatarEl(u, 32), h('span', { class: 'presence' + (u.offline ? ' off' : '') })),
@@ -1916,9 +1986,18 @@ function renderMembers() {
           'div',
           { class: 'member-status' },
           [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ') || u.status || ''
-        )
+        ),
+        roles.length
+          ? h(
+              'div',
+              { class: 'member-roles', title: roles.length > 3 ? roles.map((r) => r.name).join(', ') : null },
+              roles.slice(0, 3).map(roleTag),
+              roles.length > 3 ? h('span', { class: 'role-more' }, `+${roles.length - 3}`) : null
+            )
+          : null
       )
     );
+  };
   box.replaceChildren(
     ...[
       inVoice.length ? h('div', { class: 'cat' }, `In voice — ${inVoice.length}`) : null,
@@ -2955,11 +3034,26 @@ function openGifPicker(anchor, onPick) {
 
 async function loadSounds() {
   S.sounds = await sounds.all();
-  desktop?.setHotkeys(S.sounds.map((s) => s.hotkey).filter(Boolean));
+  syncHotkeys();
 }
 
-// Desktop app: soundboard hotkeys registered as global shortcuts
+// Desktop app: soundboard, mute and deafen hotkeys registered as global shortcuts
+function syncHotkeys() {
+  const st = settings.get();
+  desktop?.setHotkeys([st.muteHotkey, st.deafenHotkey, ...S.sounds.map((s) => s.hotkey)].filter(Boolean));
+}
+
+// The same toggles as the buttons in the user panel
+function voiceHotkey(combo) {
+  const st = settings.get();
+  if (combo === st.muteHotkey) toggleMute();
+  else if (combo === st.deafenHotkey) toggleDeafen();
+  else return false;
+  return true;
+}
+
 desktop?.onHotkey((combo) => {
+  if (voiceHotkey(combo)) return;
   const s = S.sounds.find((x) => x.hotkey === combo);
   if (!s) return;
   audio.ensure();
@@ -3158,12 +3252,34 @@ function editSound(s, redraw) {
 
 // Pick what to share. Browsers show their own picker after this (we hint which
 // tab it opens on); the desktop app has none, so we list sources ourselves.
+const SHARE_TIERS = { auto: 'Auto (up to 1440p60)', '720p30': '720p 30 fps', '1080p60': '1080p 60 fps', '1440p60': '1440p 60 fps' };
+const SHARE_MODES = { smooth: 'Smooth: games and video', sharp: 'Sharp: text and code' };
+
+// The saved share quality: { tier, mode }
+function shareQuality() {
+  const s = settings.get();
+  return { tier: TIERS[s.shareTier] ? s.shareTier : 'auto', mode: MODES[s.shareMode] ? s.shareMode : 'smooth' };
+}
+
+// Tier and mode selects that edit `q` in place and call onChange(q)
+function shareQualityFields(q, onChange) {
+  const select = (key, options, label) => {
+    const el = h('select', { onchange: (e) => ((q[key] = e.target.value), onChange?.(q)) }, Object.entries(options).map(([v, text]) => h('option', { value: v }, text)));
+    el.value = q[key];
+    return h('label', { class: 'field' }, h('span', {}, label), el);
+  };
+  return h('div', { class: 'share-quality' }, select('tier', SHARE_TIERS, 'Quality'), select('mode', SHARE_MODES, 'Optimize for'));
+}
+
 function sharePopover(anchor) {
+  const q = shareQuality();
   popover(
     anchor,
     h(
       'div',
       { class: 'menu' },
+      shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q))),
+      h('div', { class: 'menu-sep' }),
       h('button', { class: 'menu-item', onclick: () => (closePopover(), screenPicker({ switching: true })) }, 'Change source'),
       h('button', { class: 'menu-item danger', onclick: () => (closePopover(), liveVoice()?.stopMedia('screen')) }, 'Stop sharing')
     ),
@@ -3182,11 +3298,12 @@ async function screenPicker({ switching = false } = {}) {
   let withAudio = true;
   const audioBox = (label) =>
     h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (withAudio = e.target.checked) }), label);
-  const quality = h('p', { class: 'muted small' }, `Streams up to ${SCREEN.height >= 2160 ? '4K' : SCREEN.height + 'p'} at ${SCREEN.fps} fps.` + (DMCALL.voice ? '' : ' Only people who click LIVE receive it.'));
+  const q = shareQuality();
+  const quality = h('div', {}, shareQualityFields(q), DMCALL.voice ? null : h('p', { class: 'muted small' }, 'Only people who click LIVE receive it.'));
 
   if (!desktop) {
     const choice = (surface, ic, label, sub) =>
-      h('button', { class: 'share-choice', onclick: () => (close(), share({ surface, withAudio })) }, icon(ic), h('strong', {}, label), h('span', { class: 'muted small' }, sub));
+      h('button', { class: 'share-choice', onclick: () => (close(), share({ surface, withAudio, quality: q })) }, icon(ic), h('strong', {}, label), h('span', { class: 'muted small' }, sub));
     const close = modal(
       heading,
       h(
@@ -3211,7 +3328,7 @@ async function screenPicker({ switching = false } = {}) {
   let selected = null;
   const grid = h('div', { class: 'share-grid' });
   const tabs = h('div', { class: 'share-tabs' });
-  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio })) }, switching ? 'Switch' : 'Go Live');
+  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio, quality: q })) }, switching ? 'Switch' : 'Go Live');
   const draw = () => {
     tabs.replaceChildren(
       ...[
@@ -3257,11 +3374,13 @@ async function screenPicker({ switching = false } = {}) {
 }
 
 // Ask for the screen or window; null when cancelled or failed (after a toast).
-async function captureScreen({ surface, sourceId, withAudio }) {
+async function captureScreen({ surface, sourceId, withAudio, quality }) {
+  const tier = TIERS[quality.tier];
+  const fps = Math.min(tier.fps, MODES[quality.mode].maxFps);
   const video = {
-    width: { ideal: SCREEN.width, max: SCREEN.width },
-    height: { ideal: SCREEN.height, max: SCREEN.height },
-    frameRate: { ideal: SCREEN.fps, max: SCREEN.fps },
+    width: { ideal: tier.width, max: tier.width },
+    height: { ideal: tier.height, max: tier.height },
+    frameRate: { ideal: fps, max: fps },
     ...(surface ? { displaySurface: surface } : {}),
   };
   // Raw audio: voice processing would mangle music and game sound.
@@ -3302,7 +3421,8 @@ async function captureScreen({ surface, sourceId, withAudio }) {
 async function startShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
-  liveVoice().setMedia('screen', stream);
+  settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
+  liveVoice().setMedia('screen', stream, opts.quality);
   audio.cue('join');
   renderVoicePanel();
 }
@@ -3311,43 +3431,273 @@ async function switchShare(opts) {
   const stream = await captureScreen(opts);
   if (!stream) return;
   const v = liveVoice();
-  await v.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
-  // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
-  const own = v === DMCALL.voice ? dmCallUi.tiles.get('screen:' + me().id) : S.stage?.tiles.get('screen:' + S.call?.sid);
-  if (own?.video) {
-    own.video.srcObject = null;
-    own.video.srcObject = v.local.screen;
-    own.video.play().catch(() => {});
-  }
+  settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
+  await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
+  reattachOwn(v, 'screen');
   renderVoicePanel();
   toast('Switched what you’re sharing', 'info', 3000);
 }
 
+// After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
+function reattachOwn(v, kind) {
+  const own = v === DMCALL.voice ? dmCallUi.tiles.get(kind + ':' + me().id) : S.stage?.tiles.get(kind + ':' + S.call?.sid);
+  if (!own?.video) return;
+  own.video.srcObject = null;
+  own.video.srcObject = v.local[kind];
+  own.video.play().catch(() => {});
+}
+
 // ---------------------------------------------------------------- camera
 
-async function toggleCamera() {
-  if (!liveVoice()) return;
-  if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
-  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000);
+// The camera with the chosen background (D37), or null after telling the user why not
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000), null;
   const dev = settings.get().videoDevice;
   const cam = MEDIA.camera;
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
+  const capture = (effect) => {
+    const ideal = effect ? CAPTURE : cam.ideal;
+    return navigator.mediaDevices.getUserMedia({
       audio: false, // your voice already carries the audio
       video: {
         deviceId: dev ? { ideal: dev } : undefined,
-        width: { ideal: cam.ideal.width, max: cam.width },
-        height: { ideal: cam.ideal.height, max: cam.height },
-        frameRate: { ideal: cam.ideal.fps, max: cam.fps },
+        width: { ideal: ideal.width, max: cam.width },
+        height: { ideal: ideal.height, max: cam.height },
+        frameRate: { ideal: ideal.fps, max: effect ? ideal.fps : cam.fps },
       },
     });
+  };
+  const bg = await loadBackground();
+  setBackground(bg);
+  try {
+    const raw = await capture(!!BACKGROUNDS[bg.type]);
+    try {
+      return await withBackground(raw);
+    } catch (e) {
+      // Better a plain camera than none
+      console.warn('camera background', e);
+      toast('The camera background isn’t available: ' + e.message, 'error', 6000);
+      raw.getTracks().forEach((t) => t.stop());
+      setBackground({ ...bg, type: 'none' });
+      return await capture(false);
+    }
   } catch (e) {
-    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000);
+    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000), null;
   }
+}
+
+// Put the camera on the call: `stream` from the preview, or a new capture
+async function startCamera(stream) {
+  stream ||= liveVoice() && (await openCamera());
+  if (!stream) return;
   if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
   liveVoice().setMedia('camera', stream);
   renderVoicePanel();
+}
+
+// Off → on always goes through the preview (cameraDialog)
+function toggleCamera() {
+  if (!liveVoice()) return;
+  if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
+  cameraDialog();
+}
+
+// Change the camera background (settings keys), also mid-call. Strength, the
+// picture, and blur ↔ picture apply to a running camera at once. Going to or
+// from no background needs a new capture (a plain camera has no pipeline, and
+// is captured larger): the live camera's is swapped in without ending it for
+// viewers. Resolves to true when the capture had to change, so a preview can
+// reopen its own.
+let cameraSwap = Promise.resolve();
+function setCameraBackground(patch) {
+  settings.set(patch);
+  return (cameraSwap = cameraSwap
+    .then(async () => {
+      const was = !!BACKGROUNDS[activeBackground().type];
+      const bg = await loadBackground();
+      setBackground(bg);
+      if (was === !!BACKGROUNDS[bg.type]) return false;
+      const v = liveVoice();
+      if (!v?.local.camera) return true;
+      const stream = await openCamera();
+      if (!stream) return true;
+      if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop()), true;
+      await v.replaceMedia('camera', stream);
+      reattachOwn(v, 'camera');
+      return true;
+    })
+    .catch((e) => (console.warn('camera background', e), true)));
+}
+
+// A mirrored view of your camera as friends will get it: the live camera
+// while it's on, otherwise a capture of its own.
+function cameraPreview() {
+  const video = h('video', { muted: true, playsinline: true });
+  const status = h('div', { class: 'cam-status' });
+  const el = h('div', { class: 'cam-preview' }, video, status);
+  let own = null;
+  let run = 0;
+  const release = () => {
+    own?.getTracks().forEach((t) => t.stop());
+    own = null;
+  };
+  return {
+    el,
+    // (Re)open; call again after anything that changes the capture
+    async show() {
+      const mine = ++run;
+      release();
+      status.textContent = 'Starting camera…';
+      status.hidden = false;
+      const live = liveVoice()?.local.camera;
+      const stream = live || (await openCamera());
+      if (mine !== run) return void (!live && stream?.getTracks().forEach((t) => t.stop()));
+      if (!live) own = stream;
+      video.srcObject = null;
+      video.srcObject = stream;
+      if (!stream) return void (status.textContent = 'No camera');
+      video.play().catch(() => {});
+      status.hidden = true;
+    },
+    stop() {
+      run++;
+      release();
+      video.srcObject = null;
+    },
+    // Hand over the preview's own capture (null if it has none, e.g. still starting)
+    take() {
+      run++;
+      const stream = own;
+      own = null;
+      return stream;
+    },
+  };
+}
+
+// Tiles to choose what is behind you: nothing, a blur (with its strength), a
+// picture that comes with the app, or one of your own. `onRecapture` runs
+// when the choice changed the capture (see setCameraBackground).
+function backgroundPicker(onRecapture) {
+  const grid = h('div', { class: 'bg-grid' });
+  const pct = h('span', {});
+  const range = h('input', { type: 'range', min: 0, max: 1, step: 0.01, oninput: (e) => (setCameraBackground({ cameraBlur: +e.target.value }), (pct.textContent = Math.round(e.target.value * 100) + '%')) });
+  const blurField = h('label', { class: 'field' }, h('span', {}, 'Blur strength ', pct), range);
+  const file = h('input', {
+    type: 'file',
+    accept: 'image/*',
+    hidden: true,
+    onchange: async () => {
+      const f = file.files[0];
+      file.value = '';
+      if (!f) return;
+      try {
+        const pic = await pictures.add(f);
+        choose({ cameraBackground: 'image', cameraImage: pic.id });
+      } catch (e) {
+        toast(e.message, 'error', 5000);
+      }
+    },
+  });
+  let urls = [];
+  let disposed = false;
+  const choose = async (patch) => {
+    const swap = setCameraBackground(patch);
+    render();
+    if (await swap) onRecapture?.();
+  };
+  const tile = (name, selected, onclick, { cls = '', image = '', children = [] } = {}) =>
+    h(
+      'div',
+      { class: 'bg-tile ' + cls + (selected ? ' selected' : ''), role: 'button', tabindex: 0, title: name, style: image ? { backgroundImage: image } : null, onclick, onkeydown: (e) => e.key === 'Enter' && onclick() },
+      children,
+      h('span', { class: 'bg-name' }, name)
+    );
+  const render = async () => {
+    const pics = await pictures.all().catch(() => []);
+    if (disposed) return;
+    const bg = backgroundOf();
+    const on = (id) => bg.type === 'image' && bg.imageId === id;
+    for (const u of urls) URL.revokeObjectURL(u);
+    urls = pics.map((p) => URL.createObjectURL(p.blob));
+    grid.replaceChildren(
+      tile('None', bg.type === 'none', () => choose({ cameraBackground: 'none' }), { cls: 'plain', children: icon('camOff') }),
+      tile('Blur', bg.type === 'blur', () => choose({ cameraBackground: 'blur' }), { cls: 'blur' }),
+      ...PRESETS.map((p) => tile(p.name, on(p.id), () => choose({ cameraBackground: 'image', cameraImage: p.id }), { image: presetCss(p) })),
+      ...pics.map((p, i) =>
+        tile(p.name || 'Picture', on(p.id), () => choose({ cameraBackground: 'image', cameraImage: p.id }), {
+          image: `url("${urls[i]}")`,
+          children: h(
+            'button',
+            {
+              class: 'bg-remove',
+              title: 'Remove this picture',
+              onclick: async (e) => {
+                e.stopPropagation();
+                await pictures.remove(p.id);
+                if (on(p.id)) choose({ cameraBackground: 'none', cameraImage: '' });
+                else render();
+              },
+            },
+            '×'
+          ),
+        })
+      ),
+      tile('Add a picture', false, () => file.click(), { cls: 'plain add', children: icon('plus') })
+    );
+    blurField.hidden = bg.type !== 'blur';
+    range.value = bg.blur;
+    pct.textContent = Math.round(bg.blur * 100) + '%';
+  };
+  render();
+  return {
+    el: h('div', { class: 'bg-picker' }, grid, blurField, file),
+    dispose() {
+      disposed = true;
+      for (const u of urls) URL.revokeObjectURL(u);
+    },
+  };
+}
+
+// See yourself and choose what is behind you. Opens every time before the
+// camera goes on. Opened while it is on, it shows and changes the live camera.
+function cameraDialog() {
+  const live = !!liveVoice()?.local.camera;
+  const preview = cameraPreview();
+  const picker = backgroundPicker(() => preview.show());
+  modal(
+    live ? 'Camera' : 'Camera preview',
+    h(
+      'div',
+      { class: 'cam-dialog' },
+      preview.el,
+      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
+      h('p', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')
+    ),
+    {
+      actions: live
+        ? [(close) => h('button', { class: 'btn', onclick: close }, 'Done')]
+        : [
+            (close) => h('button', { class: 'btn ghost', onclick: close }, 'Cancel'),
+            (close) =>
+              h(
+                'button',
+                {
+                  class: 'btn',
+                  onclick: () => {
+                    const stream = preview.take();
+                    close();
+                    startCamera(stream);
+                  },
+                },
+                'Turn on camera'
+              ),
+          ],
+      onClose: () => {
+        preview.stop();
+        picker.dispose();
+      },
+    }
+  );
+  preview.show();
 }
 
 async function cameraPopover(anchor) {
@@ -3359,7 +3709,7 @@ async function cameraPopover(anchor) {
     settings.set({ videoDevice: id });
     if (liveVoice()?.local.camera) {
       liveVoice().stopMedia('camera', true);
-      await toggleCamera();
+      await startCamera();
     }
   };
   popover(
@@ -3371,7 +3721,9 @@ async function cameraPopover(anchor) {
         ? [{ deviceId: '', label: 'Default camera' }, ...cams].map((d, i) =>
             h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Camera ${i}`))
           )
-        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found')
+        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found'),
+      h('div', { class: 'menu-sep' }),
+      h('button', { class: 'menu-item', onclick: () => (closePopover(), cameraDialog()) }, 'Preview and background…')
     ),
     { align: 'right' }
   );
@@ -3401,10 +3753,12 @@ function openStage({ screen } = {}) {
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
     // Resolution, real frame rate and codec of the focused (or first) screen
-    // share, so people can see what they are getting (and the sharer sees what
-    // each viewer gets)
+    // share or camera, so people can see what they are getting (and the sharer
+    // sees what each viewer gets). Sampled once per second and fed to both the
+    // header and the stats panel, since rates are deltas between calls.
     let frames = 0;
     let last = null;
+    S.stage.history = [];
     S.stage.timer = setInterval(async () => {
       const tile = statsTile();
       const v = tile?.video;
@@ -3413,12 +3767,20 @@ function openStage({ screen } = {}) {
       frames = total;
       last = tile;
       const base = v?.videoWidth ? `${v.videoWidth}×${v.videoHeight} · ${fps} fps` : '';
-      const info = tile && (await S.voice?.videoStats(tile.sid, 'screen').catch(() => null));
-      if (statsTile() !== tile) return;
+      const info = tile && (await S.voice?.videoStats(tile.sid, tile.kind).catch(() => null));
+      if (statsTile() !== tile || S.stage?.stats !== stats) return;
       const full = base && [base, formatVideoStats(info)].filter(Boolean).join(' · ');
       stats.textContent = full;
-      stats.title = full;
+      stats.title = full ? 'Stream stats: ' + full : '';
+      stats.style.cursor = full ? 'pointer' : '';
+      if (tile && info) {
+        const hist = S.stage.history;
+        hist.push({ time: new Date().toISOString(), tile: tile.key, kind: tile.kind, role: Array.isArray(info) ? 'sender' : 'receiver', stats: info });
+        if (hist.length > 60) hist.shift();
+      }
+      S.stage.statsPanel?.update(tile, info);
     }, 1000);
+    stats.onclick = () => openStatsPanel(stats);
     $('#stream-view').replaceChildren(
       h(
         'header',
@@ -3456,7 +3818,7 @@ function statsTile() {
   const st = S.stage;
   if (!st) return null;
   const focused = st.tiles.get(st.focus);
-  if (focused?.kind === 'screen') return focused.live ? focused : null;
+  if (focused?.kind === 'screen' || focused?.kind === 'camera') return focused.live ? focused : null;
   return [...st.tiles.values()].find((t) => t.kind === 'screen' && t.live) || null;
 }
 
@@ -3536,7 +3898,7 @@ function stageTile(key, sid, kind, live) {
             max: 1,
             step: 0.01,
             value: S.stage.volumes.get(sid) ?? 1,
-            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = +e.target.value)),
+            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = streamVolume(+e.target.value))),
           })
         ),
         h('button', { class: 'btn small ghost', onclick: () => watchScreen(sid, false) }, 'Stop watching')
@@ -3592,9 +3954,95 @@ function formatVideoStats(info) {
     .map((v) =>
       v.paused
         ? 'viewer away (paused)'
-        : `${v.codec}${hw(v.hw)} ${v.w || 0}×${v.h || 0}@${v.fps || 0} ${(v.mbps || 0).toFixed(1)} Mbps` + (v.limit && v.limit !== 'none' ? ` (limited by ${v.limit})` : '')
+        : `${v.codec}${hw(v.hw)} ${v.w || 0}×${v.h || 0}@${v.fps || 0} ${(v.mbps || 0).toFixed(1)} Mbps` + (v.rung ? ` [rung ${v.rung.h}p${v.rung.fps}]` : '') + (v.limit && v.limit !== 'none' ? ` (limited by ${v.limit})` : '')
     )
     .join(' | ');
+}
+
+// The "Stream stats" panel: live numbers for the tile statsTile() picked, plus
+// the last minute of samples (S.stage.history) as JSON to paste into a bug report.
+function openStatsPanel(anchor) {
+  const st = S.stage;
+  if (!st || st.statsPanel) return;
+  const body = h('div', { class: 'stats-body' }, h('p', { class: 'muted small' }, 'Waiting for the next sample…'));
+  const copy = async () => {
+    const mine = st.history.at(-1)?.role === 'sender';
+    const kind = st.history.at(-1)?.kind;
+    const header = {
+      version: appUpdate?.current || null,
+      userAgent: navigator.userAgent,
+      devicePixelRatio: window.devicePixelRatio,
+      trackSettings: mine ? S.voice?.local[kind]?.getVideoTracks()[0]?.getSettings() || null : null,
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({ header, history: st.history }, null, 2));
+      toast(`Copied ${st.history.length} stats samples`);
+    } catch {
+      toast('Could not copy the stats', 'error');
+    }
+  };
+  const panel = h('div', { class: 'stats-panel-inner' }, h('div', { class: 'stats-head' }, h('strong', {}, 'Stream stats'), h('div', { class: 'spacer' }), h('button', { class: 'btn small', onclick: copy }, 'Copy')), body);
+  const pop = popover(anchor, panel, { align: 'start', className: 'stats-panel', onClose: () => st.statsPanel === api && (st.statsPanel = null) });
+  const api = {
+    close: () => pop.close(),
+    update(tile, info) {
+      body.replaceChildren(statsView(tile, info));
+      pop.place();
+    },
+  };
+  st.statsPanel = api;
+}
+
+function statsView(tile, info) {
+  const f = (x, d = 1) => (typeof x === 'number' && isFinite(x) ? x.toFixed(d) : '–');
+  const size = (w, hh) => (w ? `${w}×${hh}` : '–');
+  const hw = (x) => (x === true ? 'hw' : x === false ? 'sw' : '');
+  if (!tile || !info) return h('p', { class: 'muted small' }, 'Nothing to measure: focus a live screen share or camera.');
+  if (!Array.isArray(info)) {
+    const rows = [
+      ['Codec', `${info.codec} (${hw(info.hw) || '?'} decode${info.decoder ? ', ' + info.decoder : ''})`],
+      ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps, QP ${f(info.qp, 0)}`],
+      ['Shown at', info.view ? (info.view.hidden ? 'hidden' : size(info.view.w, info.view.h)) : '–'],
+      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
+      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`],
+      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`],
+      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`],
+    ];
+    return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))));
+  }
+  if (!info.length) return h('p', { class: 'muted small' }, 'No viewers yet.');
+  const cols = ['Viewer', 'Capture', 'Rung', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path', 'Viewer size'];
+  const row = (v) => {
+    const name = S.call?.users.find((u) => u.sid === v.sid)?.name || 'someone';
+    const limit = v.limit && v.limit !== 'none' ? v.limit : 'none';
+    return [
+      name + (v.paused ? ' (away)' : ''),
+      `${size(v.capW, v.capH)} @ ${f(v.capFps, 0)}`,
+      v.rung ? `${v.rung.h}p${v.rung.fps}` + (v.needMbps != null ? `, needs ${f(v.needMbps)}` + (v.upMbps != null ? `, up at ${f(v.upMbps)}` : '') : '') : '–',
+      `${size(v.w, v.h)} @ ${f(v.fps, 0)}`,
+      `${f(v.sentMbps, 2)} / ${f(v.mbps, 2)} / ${f(v.availMbps, 1)}`,
+      `${v.codec} ${hw(v.hw)} ${v.impl || ''}`.trim() + (v.note ? ` (${v.note})` : ''),
+      limit,
+      f(v.qp, 0),
+      f(v.encMs),
+      v.loss != null ? f(v.loss * 100, 1) + '%' : '–',
+      f(v.rtt ?? v.pathRtt, 0),
+      v.cand || '–',
+      v.view ? (v.view.hidden ? 'hidden' : size(v.view.w, v.view.h)) : '–',
+    ];
+  };
+  const first = info[0];
+  return h(
+    'div',
+    {},
+    first?.tier && h('p', { class: 'muted small' }, `Quality: ${SHARE_TIERS[first.tier] || 'Camera'}, ${first.mode}`),
+    h(
+      'table',
+      { class: 'stats-table' },
+      h('thead', {}, h('tr', {}, cols.map((c) => h('th', {}, c)))),
+      h('tbody', {}, info.map((v) => h('tr', {}, row(v).map((c) => h('td', {}, c)))))
+    )
+  );
 }
 
 // Reconcile the stage with who is in the channel, sharing, or on camera.
@@ -3644,7 +4092,7 @@ function syncStage() {
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
       t.video.muted = t.sid === c.sid || S.deafened;
-      t.video.volume = st.volumes.get(t.sid) ?? 1;
+      t.video.volume = streamVolume(st.volumes.get(t.sid) ?? 1);
     }
   }
 
@@ -3702,6 +4150,7 @@ function closeStage() {
   const st = S.stage;
   if (!st) return;
   clearInterval(st.timer);
+  st.statsPanel?.close();
   st.ro.disconnect();
   for (const key of [...st.tiles.keys()]) dropTile(key);
   if (S.call?.connected) for (const sid of st.watching) S.voice.watch(sid, 'screen', false);
@@ -3817,6 +4266,7 @@ function handleKeyDown(e, typing) {
   if (typing && !hasMod) return false;
   // The desktop app registers these as global shortcuts; don't play twice
   if (desktop?.hasGlobalHotkey?.(combo)) return false;
+  if (voiceHotkey(combo)) return true;
   const s = S.sounds.find((x) => x.hotkey === combo);
   if (!s) return false;
   audio.ensure();
@@ -4133,17 +4583,35 @@ function settingsAppearance(body) {
 function settingsVoice(body) {
   const st = settings.get();
   const inSel = h('select', { onchange: (e) => (settings.set({ inputDevice: e.target.value }), restartMic()) }, h('option', { value: '' }, 'Default'));
-  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), liveVoice()?.applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
+  const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
   const camSel = h(
     'select',
     {
       onchange: async (e) => {
         settings.set({ videoDevice: e.target.value });
-        if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await toggleCamera());
+        if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await startCamera());
+        if (previewing) preview.show();
       },
     },
     h('option', { value: '' }, 'Default')
   );
+  const preview = cameraPreview();
+  preview.el.hidden = true;
+  let previewing = false;
+  const previewBtn = h(
+    'button',
+    {
+      class: 'btn small ghost',
+      onclick: () => {
+        previewing = !previewing;
+        previewBtn.textContent = previewing ? 'Stop preview' : 'Preview';
+        preview.el.hidden = !previewing;
+        previewing ? preview.show() : preview.stop();
+      },
+    },
+    'Preview'
+  );
+  const picker = backgroundPicker(() => previewing && preview.show());
   navigator.mediaDevices?.enumerateDevices().then((devs) => {
     for (const d of devs) {
       const opt = h('option', { value: d.deviceId }, d.label || `${d.kind} ${d.deviceId.slice(0, 6)}`);
@@ -4156,10 +4624,10 @@ function settingsVoice(body) {
     camSel.value = st.videoDevice;
   });
   const restartMic = async () => {
-    if (!liveVoice()) return;
+    if (!liveVoice() && !testing) return;
     try {
       await audio.startMic();
-      liveVoice().micError = null;
+      if (liveVoice()) liveVoice().micError = null;
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -4183,9 +4651,59 @@ function settingsVoice(body) {
       toast(e.message, 'error');
     }
   };
+  // Noise gate, like Discord's input sensitivity: the bar is the mic's level
+  // before the gate, and the slider on it is the level the gate opens at. In
+  // automatic mode the slider moves on its own, following the room's noise.
+  const gatePct = (db) => Math.min(100, Math.max(0, ((db - GATE_RANGE.min) / (GATE_RANGE.max - GATE_RANGE.min)) * 100)) + '%';
+  const gateVal = h('span', {});
+  const gateSlider = h('input', {
+    type: 'range',
+    ...GATE_RANGE,
+    step: 1,
+    value: st.noiseGateThreshold,
+    'aria-label': 'Noise gate threshold',
+    oninput: (e) => (settings.set({ noiseGateThreshold: +e.target.value }), audio.applyMicProcessing(), syncGate()),
+  });
+  const gateBox = h('div', { class: 'gate' }, h('div', { class: 'gate-track' }), h('div', { class: 'gate-level' }), gateSlider);
+  const micNote = h('p', { class: 'muted small' });
+  const syncGate = () => {
+    const { noiseGate: mode, noiseGateThreshold } = settings.get();
+    const live = audio.micStream ? audio.micLevel : null;
+    const threshold = mode === 'manual' ? noiseGateThreshold : mode === 'auto' ? live?.threshold : null;
+    gateBox.classList.toggle('off', threshold == null);
+    gateBox.classList.toggle('closed', !!live && !live.open);
+    gateBox.style.setProperty('--thr', threshold == null ? '0%' : gatePct(threshold));
+    gateBox.style.setProperty('--lvl', live ? gatePct(live.level) : '0%');
+    gateSlider.disabled = mode !== 'manual';
+    if (mode === 'auto' && threshold != null) gateSlider.value = threshold;
+    const text = threshold == null ? '' : `opens above ${Math.round(threshold)} dB`.replace('-', '−');
+    if (gateVal.textContent !== text) gateVal.textContent = text;
+    const note = micStatus();
+    if (micNote.textContent !== note) micNote.textContent = note;
+    micNote.hidden = !note;
+  };
+  // What the running mic really applies: a device or OS can refuse a constraint without an error
+  const micStatus = () => {
+    const info = audio.micInfo;
+    if (!info) return 'Join a voice channel or press Test mic to see your level here.';
+    const notes = [];
+    if (info.fallback) notes.push('High noise reduction couldn’t start on this device, so the standard one is used.');
+    const refused = [
+      ['echoCancellation', 'echo cancellation'],
+      ['noiseSuppression', 'noise suppression'],
+      ['autoGainControl', 'automatic gain control'],
+    ]
+      .filter(([k]) => info.want[k] && info.got[k] === false)
+      .map(([, label]) => label);
+    if (refused.length) notes.push(`This microphone or system didn’t apply ${refused.join(' or ')}.`);
+    if (!info.got.echoCancellation) notes.push('Echo cancellation is off: use headphones, or friends will hear themselves.');
+    if (audio.micLevel?.ducked) notes.push('Speaker mode is holding your mic down.');
+    return notes.join(' ');
+  };
   const iv = setInterval(() => {
     const lvl = audio.selfAnalyser ? Level(audio.selfAnalyser) : 0;
     meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
+    syncGate();
   }, 60);
 
   const pttBtn = h('button', { class: 'btn ghost small hotkey-btn' }, st.pttKey.replace(/^Key|^Digit/, ''));
@@ -4200,6 +4718,24 @@ function settingsVoice(body) {
     };
     window.addEventListener('keydown', onKey, true);
   };
+  const hotkeyBtn = (key) => {
+    const btn = h('button', { class: 'btn ghost small hotkey-btn' }, st[key] || 'Click to set');
+    btn.onclick = () => {
+      btn.textContent = 'Press a key… (Esc clears)';
+      const onKey = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const c = e.key === 'Escape' ? '' : comboFromEvent(e);
+        if (c === null) return; // a modifier on its own
+        settings.set({ [key]: c });
+        syncHotkeys();
+        btn.textContent = c || 'Click to set';
+        window.removeEventListener('keydown', onKey, true);
+      };
+      window.addEventListener('keydown', onKey, true);
+    };
+    return btn;
+  };
   const check = (key, label, after) =>
     h(
       'label',
@@ -4207,6 +4743,11 @@ function settingsVoice(body) {
       h('input', { type: 'checkbox', checked: st[key], onchange: (e) => (settings.set({ [key]: e.target.checked }), after?.(e.target.checked)) }),
       h('span', {}, label)
     );
+  const select = (key, options, after) => {
+    const el = h('select', { onchange: (e) => (settings.set({ [key]: e.target.value }), after?.(e.target.value)) }, Object.entries(options).map(([k, label]) => h('option', { value: k }, label)));
+    el.value = st[key];
+    return el;
+  };
   const slider = (key, label, max, after) => {
     const val = h('span', {}, Math.round(st[key] * 100) + '%');
     return h(
@@ -4220,14 +4761,42 @@ function settingsVoice(body) {
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
+    h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
+    h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
+    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
+    h('h3', {}, 'Volume'),
+    slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
+    slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
+    slider('cueVolume', 'Notification sounds', 1, (v) => audio.setCueVolume(v)),
+    h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
+    h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
+    h('label', { class: 'field' }, h('span', {}, 'Noise reduction'), select('noiseReduction', { off: 'Off', standard: 'Standard', high: 'High (RNNoise)' }, restartMic)),
+    h('p', { class: 'muted small' }, 'Standard is the browser’s own filter. High runs a neural network on your mic that also takes out keyboards, fans and other noise that isn’t a voice.'),
+    h(
+      'div',
+      { class: 'field' },
+      h('span', {}, 'Noise gate ', gateVal),
+      h('div', { class: 'row' }, select('noiseGate', { off: 'Off', auto: 'Automatic', manual: 'Manual' }, () => (audio.applyMicProcessing(), syncGate())), gateBox)
+    ),
+    h('p', { class: 'muted small' }, 'The gate silences your mic while it is quieter than the marker. The bar shows how loud your mic is: set the marker above your background noise and below your voice, or let Automatic follow the room.'),
     check('echoCancellation', 'Echo cancellation', restartMic),
-    check('noiseSuppression', 'Noise suppression', restartMic),
+    check('autoGainControl', 'Automatic gain control', restartMic),
+    check('speakerMode', 'Speaker mode: turn my mic down while friends are talking', () => audio.applyMicProcessing()),
+    h('p', { class: 'muted small' }, 'Echo cancellation works best with headphones. If friends still hear themselves through your speakers, speaker mode stops it, at the cost of talking over each other.'),
+    micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
     h('div', { class: 'field' }, h('span', {}, 'Push-to-talk key'), pttBtn),
     h('p', { class: 'muted small' }, 'Browsers only see keys while the friendspeak window is focused.'),
+    h('h3', {}, 'Shortcuts'),
+    h('div', { class: 'row' }, h('div', { class: 'field grow' }, h('span', {}, 'Mute'), hotkeyBtn('muteHotkey')), h('div', { class: 'field grow' }, h('span', {}, 'Deafen'), hotkeyBtn('deafenHotkey'))),
+    h(
+      'p',
+      { class: 'muted small' },
+      desktop ? 'Shortcuts with Ctrl/Alt/Cmd, F-keys or the numpad work even while other apps are focused.' : 'Shortcuts work while friendspeak is the focused window.'
+    ),
     h('h3', {}, 'Soundboard'),
     slider('soundboardVolume', 'Soundboard volume', 1, (v) => audio.setSoundboardVolume(v)),
     check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened)),
@@ -4236,6 +4805,8 @@ function settingsVoice(body) {
   );
   return () => {
     clearInterval(iv);
+    preview.stop();
+    picker.dispose();
     if (testing && !liveVoice()) audio.stopMic();
   };
 }
