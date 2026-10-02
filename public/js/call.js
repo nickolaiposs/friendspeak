@@ -1,4 +1,4 @@
-// Calls in direct messages (D32): voice, camera and screen sharing with one
+// Calls in direct messages (D33): voice, camera and screen sharing with one
 // friend, peer to peer.
 //
 // A call rides the DM link (dm.js). Ringing and the WebRTC handshake travel
@@ -14,8 +14,9 @@
 //   { k: 'end', id, why }        see WHY
 //   { k: 'rtc', id, data }       a VoiceClient signal: sdp, candidate, media, watch, view
 //   { k: 'state', id, screen, camera, muted, deafened }
-// An app from before calls ignores all of these, so the caller rings until it
-// gives up.
+// They are sealed like every DM op (D32), and dm.js only hands over those from
+// a friend whose key is known. An app from before calls ignores all of them,
+// so the caller rings until it gives up.
 import { VoiceClient, KINDS } from './voice.js';
 import { uid } from './util.js';
 
