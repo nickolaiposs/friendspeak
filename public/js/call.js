@@ -21,7 +21,7 @@ import { VoiceClient, KINDS } from './voice.js';
 import { uid } from './util.js';
 
 const RING_MS = 40e3; // how long a call rings
-const LINK_MS = 15e3; // how long to wait for the DM link before ringing
+const LINK_MS = 30e3; // how long to wait for the DM link before ringing (dm.js retries a stuck one after 12 s)
 const LOST_MS = 20e3; // how long the media may be down before the call ends
 const CHANNEL = 'call'; // VoiceClient wants a channel id; a call has one room
 const WHY = ['hangup', 'cancel', 'declined', 'busy', 'unanswered', 'gone', 'lost'];
