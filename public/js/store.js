@@ -12,7 +12,7 @@ const read = (k, d) => {
 };
 const write = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
-const COLORS = ['#5865f2', '#eb459e', '#57f287', '#fee75c', '#ed4245', '#f47b67', '#3ba55c', '#9b59b6', '#1abc9c', '#e67e22'];
+const COLORS = ['#8b6cf6', '#e06fb8', '#2fb36d', '#d99a1c', '#e5484d', '#f0835a', '#4aa3f0', '#b866e0', '#22b8a6', '#e88a2a'];
 export const randomColor = () => COLORS[Math.floor(Math.random() * COLORS.length)];
 
 // ---------- profiles ----------
@@ -86,6 +86,13 @@ const DEFAULT_SETTINGS = {
   railServersHidden: false,
   cues: true,
   dismissedBanners: {}, // update/maintenance banner key -> when it was closed
+  // appearance (theme.js)
+  theme: 'dark', // 'dark' | 'light' | 'contrast' | 'custom'
+  themeColors: null, // the custom palette: { 'bg-0': '#rrggbb', … }
+  font: 'system', // a key of FONTS, or 'custom' for fontCustom
+  fontCustom: '', // name of a font installed on this device
+  fontSize: 14.5, // px
+  density: 'cozy', // 'compact' | 'cozy' | 'roomy'
 };
 
 export const settings = {
