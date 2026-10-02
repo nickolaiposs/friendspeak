@@ -621,6 +621,17 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .rail-badge { position: absolute; right: -6px; top: -4px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--red); color: white; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; border: 2px solid var(--bg-0); box-sizing: content-box; }
 .rail-group .rail-badge { position: static; margin-left: 3px; border: 0; }
 .rail-server.current { box-shadow: 0 0 0 2px var(--bg-0), 0 0 0 4px var(--muted); }
-.msg.pending .msg-text, .msg.pending .msg-gif { opacity: .5; }
+.msg.pending .msg-text, .msg.pending .msg-gif, .msg.pending .attachments { opacity: .5; }
+.msg.pending.mailed .msg-text, .msg.pending.mailed .msg-gif, .msg.pending.mailed .attachments { opacity: .75; }
+.dm-file.loading img { cursor: default; filter: blur(3px); }
+.dm-file { overflow: hidden; border-radius: 6px; }
+.dm-file-state { position: absolute; left: 8px; bottom: 8px; background: rgba(0, 0, 0, .65); color: white; font-size: 12px; padding: 2px 8px; border-radius: 999px; }
+.dm-file-state:empty { display: none; }
+.dm-conflict { border: 0; cursor: pointer; }
+.friend-code { width: 100%; resize: none; font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.cat-add { margin-left: auto; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0; display: grid; place-items: center; }
+.cat-add:hover { color: var(--text); }
+.cat-add .icon svg { width: 16px; height: 16px; }
+.rail-add-dm { width: 36px; height: 36px; }
 .dm-hint { padding: 12px 8px; margin: 0; }
 .dm-status { margin-left: 8px; }

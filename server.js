@@ -35,6 +35,15 @@ async function startServer(opts = {}) {
   const MAX_STORAGE = parseSize(opts.maxStorage, 2 * 1024 ** 3); // all uploaded files together
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
+  // Mailboxes for direct messages (D30): sealed blobs the server can't read
+  const DM_GUESTS = opts.dmGuests !== false;
+  const MAIL_FILE = path.join(DATA_DIR, 'mail.json');
+  const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
+  const MAX_MAILBOX_ITEMS = 500;
+  const MAX_MAILBOX_BYTES = 8 * 1024 * 1024;
+  const MAX_MAILBOXES = 5000;
+  const MAIL_TTL = 30 * 864e5; // mail nobody collected
+  const MAILBOX_IDLE = 90 * 864e5; // an empty mailbox whose owner never came back
 
   fs.mkdirSync(FILES_DIR, { recursive: true });
 
@@ -97,10 +106,16 @@ async function startServer(opts = {}) {
   // An uploaded image (data URL) or a linked one (https only, e.g. a GIPHY GIF)
   const isImageRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
+  const isKey = (v, len) => typeof v === 'string' && v.length === len && /^[A-Za-z0-9_-]+$/.test(v);
+  // A profile's public keys for direct messages (D30). The server only passes
+  // the card on; clients check its signature and pin it themselves.
+  const cleanCard = (c, pid) => (c && typeof c === 'object' && c.id === pid && isKey(c.s, 43) && isKey(c.d, 43) && isKey(c.sig, 86) ? { id: pid, s: c.s, d: c.d, sig: c.sig } : undefined);
 
   function cleanProfile(p = {}) {
+    const pid = str(p.id, 64) || id();
     return {
-      id: str(p.id, 64) || id(),
+      id: pid,
+      card: cleanCard(p.card, pid),
       name: str(p.name, 32).trim() || 'anon',
       color: isHexColor(p.color) ? p.color : '#5865f2',
       avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : str(p.avatar, 16), // image or emoji
@@ -109,7 +124,7 @@ async function startServer(opts = {}) {
     };
   }
   // `seen`: when the profile was last online (the member list's "Offline" section)
-  const storedProfile = (p, seen = Date.now()) => ({ name: p.name, color: p.color, avatar: p.avatar, banner: p.banner, status: p.status, seen });
+  const storedProfile = (p, seen = Date.now()) => ({ name: p.name, color: p.color, avatar: p.avatar, banner: p.banner, status: p.status, card: p.card, seen });
 
   // The messages of a text channel; null if there's no such channel
   function thread(cid) {
@@ -281,6 +296,52 @@ async function startServer(opts = {}) {
     return https.createServer({ key: fs.readFileSync(keyFile), cert }, app);
   }
 
+  // ---------- DM mailboxes (D30) ----------
+
+  // Messages for people who are away, left by their friends. Each is sealed
+  // end to end, so the server stores it without being able to read it. A
+  // mailbox is filed under the hash of its owner's public key, and only
+  // someone who proves they hold that key gets its contents.
+  // address -> { seen, items: [{ id, blob, ts }] }
+  let mail = new Map();
+  try {
+    mail = new Map(Object.entries(JSON.parse(fs.readFileSync(MAIL_FILE, 'utf8'))));
+  } catch {}
+  let mailTimer = null;
+  function writeMail() {
+    clearTimeout(mailTimer);
+    mailTimer = null;
+    const tmp = MAIL_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(mail)));
+    fs.renameSync(tmp, MAIL_FILE);
+  }
+  const saveMail = () => (mailTimer ||= setTimeout(writeMail, 1000));
+  function sweepMail() {
+    const now = Date.now();
+    for (const [addr, box] of mail) {
+      const kept = box.items.filter((it) => it.ts > now - MAIL_TTL);
+      if (kept.length !== box.items.length) (box.items = kept), saveMail();
+      if (!kept.length && box.seen < now - MAILBOX_IDLE) mail.delete(addr), saveMail();
+    }
+  }
+  sweepMail();
+  const mailSweepTimer = setInterval(sweepMail, 60 * 60e3);
+  mailSweepTimer.unref();
+
+  // The address (mailbox name) of whoever signed `nonce` with the Ed25519 key `s`, or null
+  const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
+  function mailAddress(s, sig, nonce) {
+    try {
+      const raw = Buffer.from(s, 'base64url');
+      if (raw.length !== 32) return null;
+      const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI, raw]), format: 'der', type: 'spki' });
+      if (!crypto.verify(null, Buffer.from('friendspeak-dm-auth-v1|' + nonce), key, Buffer.from(sig, 'base64url'))) return null;
+      return crypto.createHash('sha256').update(raw).digest('base64url');
+    } catch {
+      return null;
+    }
+  }
+
   // ---------- realtime ----------
 
   // socket.id -> { profile, voice: channelId|null, muted, deafened, sharing, camera }
@@ -348,35 +409,105 @@ async function startServer(opts = {}) {
       broadcastUsers();
     }
 
-    // --- DM signaling (D28) ---
+    // --- DM signaling and mailboxes (D28, D30) ---
     // Direct messages are peer to peer. Clients keep a socket on this
     // namespace for every server they have bookmarked, so friends who share
-    // any server can find each other. The server only says who is reachable
-    // and relays WebRTC handshakes; it never sees or stores the messages.
+    // any server can find each other. The server says who is reachable,
+    // relays WebRTC handshakes, and keeps sealed mail for people who are away.
+    // It never sees a message.
+    //
+    // Guests are people without the password, sent here by a friend's friend
+    // code. They can reach the people whose profile id or mailbox address
+    // they already know, and nothing else: no member list, no mailbox.
     const dm = io.of('/dm');
     const dmOnline = () => [...new Set([...dm.sockets.values()].map((s) => s.data.profileId))];
+    const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
-      const { profileId, password } = socket.handshake.auth || {};
+      const { profileId, password, guest } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
-      if (PASSWORD && password !== PASSWORD) return next(new Error('Wrong server password'));
+      const wrong = !!PASSWORD && password !== PASSWORD;
+      // A guest can't use the profile id of someone on this server
+      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid))) return next(new Error('Wrong server password'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
+      socket.data.guest = wrong;
       next();
     });
     dm.on('connection', (socket) => {
       const pid = socket.data.profileId;
+      const guest = socket.data.guest;
       // Newest wins, like chat sessions: a reconnect replaces the stale socket
       for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
       socket.join('p:' + pid);
-      socket.emit('online', dmOnline());
-      socket.broadcast.emit('presence', { id: pid, online: true });
+      if (!guest) {
+        socket.join('members');
+        socket.emit('online', dmOnline());
+      }
+      socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
         if (to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
       });
+      // Guests name the people they want presence for
+      socket.on('watch', (ids, ack) => {
+        if (typeof ack !== 'function') return;
+        const list = [...new Set((Array.isArray(ids) ? ids : []).slice(0, 200).map((v) => str(v, 64)).filter(Boolean))];
+        for (const room of socket.rooms) if (room.startsWith('w:')) socket.leave(room);
+        for (const v of list) socket.join('w:' + v);
+        const online = dmOnline();
+        ack({ online: list.filter((v) => online.includes(v)) });
+      });
+
+      // Mailboxes: prove who you are by signing this nonce
+      const nonce = crypto.randomBytes(16).toString('base64url');
+      socket.emit('challenge', { nonce });
+      socket.on('identify', ({ s, sig } = {}, ack) => {
+        if (typeof ack !== 'function') return;
+        const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
+        if (!addr) return ack({ error: 'Bad signature' });
+        if (socket.data.addr) socket.leave('a:' + socket.data.addr);
+        socket.data.addr = addr;
+        socket.join('a:' + addr);
+        let box = guest ? null : mail.get(addr);
+        if (!guest && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
+        if (box) {
+          box.seen = Date.now();
+          saveMail();
+          for (let i = 0; i < box.items.length; i += 20) socket.emit('mail', box.items.slice(i, i + 20).map(({ id, blob }) => ({ id, blob })));
+        }
+        ack({ ok: true, mailbox: !!box });
+      });
+      socket.on('mail:put', ({ to, blob } = {}, ack) => {
+        if (typeof ack !== 'function') return;
+        if (!isKey(to, 43) || typeof blob !== 'string' || !blob || blob.length > MAX_MAIL_BLOB) return ack({ error: 'Bad mail' });
+        const now = Date.now();
+        if (now - (socket.data.mailFrom || 0) > 60e3) Object.assign(socket.data, { mailFrom: now, mailCount: 0 });
+        if (++socket.data.mailCount > 240) return ack({ error: 'Too much mail, slow down' });
+        const box = mail.get(to);
+        // No mailbox here (a guest, or someone who never came by): pass it on if they're connected
+        if (!box) {
+          if (!dm.adapter.rooms.get('a:' + to)?.size) return ack({ error: 'No mailbox' });
+          dm.to('a:' + to).emit('mail', [{ id: null, blob }]);
+          return ack({ ok: true });
+        }
+        if (box.items.length >= MAX_MAILBOX_ITEMS || box.items.reduce((n, it) => n + it.blob.length, blob.length) > MAX_MAILBOX_BYTES) return ack({ error: 'Mailbox full' });
+        const item = { id: id(), blob, ts: now };
+        box.items.push(item);
+        saveMail();
+        dm.to('a:' + to).emit('mail', [{ id: item.id, blob }]);
+        ack({ ok: true });
+      });
+      // Collected: the owner has it now
+      socket.on('mail:ack', ({ ids } = {}) => {
+        const box = mail.get(socket.data.addr);
+        if (guest || !box || !Array.isArray(ids)) return;
+        const gone = new Set(ids);
+        const kept = box.items.filter((it) => !gone.has(it.id));
+        if (kept.length !== box.items.length) (box.items = kept), saveMail();
+      });
       socket.on('disconnect', () => {
-        if (!dmOnline().includes(pid)) dm.emit('presence', { id: pid, online: false });
+        if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
       });
     });
 
@@ -820,6 +951,8 @@ async function startServer(opts = {}) {
         // Flush a pending debounced save so nothing is lost on shutdown
         clearTimeout(saveTimer);
         clearInterval(sweepTimer);
+        clearInterval(mailSweepTimer);
+        if (mailTimer) writeMail();
         updater.stop();
         writeState();
         io.close();
@@ -867,6 +1000,7 @@ if (require.main === module) {
     password: env.PASSWORD,
     giphyKey: env.GIPHY_API_KEY,
     maxStorage: env.MAX_STORAGE,
+    dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
