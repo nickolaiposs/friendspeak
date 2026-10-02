@@ -377,7 +377,7 @@ function createAdmin(ctx) {
       counts: { online: ctx.users.size, profiles: Object.keys(st.profiles).length, bans: st.bans.length, channels: st.channels.length },
       storage: ctx.usage(),
       game: ctx.gameInfo(),
-      update: ctx.updater.info(),
+      update: ctx.updater.status(),
     });
   });
 
@@ -536,6 +536,94 @@ function createAdmin(ctx) {
     answer(res, actions.setMemberRoles(pid, req.body?.roles), (r) => {
       const st = ctx.state();
       logAction(req, 'role.assign', `${st.profiles[pid].name}: ${roleNames(st, r.roles)}`);
+    });
+  });
+
+  // ---------- updates, storage, channels, game, server settings (D34) ----------
+
+  const updater = ctx.updater;
+  api.get('/updates', (_req, res) => res.json({ ...updater.status(), docker: !!ctx.inDocker }));
+
+  api.post('/update/check', async (req, res) => {
+    const r = await updater.checkNow();
+    answer(res, r.error ? r : { ok: true, update: r }, () => logAction(req, 'update.check', r.latest ? `${r.latest.version} available` : 'up to date'));
+  });
+  api.post('/update/now', async (req, res) => {
+    const r = await updater.installSoon();
+    answer(res, r.error ? r : { ok: true, update: updater.status() }, () => logAction(req, 'update.now', updater.status().latest?.version || ''));
+  });
+  api.post('/update/cancel', (req, res) => {
+    const r = updater.cancelInstall();
+    answer(res, r.error ? r : { ok: true, update: updater.status() }, () => logAction(req, 'update.cancel', ''));
+  });
+
+  const DELETED = '(deleted channel)';
+  const DATA_FILES = ['state.json', 'mail.json', 'game.sqlite', 'admin-audit.log'];
+  api.get('/storage', async (_req, res) => {
+    const st = ctx.state();
+    const files = st.files.filter((f) => f.messageId);
+    const nameOf = (cid) => st.channels.find((c) => c.id === cid)?.name || DELETED;
+    const byChannel = new Map(st.channels.filter((c) => c.type === 'text').map((c) => [c.id, { channelId: c.id, name: c.name, bytes: 0, count: 0 }]));
+    for (const f of files) {
+      let c = byChannel.get(f.channelId);
+      if (!c) byChannel.set(f.channelId, (c = { channelId: f.channelId, name: DELETED, bytes: 0, count: 0 }));
+      c.bytes += f.size;
+      c.count++;
+    }
+    const data = await Promise.all(DATA_FILES.map((name) => fs.promises.stat(path.join(dataDir, name)).then((s) => ({ name, bytes: s.size }), () => ({ name, bytes: 0 }))));
+    res.json({
+      ...ctx.usage(),
+      count: files.length,
+      largest: [...files].sort((a, b) => b.size - a.size).slice(0, 20).map((f) => ({ id: f.id, name: f.name, size: f.size, type: f.type, channelId: f.channelId, channelName: nameOf(f.channelId), byName: f.byName, ts: f.ts })),
+      channels: [...byChannel.values()].sort((a, b) => b.bytes - a.bytes),
+      data,
+    });
+  });
+
+  api.get('/channels', (_req, res) => {
+    const st = ctx.state();
+    res.json({
+      channels: st.channels.map((c) => {
+        if (c.type !== 'text') {
+          const occupants = [];
+          for (const [sid, u] of ctx.users) if (u.voice === c.id) occupants.push({ sid, id: u.profile.id, name: u.profile.name, color: u.profile.color, avatar: u.profile.avatar, muted: !!u.muted, deafened: !!u.deafened, sharing: !!u.sharing, camera: !!u.camera });
+          return { id: c.id, name: c.name, type: c.type, occupants };
+        }
+        const msgs = Object.hasOwn(st.messages, c.id) ? st.messages[c.id] : [];
+        return { id: c.id, name: c.name, type: c.type, messages: msgs.length, lastMessage: msgs.length ? msgs[msgs.length - 1].ts : null, files: st.files.filter((f) => f.messageId && f.channelId === c.id).length };
+      }),
+    });
+  });
+
+  api.get('/game', (_req, res) => {
+    const info = ctx.gameInfo();
+    const g = ctx.game();
+    res.json({ available: info.available, enabled: info.enabled, reason: info.available ? null : info.reason || null, world: info.world || null, players: g?.available && g.players ? g.players() : null, maxUsers: g?.maxUsers ?? null, off: !!ctx.gameOff });
+  });
+
+  const serverView = () => {
+    const { name, icon } = ctx.state();
+    const { available, enabled, reason, world } = ctx.gameInfo();
+    return { name, icon, game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
+  };
+  api.get('/server', (_req, res) => res.json(serverView()));
+
+  api.patch('/server', (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const patch = {};
+    if (b.name !== undefined) patch.name = b.name;
+    if (b.icon !== undefined) patch.icon = b.icon;
+    if (b.game !== undefined) patch.game = b.game;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+    if (patch.name !== undefined && typeof patch.name !== 'string') return res.status(400).json({ error: 'Server name required' });
+    if (patch.icon !== undefined && typeof patch.icon !== 'string') return res.status(400).json({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
+    if (patch.game !== undefined && typeof patch.game !== 'boolean') return res.status(400).json({ error: 'game must be true or false' });
+    answer(res, actions.updateServer(patch), () => {
+      const what = [];
+      if (patch.name !== undefined) what.push(`name "${ctx.state().name}"`);
+      if (patch.icon !== undefined) what.push(patch.icon ? 'icon' : 'icon removed');
+      if (patch.game !== undefined) what.push(patch.game ? 'game on' : 'game off');
+      logAction(req, 'server.update', what.join(', '));
     });
   });
 

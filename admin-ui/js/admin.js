@@ -7,9 +7,18 @@ import roles from './views/roles.js';
 import log from './views/log.js';
 import keys from './views/keys.js';
 import audit from './views/audit.js';
+import channels from './views/channels.js';
+import storage from './views/storage.js';
+import game from './views/game.js';
+import updates from './views/updates.js';
+import settings from './views/settings.js';
 
 // Add a view: create a module exporting { id, title, mount(root, ctx) } and list it here.
-const views = [overview, users, roles, log, keys, audit];
+const groups = [
+  ['Server', [overview, users, roles, channels, storage, game, updates, settings]],
+  ['Admin', [log, keys, audit]],
+];
+const views = groups.flatMap(([, v]) => v);
 
 const root = document.getElementById('root');
 let events = null;
@@ -126,7 +135,7 @@ function showApp() {
   const brandIcon = h('div', { class: 'logo', 'aria-hidden': 'true' }, (s.name || 'f').slice(0, 1).toUpperCase());
   const brand = h('div', { class: 'brand' }, brandIcon, h('span', {}, s.name || 'friendspeak'));
   const nav = h('nav', { class: 'nav', 'aria-label': 'Admin sections' },
-    views.map((v) => h('a', { href: `#/${v.id}`, 'data-id': v.id }, v.title)));
+    groups.flatMap(([name, vs]) => [h('div', { class: 'nav-h' }, name), vs.map((v) => h('a', { href: `#/${v.id}`, 'data-id': v.id }, v.title))].flat()));
   const foot = h('div', { class: 'side-foot' },
     state, retry,
     s.local ? h('div', { class: 'local-badge' }, 'Local access: no key needed from this machine')
@@ -165,7 +174,7 @@ function showApp() {
     cleanup = null;
     const id = location.hash.replace(/^#\//, '');
     const view = views.find((v) => v.id === id) || views[0];
-    for (const a of nav.children) {
+    for (const a of nav.querySelectorAll('a')) {
       if (a.dataset.id === view.id) a.setAttribute('aria-current', 'page');
       else a.removeAttribute('aria-current');
     }
