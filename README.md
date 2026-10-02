@@ -4,7 +4,7 @@ A self-hosted Discord / Slack / TeamSpeak-style app for you and your friends.
 No accounts or sign-up. Run a server, share your IP, and talk.
 
 - **Text channels:** markdown (`# heading` / `##` / `###`, `-# small text`, `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `- lists`, `1. lists`, `> quotes`, `` `code` ``, ```` ``` ```` blocks), replies, edits, deletes, reactions, @mentions, typing indicators, and history that persists on the server.
-- **Direct messages:** peer to peer, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and open without leaving the server you're connected to (voice keeps going). Messages go straight between the two devices over an encrypted WebRTC connection and are stored only there; servers you have bookmarked just help you find each other. Messages to someone who's offline are delivered the next time you're both online. Text, GIFs, replies, edits, deletes and reactions work; files don't.
+- **Direct messages:** peer to peer and end-to-end encrypted, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**, or swap **friend codes** (the **+** under **DMs**) to message someone you share no server with. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and opening one doesn't disconnect you from the server or its voice channel. Text, images (up to 4 per message, 10 MB each), GIFs, replies, edits and reactions. Messages are stored only on your two devices. If your friend is offline, the message waits, still encrypted, in their mailbox on a server they use, and arrives the next time they open the app. Images come straight from your friend's device, so the full picture loads once you're both online (a small preview arrives with the message).
 - **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible).
 - **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
@@ -115,6 +115,7 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `PASSWORD`      | none          | Require a password to join                                     |
 | `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key                |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
+| `DM_GUESTS`     | on            | `off` = only people with the password can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without the password; they see nothing else |
 | `HTTPS`         | off           | `1` = serve over HTTPS with an auto-generated self-signed cert |
 | `DATA_DIR`      | `./data`      | Where channels, history, emojis, certs and the game database are stored |
 | `GAME`          | on            | `off` = disable the game entirely (not served, not started, can't be turned on in Settings) |
@@ -208,7 +209,8 @@ public/index.html   App shell
 public/css/         Styles
 public/js/main.js   UI and app logic
 public/js/voice.js  WebRTC mesh voice
-public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels)
+public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server mailboxes)
+public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
 public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
 public/js/util.js   Helpers: markdown, avatars, formatting
