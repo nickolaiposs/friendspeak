@@ -40,7 +40,10 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
   }
 
   // latest: { version, url } of a newer release; at: when it will be installed
-  const st = { latest: null, at: null, installing: false, lastError: null };
+  // manual: an install requested from the admin dashboard is counting down
+  // watchtower: result of the last probe (null: never probed); lastCheck: last finished check
+  const st = { latest: null, at: null, installing: false, lastError: null, lastCheck: null, watchtower: null, manual: false };
+  const canInstall = !!inDocker && !!watchtowerToken; // independent of `mode`: AUTO_UPDATE=notify can still be installed by hand
   let checkTimer = null;
   let windowTimer = null;
 
@@ -57,9 +60,17 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
       installing: st.installing,
     };
   }
+  // info() plus what the admin dashboard shows
+  const status = () => ({ ...info(), lastCheck: st.lastCheck, lastError: st.lastError, watchtower: st.watchtower, canInstall, manual: st.manual });
   const changed = () => onChange?.(info());
 
-  async function check() {
+  // One check at a time: a check requested while another runs shares its result
+  let running = null;
+  function check() {
+    return (running ||= runCheck().finally(() => (running = null)));
+  }
+
+  async function runCheck() {
     if (mode === 'off' || st.installing) return;
     try {
       const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
@@ -71,12 +82,13 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
       const rel = await res.json();
       const latest = String(rel.tag_name || '').replace(/^v/, '');
       st.lastError = null;
+      st.lastCheck = Date.now();
       if (!isNewer(latest, version)) {
-        if (st.latest) Object.assign(st, { latest: null, at: null }), clearTimeout(windowTimer), changed();
+        if (st.latest) Object.assign(st, { latest: null, at: null, manual: false }), clearTimeout(windowTimer), changed();
         return;
       }
       const isNew = st.latest?.version !== latest;
-      if (isNew) Object.assign(st, { latest: { version: latest, url: rel.html_url || `${releasesUrl}/tag/v${latest}` }, at: null });
+      if (isNew) Object.assign(st, { latest: { version: latest, url: rel.html_url || `${releasesUrl}/tag/v${latest}` } }), st.manual || (st.at = null); // a requested install keeps its time
       // Only promise a maintenance window when something can carry it out.
       // Checked again every time, so starting Watchtower later is enough.
       let scheduled = false;
@@ -93,6 +105,7 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
     } catch (err) {
       if (st.lastError !== err.message) log.warn('[update] check failed:', err.message);
       st.lastError = err.message;
+      st.lastCheck = Date.now();
     }
   }
 
@@ -100,9 +113,9 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
   async function watchtowerUp() {
     try {
       await fetch(new URL('/v1/update', watchtowerUrl), { signal: AbortSignal.timeout(5e3) });
-      return true;
+      return (st.watchtower = true);
     } catch {
-      return false;
+      return (st.watchtower = false);
     }
   }
 
@@ -117,6 +130,7 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
 
   async function install() {
     st.installing = true;
+    st.manual = false;
     changed();
     log.log(`[update] maintenance window: asking Watchtower to install ${st.latest.version}`);
     // Watchtower answers only after the update finishes, and by then it has
@@ -136,14 +150,52 @@ function createUpdater({ version, mode = 'off', repo, token, cron = '0 6 * * 0',
     clearTimeout(windowTimer);
     log.error('[update] update failed:', reason);
     st.installing = false;
-    st.at = nextRun(schedule, Date.now() + MIN_LEAD);
-    log.log(`[update] retrying at ${new Date(st.at).toString()}`);
+    // `on` tries again at the next window; a hand-started install in `notify` mode doesn't
+    st.at = mode === 'on' ? nextRun(schedule, Date.now() + MIN_LEAD) : null;
+    if (st.at) log.log(`[update] retrying at ${new Date(st.at).toString()}`);
     armWindow();
     changed();
   }
 
+  // The admin dashboard's "Update now": install in `delay` ms, with the usual warning to clients
+  async function installSoon(delay = 120e3) {
+    if (st.installing) return { error: 'An update is already being installed' };
+    if (!st.latest) return { error: 'No newer version is known' };
+    if (!canInstall) return { error: 'This server can’t install updates itself (it needs the Docker image with the Watchtower sidecar)' };
+    if (!(await watchtowerUp())) return { error: `Watchtower isn’t answering at ${watchtowerUrl}` };
+    if (st.installing || !st.latest) return { error: st.installing ? 'An update is already being installed' : 'No newer version is known' }; // changed while probing
+    st.at = Date.now() + delay;
+    st.manual = true;
+    armWindow();
+    log.log(`[update] installing ${st.latest.version} at ${new Date(st.at).toString()} (requested from the admin dashboard)`);
+    changed();
+    return { ok: true };
+  }
+
+  // Back out of a requested install that hasn't started
+  function cancelInstall() {
+    if (!st.manual || st.installing) return { error: 'Nothing to cancel' };
+    clearTimeout(windowTimer);
+    st.manual = false;
+    st.at = mode === 'on' ? nextRun(schedule, Date.now() + MIN_LEAD) : null;
+    armWindow();
+    log.log('[update] the requested install was cancelled');
+    changed();
+    return { ok: true };
+  }
+
+  async function checkNow() {
+    if (mode === 'off') return { error: 'Update checks are off (AUTO_UPDATE)' };
+    await check();
+    return status();
+  }
+
   return {
     info,
+    status,
+    checkNow,
+    installSoon,
+    cancelInstall,
     start() {
       if (mode === 'off') return;
       setTimeout(check, 30e3).unref();

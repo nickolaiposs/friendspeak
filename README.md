@@ -144,11 +144,15 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 - **Overview:** version, uptime, memory, how it is hosted, who is online, storage used, the game and update status.
 - **Users:** who is online (with their IP, since when, and what they are doing), everyone who has been on the server before (last seen, last IP) and the bans (with the real IP). You can remove someone, ban them (and their IP) and unban them.
 - **Roles:** create labels such as *Founder* or *Mod*, give them a color, order them, and assign them to people. Roles are labels shown next to names in the app. They are **not** a security feature and grant nothing: anyone who copies someone's profile id shows their roles, and everyone on the server can still manage channels, emojis and bans in the app.
+- **Channels:** each channel's message and file counts, and who is in each voice channel. Read-only: manage channels in the app.
+- **Storage:** space used against `MAX_STORAGE`, usage by channel, the largest files and the size of the data files. Read-only.
+- **Penguin game:** whether the game is available and on, the world, and how many players are in it.
+- **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now** (see [Automatic updates](#automatic-updates)).
+- **Server settings:** the server's name, icon and the game switch, like **Settings → Server** in the app.
 - **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
 - **Admin keys:** create a named key for each admin and revoke it.
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
-Updates, storage, channels and game settings are planned for later versions.
 
 **Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from `PASSWORD`, which every friend knows. The dashboard doesn't change what friends can do in the app: they can still manage channels, emojis and bans there.
 
@@ -231,6 +235,8 @@ friendspeak only schedules a window when Watchtower answers, so a missing or sto
 Only the watchtower container gets the Docker socket, and it only touches containers labeled `com.centurylinklabs.watchtower.enable=true` (friendspeak). While the repo is private, also set `GITHUB_TOKEN` (friendspeak reads releases) and `GHCR_USER`/`GHCR_TOKEN` (watchtower pulls the image).
 
 Examples: `0 4 * * *` is every day at 04:00. `30 3 * * 1-5` is weekdays at 03:30. `0 6 1 * *` is the 1st of each month.
+
+**From the dashboard.** With the Watchtower sidecar running and `WATCHTOWER_TOKEN` set, the **Updates** page has an **Update now** button when a newer version is out. It works with `AUTO_UPDATE=notify` too. Everyone on the server gets a two-minute warning, then the server updates as in step 3 above. You can cancel during the countdown. Without the sidecar the page shows the manual steps instead, and outside Docker the button isn't offered.
 
 To update by hand instead, set `AUTO_UPDATE=notify` (or pin `FRIENDSPEAK_IMAGE` to a version), then click **Update the stack** with "Re-pull image" checked. Hosts using `npm start` can use `AUTO_UPDATE=notify` and `git pull && npm install` themselves.
 
