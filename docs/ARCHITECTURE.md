@@ -170,12 +170,16 @@ Newest socket per profile wins, like chat sessions.
 ## Web client (`public/`)
 
 - **No framework, no bundler.** `main.js` is an ES module. `h(tag, attrs, ...children)` builds DOM. Each region has a `render*()` function that rebuilds it: `renderRail`, `renderHeader`, `renderChannels`, `renderVoicePanel`, `renderUserPanel`, `renderMembers`, `renderMain`, `renderMessages`. Messages also have incremental paths (`appendMessage`, element replacement on `msg:update`).
-- **App state** is one object `S` in `main.js`. It holds the connection (`entry`, `socket`, `sid`, `connected`), the server snapshot (`server`, `users`), per-channel `messages`/`hasMore`/`unread`/`typing`, voice (`voice`, `voiceChannel`, `muted`, `deafened`, `rejoinVoice`), `replyTo`, `sounds`, and `game`.
+- **App state** is one object `S` in `main.js`. It holds the bookmark in view (`entry`), its connection (`conn`), the connection the voice call is on (`call`), per-channel `messages`/`hasMore`/`unread`/`typing` for the server in view, `muted`, `deafened`, `replyTo`, `sounds`, and `game`.
+- **Connections** (D31): each server gets a connection object `{ entry, socket, voice (its VoiceClient), sid, connected, server, users, voiceChannel, rejoinVoice }`, made in `openSocket`. `S.conn` is the server in view, and `S.socket`, `S.sid`, `S.connected`, `S.server` and `S.users` are getters that read it. `S.call` is the connection you are in voice on, and `S.voice` and `S.voiceChannel` read that one. Usually they are the same object. Switching servers closes `S.conn` unless the call is on it; then it stays open in the background, so at most two are open. Socket handlers always update their own connection and only draw when it is the one in view (`viewed()`). A background connection doesn't track messages or unread marks.
+  - Code about the server in view (channel list, members, chat) uses the `S.*` getters and `inCall(channelId)`. Code about the call (voice panel, stage, screen share, camera, speaking indicators) uses `S.call`, `S.voice` and `callChannel()`, because the call's `sid` and `users` belong to another server while you browse elsewhere.
+  - `endCall()` hangs up and closes the call's connection if it isn't in view. Joining voice on another server ends the current call first: there is one call at a time.
+  - The voice panel names the call's channel and server. While the call is on another server, that name is a link back (`connectTo(S.call.entry)` → `viewConn`), a button opens the video stage, and the rail marks the server (`.rail-call`).
 - **Connection lifecycle** (`connectTo`):
-  1. Open the socket.
-  2. On `connect`, send `hello`.
-  3. On success, select the last channel for that server.
-  4. On `disconnect`, remember the voice channel in `S.rejoinVoice` and rejoin after reconnect.
+  1. Leave the server in view (`disconnect`), keeping its connection if the call is on it. If the call is on the server being opened, show that connection again (`viewConn`) and stop here.
+  2. Open the socket. On `connect`, send `hello`.
+  3. On success, select the last channel for that server (`showServer`).
+  4. On `disconnect`, remember the voice channel in the connection's `rejoinVoice` and rejoin after reconnect. Meanwhile the voice panel says "Reconnecting…".
 - **Overlays:**
   - `modal()`, `promptModal()` and `confirmModal()` return a promise.
   - `popover()` shows one popover at a time and closes on outside click or Escape.
@@ -224,7 +228,7 @@ flowchart LR
   - `camera` comes from `getUserMedia` (`settings.videoDevice`): 1280×720 at 30 fps with no audio (your voice already carries it), with a 2.5 Mbps cap.
 
   `VoiceClient.setMedia(kind, stream)` only announces the media (`voice:media`). A viewer sends `{ watch: kind, on: true }`. The sender replies with `{ media: kind, id: streamId }` and adds `sendonly` transceivers for that viewer only (`contentHint = 'motion'`, hardware-friendly codec order, per-viewer `scaleResolutionDownBy`/`maxBitrate`/`active` from their `{ view }` reports; see D22). Stopping calls `transceiver.stop()` and sends `{ media: kind, id: null }`. The receiver matches incoming tracks to a kind by the announced stream id; unannounced audio is voice.
-- **Video stage (`#stream-view`, `openStage`/`syncStage`/`layoutStage`):** one Discord-style view per voice channel, open while anyone in it shares or has a camera on.
+- **Video stage (`#stream-view`, `openStage`/`syncStage`/`layoutStage`):** one Discord-style view per voice channel, open while anyone in it shares or has a camera on. It shows the call's channel (`S.call`), so it also works while another server is in view.
   - **Grid:** every participant gets a tile: their camera, or their avatar while it's off, with a green outline while they speak. Every screen share gets one too. `layoutStage` picks the column count that makes 16:9 tiles largest.
   - **Focus:** clicking a tile shows it large with the rest in a strip below; clicking it again or pressing "Grid" goes back. Double-click goes fullscreen.
   - **Watching:** cameras are watched while the stage is open. Screen shares stay opt-in: an unwatched one is a "Watch stream" card, and several can be watched at once. Each has its own volume slider and "Stop watching" on hover, and honours deafen.
