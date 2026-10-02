@@ -4,6 +4,9 @@ import { profiles, servers, settings, sounds, exportProfile, importProfile, rand
 import { audio, Level } from './audio.js';
 import { VoiceClient, SCREEN, MEDIA } from './voice.js';
 import { DirectMessages } from './dm.js';
+import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
+
+applyAppearance(); // before the first render
 
 // ---------------------------------------------------------------- state
 
@@ -414,7 +417,7 @@ function profileEditor(p) {
   const bannerColor = h('input', {
     type: 'color',
     title: 'Plain color background',
-    value: draft.banner?.startsWith('#') ? draft.banner : draft.color || '#5865f2',
+    value: draft.banner?.startsWith('#') ? draft.banner : draft.color || '#8b6cf6',
     oninput: (e) => ((draft.banner = e.target.value), refresh()),
   });
   refresh();
@@ -2241,8 +2244,10 @@ function getPicker() {
   if (!picker) {
     picker = document.createElement('emoji-picker');
     picker.dataSource = '/vendor/emoji-data/en/emojibase/data.json';
-    picker.classList.add('dark');
   }
+  const scheme = document.documentElement.dataset.scheme;
+  picker.classList.toggle('dark', scheme !== 'light');
+  picker.classList.toggle('light', scheme === 'light');
   updatePickerEmojis();
   return picker;
 }
@@ -3349,6 +3354,7 @@ function openSettings(tab = 'profile') {
   const body = h('div', { class: 'settings-body' });
   const tabs = {
     profile: ['My profile', settingsProfile],
+    appearance: ['Appearance', settingsAppearance],
     voice: ['Voice & video', settingsVoice],
     integrations: ['Integrations', settingsIntegrations],
     server: ['Server', settingsServer],
@@ -3440,6 +3446,91 @@ function settingsProfile(body) {
       importInput
     )
   );
+}
+
+function settingsAppearance(body) {
+  const st = settings.get();
+  const tiles = [];
+  const pickers = [];
+  const update = (patch) => {
+    applyAppearance(settings.set(patch));
+    sync();
+  };
+  // Tiles and pickers are updated in place: rebuilding them would close an open color picker
+  const sync = () => {
+    const now = settings.get();
+    const colors = paletteOf(now);
+    for (const t of tiles) t.el.classList.toggle('selected', t.theme ? now.theme === t.theme : now.theme === 'custom' && samePalette(colors, t.colors));
+    for (const p of pickers) {
+      p.input.value = colors[p.key];
+      p.hex.textContent = colors[p.key];
+    }
+    customBadge.hidden = now.theme !== 'custom';
+  };
+
+  // A small mock of the app, drawn with the palette's own colors
+  const tile = (name, colors, theme) => {
+    const bar = (cls) => h('i', { class: cls });
+    const el = h(
+      'button',
+      { class: 'theme-tile theme-scope', title: name, onclick: () => update(theme ? { theme } : { theme: 'custom', themeColors: colors }) },
+      h(
+        'div',
+        { class: 'tt-preview' },
+        h('div', { class: 'tt-rail' }, bar('on'), bar(), bar()),
+        h('div', { class: 'tt-side' }, bar(), bar('on'), bar(), bar('voice')),
+        h('div', { class: 'tt-main' }, bar('strong'), bar(), bar('link'), h('div', { class: 'tt-dots' }, bar('green'), bar('yellow'), bar('red')), h('div', { class: 'tt-composer' }, bar()))
+      ),
+      h('span', { class: 'tt-name' }, name)
+    );
+    setColors(el, colors);
+    tiles.push({ el, colors, theme });
+    return el;
+  };
+  const picker = ([key, label]) => {
+    const input = h('input', { type: 'color', oninput: (e) => update({ theme: 'custom', themeColors: { ...paletteOf(), [key]: e.target.value } }) });
+    const hex = h('span', { class: 'hex' });
+    pickers.push({ key, input, hex });
+    return h('label', { class: 'color-field' }, input, h('span', {}, label, hex));
+  };
+
+  const customBadge = h('span', { class: 'badge' }, 'custom');
+  const select = (key, options) => {
+    const el = h('select', { onchange: (e) => update({ [key]: e.target.value }) }, Object.entries(options).map(([k, [label]]) => h('option', { value: k }, label)));
+    el.value = options[st[key]] ? st[key] : Object.keys(options)[0];
+    return el;
+  };
+  const fontCustom = h(
+    'label',
+    { class: 'field', hidden: st.font !== 'custom' },
+    h('span', {}, 'Font name'),
+    h('input', { value: st.fontCustom, placeholder: 'A font installed on this computer, e.g. Fira Sans', oninput: (e) => update({ fontCustom: e.target.value }) })
+  );
+  const fontSel = select('font', FONTS);
+  fontSel.addEventListener('change', () => (fontCustom.hidden = fontSel.value !== 'custom'));
+  const sizeVal = h('span', {}, st.fontSize + 'px');
+  const sizeIn = h('input', { type: 'range', min: FONT_SIZE.min, max: FONT_SIZE.max, step: FONT_SIZE.step, value: st.fontSize, oninput: (e) => (update({ fontSize: +e.target.value }), (sizeVal.textContent = e.target.value + 'px')) });
+
+  body.append(
+    h('h3', {}, 'Theme'),
+    h('div', { class: 'theme-grid' }, Object.entries(THEMES).map(([id, t]) => tile(t.name, t.colors, id))),
+    h('h3', {}, 'Color schemes'),
+    h('p', { class: 'muted small' }, 'Popular terminal color schemes from the Gogh collection. Click one to load its colors, then adjust them below.'),
+    h('div', { class: 'theme-grid scroll' }, SCHEMES.map((s) => tile(s.name, s.colors))),
+    h('h3', {}, 'Colors', customBadge),
+    h('p', { class: 'muted small' }, 'Changing a color makes a custom theme from the one in use.'),
+    ...COLOR_GROUPS.flatMap(([title, colors]) => [h('div', { class: 'color-group' }, title), h('div', { class: 'color-grid' }, colors.map(picker))]),
+    h('h3', {}, 'Font and spacing'),
+    h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Font'), fontSel), h('label', { class: 'field grow' }, h('span', {}, 'Density'), select('density', DENSITIES))),
+    fontCustom,
+    h(
+      'div',
+      { class: 'field' },
+      h('span', {}, 'Text size ', sizeVal),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, sizeIn), h('button', { class: 'btn small ghost', onclick: () => (update({ fontSize: FONT_SIZE.base }), (sizeIn.value = FONT_SIZE.base), (sizeVal.textContent = FONT_SIZE.base + 'px')) }, 'Reset'))
+    )
+  );
+  sync();
 }
 
 function settingsVoice(body) {
