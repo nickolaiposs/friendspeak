@@ -5,6 +5,24 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.2 - 2026-10-01
+
+- Calls in direct messages: voice and video calls with a friend, with screen
+  sharing, from the phone and camera buttons at the top of a conversation
+- Direct messages are end-to-end encrypted, and each profile has its own keys.
+  A message to someone who is offline waits for them in a mailbox on a server
+  you share (the server must run 1.1.2 too)
+- Images in direct messages (up to 4 per message, 10 MB each)
+- Friend codes: message someone you share no server with (the **+** under DMs)
+- Stay in a voice channel while you look at another server
+- Themes: light, dark and high contrast, 50 color schemes, a custom palette,
+  and font, text size and density settings
+- Renaming your profile renames your penguin
+- Fixed: a direct message connection that never opened was not retried
+- New server option `DM_GUESTS` (default on): lets people without the server
+  password pass encrypted direct messages through it. Set it to `off` to
+  refuse them
+
 ## 1.1.1 - 2026-10-01
 
 - Fixed: the server name field in Server settings didn't accept typing

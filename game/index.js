@@ -120,38 +120,62 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
   const bcrypt = require('bcryptjs');
 
   await db.sequelize.query(
-    'CREATE TABLE IF NOT EXISTS friendspeak_accounts (profileId TEXT PRIMARY KEY, userId INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE)'
+    'CREATE TABLE IF NOT EXISTS friendspeak_accounts (profileId TEXT PRIMARY KEY, userId INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE, baseName TEXT)'
   );
+  // baseName (added later): the name the penguin's username was last derived from
+  const [columns] = await db.sequelize.query('PRAGMA table_info(friendspeak_accounts)');
+  if (!columns.some((c) => c.name === 'baseName')) {
+    await db.sequelize.query('ALTER TABLE friendspeak_accounts ADD COLUMN baseName TEXT');
+  }
 
-  async function uniqueUsername(name) {
+  function baseUsername(name) {
     // Yukon: 4-12 printable ASCII characters
     let base = String(name || '').replace(/[^A-Za-z0-9 ]/g, '').replace(/\s+/g, ' ').trim().slice(0, 12);
     if (base.length < 4) base = `${base} Penguin`.trim().slice(0, 12);
+    return base;
+  }
+
+  // ownId: the penguin being renamed, whose current username counts as free
+  async function uniqueUsername(base, ownId) {
     for (let i = 0; i < 1000; i++) {
       const suffix = i === 0 ? '' : String(i + 1);
       const candidate = (base.slice(0, 12 - suffix.length).trim() + suffix).padEnd(4, '0');
-      if (!(await db.users.findOne({ where: { username: candidate } }))) return candidate;
+      const taken = await db.users.findOne({ where: { username: candidate } });
+      if (!taken || taken.id === ownId) return candidate;
     }
     return 'P' + crypto.randomBytes(5).toString('hex').slice(0, 11);
   }
 
   async function login(profile) {
-    const [rows] = await db.sequelize.query('SELECT userId FROM friendspeak_accounts WHERE profileId = ?', {
+    const [rows] = await db.sequelize.query('SELECT userId, baseName FROM friendspeak_accounts WHERE profileId = ?', {
       replacements: [profile.id],
     });
     let user = rows[0] ? await db.users.findOne({ where: { id: rows[0].userId } }) : null;
+    const base = baseUsername(profile.name);
 
     if (!user) {
       user = await db.users.create({
-        username: await uniqueUsername(profile.name),
+        username: await uniqueUsername(base),
         // Random password nobody knows: logins go through friendspeak tokens
         password: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10),
         color: nearestColor(profile.color),
       });
-      await db.sequelize.query('INSERT OR REPLACE INTO friendspeak_accounts (profileId, userId) VALUES (?, ?)', {
-        replacements: [profile.id, user.id],
+      await db.sequelize.query('INSERT OR REPLACE INTO friendspeak_accounts (profileId, userId, baseName) VALUES (?, ?, ?)', {
+        replacements: [profile.id, user.id, base],
       });
       console.log(`[game] created penguin "${user.username}" for ${profile.name}`);
+    } else if (rows[0].baseName !== base) {
+      // The profile was renamed. Comparing the derived name, not the username,
+      // keeps a penguin from flipping between "Name" and "Name2".
+      const username = await uniqueUsername(base, user.id);
+      if (username !== user.username) {
+        const previous = user.username;
+        await user.update({ username });
+        console.log(`[game] renamed penguin "${previous}" to "${username}" for ${profile.name}`);
+      }
+      await db.sequelize.query('UPDATE friendspeak_accounts SET baseName = ? WHERE profileId = ?', {
+        replacements: [base, profile.id],
+      });
     }
 
     const selector = crypto.randomUUID();

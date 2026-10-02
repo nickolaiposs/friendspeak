@@ -40,6 +40,8 @@ services:
       GIPHY_API_KEY: ${GIPHY_API_KEY:-}
       # Total space for files uploaded to channels (stored in the data volume)
       MAX_STORAGE: ${MAX_STORAGE:-2GB}
+      # off = only people with the password can pass direct messages through this server
+      DM_GUESTS: ${DM_GUESTS:-on}
       HTTPS: ${HTTPS:-1}
       # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
       GAME: ${GAME:-on}
