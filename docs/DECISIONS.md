@@ -107,8 +107,9 @@ Without a mic, users join **listen-only** instead of failing.
 
 ## D14: Accountless penguins via auth tokens · Active
 **Decision:**
-- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId)` table, creating the user on first use.
-  - The username is derived from the display name: 4–12 printable ASCII characters, unique, and padded with " Penguin" if too short.
+- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId, baseName)` table, creating the user on first use.
+  - The username is derived from the display name: 4–12 printable ASCII characters, unique (a number is appended if taken), and padded with " Penguin" if too short.
+  - `baseName` stores the derived name before the uniqueness suffix. When a later `game:login` derives a different one, the penguin is renamed. Comparing derived names rather than usernames keeps a penguin from flipping between `Name` and `Name2`.
   - The penguin color is the nearest classic color to the profile color.
   - The password is random and never used.
 - Each `game:login` then mints a Yukon auth token (`selector:validator`, with the validator bcrypt-hashed in `auth_tokens`) and deletes that user's older tokens.
@@ -118,7 +119,7 @@ Without a mic, users join **listen-only** instead of failing.
 - It reuses Yukon's own "remember me" login path instead of inventing an auth bypass.
 - The token is in the fragment, so it's never sent in HTTP requests or logs.
 - A penguin belongs to a profile *per server*.
-- Renaming a friendspeak profile doesn't rename the penguin.
+- Renaming a friendspeak profile renames the penguin the next time the game is launched, not in real time.
 
 ## D15: The game runs in an iframe, kept alive · Active
 **Decision:**

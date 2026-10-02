@@ -137,7 +137,7 @@ Every event except `hello` requires a successful `hello` first. `on()` inside `a
 | `voice:state` | `{ muted, deafened }` | none | `users` |
 | `voice:media` | `{ screen, camera }` (booleans) | none | `users` (each user has `sharing` and `camera`; both cleared on leaving voice) |
 | `rtc:signal` | `{ to, data }` | none | relayed only if both are in the same voice channel. `data` is `{ sdp }`, `{ candidate }`, or media control: `{ watch: 'screen'\|'camera', on }` and `{ view: kind, w, h, hidden }` (viewer → sender: displayed size in device pixels, or window hidden) and `{ media: 'screen'\|'camera', id: streamId \| null }` (sender → viewer) |
-| `game:login` | none | `{ ok, username, token, path }` / `{ error }` | creates the penguin on first use (GAME.md). Refused while the game is unavailable or switched off. |
+| `game:login` | none | `{ ok, username, token, path }` / `{ error }` | creates the penguin on first use and renames it when the profile name has changed (GAME.md). Refused while the game is unavailable or switched off. |
 | `game:state` | `{ playing }` | none | `users` |
 | `member:remove` | `{ profileId }` | `{ ok }` / `{ error }` | anyone may remove anyone but themselves (D27). Their chat and DM-signaling sockets get `removed` and are disconnected, and their stored profile is deleted: `profile:removed {id}`, `users`. They can reconnect. |
 | `ban:add` | `{ profileId, ip? }` | `{ ok, ipSkipped }` / `{ error }` | anyone may ban anyone but themselves (D27). The target's chat and DM-signaling sockets (and, with `ip`, every socket from their last IP) get `banned` and are disconnected; `bans`, `users` |
