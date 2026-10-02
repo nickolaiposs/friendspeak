@@ -1,7 +1,7 @@
 # Models
 
 `selfie_segmenter.tflite` is MediaPipe's selfie segmentation model (float16),
-used for camera backgrounds (`public/js/background.js`, D35). It is published
+used for camera backgrounds (`public/js/background.js`, D37). It is published
 by Google under the Apache License 2.0:
 
 - Source: <https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite>

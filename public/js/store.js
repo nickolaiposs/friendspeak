@@ -96,7 +96,11 @@ const DEFAULT_SETTINGS = {
   ptt: false,
   pttKey: 'Backquote',
   echoCancellation: true,
-  noiseSuppression: true,
+  autoGainControl: true,
+  noiseReduction: 'high', // 'off' | 'standard' (the browser's) | 'high' (RNNoise, D35)
+  noiseGate: 'off', // 'off' | 'auto' (follows the room's noise) | 'manual' (noiseGateThreshold)
+  noiseGateThreshold: -50, // dB
+  speakerMode: false, // turn the mic down while friends are heard, for people on speakers
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)
@@ -118,7 +122,13 @@ const DEFAULT_SETTINGS = {
 };
 
 export const settings = {
-  get: () => ({ ...DEFAULT_SETTINGS, ...read('fs.settings', {}) }),
+  get() {
+    const saved = read('fs.settings', {});
+    const s = { ...DEFAULT_SETTINGS, ...saved };
+    // noiseReduction replaced a "Noise suppression" checkbox: keep an explicit off
+    if (saved.noiseSuppression === false && !saved.noiseReduction) s.noiseReduction = 'off';
+    return s;
+  },
   set(patch) {
     const s = { ...this.get(), ...patch };
     write('fs.settings', s);
