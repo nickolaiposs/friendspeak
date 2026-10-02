@@ -19,6 +19,7 @@ const MODULES = path.join(ROOT, 'node_modules');
 const ROUTES = [
   ['/vendor/emoji-picker-element/', path.join(MODULES, 'emoji-picker-element')],
   ['/vendor/emoji-data/', path.join(MODULES, 'emoji-picker-element-data')],
+  ['/vendor/mediapipe/', path.join(MODULES, '@mediapipe/tasks-vision')], // camera backgrounds (D37)
   ['/socket.io/socket.io.js', path.join(MODULES, 'socket.io/client-dist/socket.io.js')],
   ['/', PUBLIC],
 ];
@@ -33,6 +34,7 @@ const MIME = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.map': 'application/json',
+  '.wasm': 'application/wasm', // must be exact for streaming compilation
 };
 
 protocol.registerSchemesAsPrivileged([
@@ -47,6 +49,12 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // System audio for screen sharing on macOS (13+). Windows supports it natively.
 if (process.platform === 'darwin') app.commandLine.appendSwitch('enable-features', 'MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride');
+
+// Screen capture on Windows: keep frames on the GPU instead of copying each one
+// through memory. Chromium's capturer spends at most half its time capturing,
+// so the copy capped a 1440p share at about 30 fps in motion (D36).
+// FRIENDSPEAK_LEGACY_CAPTURE=1 turns this off if a share comes out black or frozen.
+if (process.platform === 'win32' && process.env.FRIENDSPEAK_LEGACY_CAPTURE !== '1') app.commandLine.appendSwitch('enable-features', 'WebRtcAllowWgcUsingTexture,ZeroCopyDesktopCapture');
 
 // Single instance: a second launch focuses the existing window
 if (!app.requestSingleInstanceLock()) app.quit();
