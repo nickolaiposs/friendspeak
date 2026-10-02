@@ -1,5 +1,6 @@
-// Everything a user "owns" lives on their own device: profiles, server
-// bookmarks, settings (localStorage) and soundboard files (IndexedDB).
+// Everything a user "owns" lives on their own device: profiles, their keys,
+// server bookmarks, settings (localStorage), soundboard files and direct
+// messages (IndexedDB).
 import { uid } from './util.js';
 
 const read = (k, d) => {
@@ -12,7 +13,7 @@ const read = (k, d) => {
 };
 const write = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 
-const COLORS = ['#5865f2', '#eb459e', '#57f287', '#fee75c', '#ed4245', '#f47b67', '#3ba55c', '#9b59b6', '#1abc9c', '#e67e22'];
+const COLORS = ['#8b6cf6', '#e06fb8', '#2fb36d', '#d99a1c', '#e5484d', '#f0835a', '#4aa3f0', '#b866e0', '#22b8a6', '#e88a2a'];
 export const randomColor = () => COLORS[Math.floor(Math.random() * COLORS.length)];
 
 // ---------- profiles ----------
@@ -40,6 +41,18 @@ export const profiles = {
   },
   remove(id) {
     write('fs.profiles', this.all().filter((p) => p.id !== id));
+    identities.remove(id);
+  },
+};
+
+// The key pairs behind each profile (identity.js, D32). They live apart from
+// the profile itself, because the whole profile object is sent to servers.
+export const identities = {
+  get: (profileId) => read('fs.keys', {})[profileId] || null,
+  set: (profileId, keys) => write('fs.keys', { ...read('fs.keys', {}), [profileId]: keys }),
+  remove(profileId) {
+    const { [profileId]: _, ...rest } = read('fs.keys', {});
+    write('fs.keys', rest);
   },
 };
 
@@ -86,6 +99,13 @@ const DEFAULT_SETTINGS = {
   railServersHidden: false,
   cues: true,
   dismissedBanners: {}, // update/maintenance banner key -> when it was closed
+  // appearance (theme.js)
+  theme: 'dark', // 'dark' | 'light' | 'contrast' | 'custom'
+  themeColors: null, // the custom palette: { 'bg-0': '#rrggbb', … }
+  font: 'system', // a key of FONTS, or 'custom' for fontCustom
+  fontCustom: '', // name of a font installed on this device
+  fontSize: 14.5, // px
+  density: 'cozy', // 'compact' | 'cozy' | 'roomy'
 };
 
 export const settings = {
@@ -102,13 +122,15 @@ export const settings = {
 let dbp;
 function db() {
   return (dbp ||= new Promise((resolve, reject) => {
-    const req = indexedDB.open('friendspeak', 2);
+    const req = indexedDB.open('friendspeak', 3);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains('sounds')) d.createObjectStore('sounds', { keyPath: 'id' });
       // DMs are keyed by "<my profile id>|<their profile id>" so each local profile has its own
       if (!d.objectStoreNames.contains('dmContacts')) d.createObjectStore('dmContacts', { keyPath: 'key' }).createIndex('owner', 'owner');
       if (!d.objectStoreNames.contains('dmMessages')) d.createObjectStore('dmMessages', { keyPath: 'key' }).createIndex('thread', 'thread');
+      // Images sent and received in DMs, keyed by "<thread>|<file id>"
+      if (!d.objectStoreNames.contains('dmFiles')) d.createObjectStore('dmFiles', { keyPath: 'key' }).createIndex('thread', 'thread');
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -156,17 +178,24 @@ export const dmStore = {
   messages: (thread) => tx('readonly', (s) => s.index('thread').getAll(thread), 'dmMessages'),
   putMessage: (m) => tx('readwrite', (s) => s.put(m), 'dmMessages'),
   removeMessage: (key) => tx('readwrite', (s) => s.delete(key), 'dmMessages'),
+  file: (key) => tx('readonly', (s) => s.get(key), 'dmFiles'),
+  putFile: (f) => tx('readwrite', (s) => s.put(f), 'dmFiles'),
+  removeFile: (key) => tx('readwrite', (s) => s.delete(key), 'dmFiles'),
   async removeThread(contactKey) {
-    const keys = await tx('readonly', (s) => s.index('thread').getAllKeys(contactKey), 'dmMessages');
-    await tx('readwrite', (s) => keys.forEach((k) => s.delete(k)), 'dmMessages');
+    for (const store of ['dmMessages', 'dmFiles']) {
+      const keys = await tx('readonly', (s) => s.index('thread').getAllKeys(contactKey), store);
+      await tx('readwrite', (s) => keys.forEach((k) => s.delete(k)), store);
+    }
     await tx('readwrite', (s) => s.delete(contactKey), 'dmContacts');
   },
 };
 
 // ---------- profile export / import ----------
 
+// The file carries the profile's private keys, so the same identity works on
+// another device. Whoever has the file can read and write DMs as that profile.
 export function exportProfile(p) {
-  const blob = new Blob([JSON.stringify({ friendspeakProfile: 1, ...p }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ friendspeakProfile: 1, ...p, keys: identities.get(p.id) || undefined }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `friendspeak-${p.name}.json`;
@@ -177,8 +206,9 @@ export function exportProfile(p) {
 export async function importProfile(file) {
   const data = JSON.parse(await file.text());
   if (!data.friendspeakProfile) throw new Error('Not a friendspeak profile file');
-  const { friendspeakProfile, ...p } = data;
+  const { friendspeakProfile, keys, ...p } = data;
   profiles.save(p);
+  if (keys?.sign?.priv && keys?.dh?.priv) identities.set(p.id, keys); // older exports have none: new keys are made on first use
   profiles.setActive(p.id);
   return p;
 }

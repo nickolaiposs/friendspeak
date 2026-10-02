@@ -27,7 +27,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 - Anyone connected can manage channels and emojis. Only the author can edit or delete a message.
 
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
-**Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters.
+**Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D30); servers still trust the profile id.
 
 ## D4: JSON file for server state · Active
 **Decision:** `data/state.json`, rewritten with a debounced (500 ms) atomic write. History is capped at 500 messages per channel.
@@ -107,8 +107,9 @@ Without a mic, users join **listen-only** instead of failing.
 
 ## D14: Accountless penguins via auth tokens · Active
 **Decision:**
-- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId)` table, creating the user on first use.
-  - The username is derived from the display name: 4–12 printable ASCII characters, unique, and padded with " Penguin" if too short.
+- On `game:login`, `game/index.js` maps the friendspeak profile id to a Yukon user through the `friendspeak_accounts(profileId, userId, baseName)` table, creating the user on first use.
+  - The username is derived from the display name: 4–12 printable ASCII characters, unique (a number is appended if taken), and padded with " Penguin" if too short.
+  - `baseName` stores the derived name before the uniqueness suffix. When a later `game:login` derives a different one, the penguin is renamed. Comparing derived names rather than usernames keeps a penguin from flipping between `Name` and `Name2`.
   - The penguin color is the nearest classic color to the profile color.
   - The password is random and never used.
 - Each `game:login` then mints a Yukon auth token (`selector:validator`, with the validator bcrypt-hashed in `auth_tokens`) and deletes that user's older tokens.
@@ -118,7 +119,7 @@ Without a mic, users join **listen-only** instead of failing.
 - It reuses Yukon's own "remember me" login path instead of inventing an auth bypass.
 - The token is in the fragment, so it's never sent in HTTP requests or logs.
 - A penguin belongs to a profile *per server*.
-- Renaming a friendspeak profile doesn't rename the penguin.
+- Renaming a friendspeak profile renames the penguin the next time the game is launched, not in real time.
 
 ## D15: The game runs in an iframe, kept alive · Active
 **Decision:**
@@ -246,7 +247,7 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** a banned friend can come back with a new profile, and with an IP ban from another network. Someone malicious could ban everyone else. The host can then edit `bans` in `state.json`. Behind a reverse proxy every socket has the proxy's IP, so IP bans never apply there (the self-ban guard skips them).
 **Alternatives:** end-to-end encrypted DMs and signed identities (keypairs, the D3 upgrade path); an admin role (needs identities that can't be spoofed first).
 
-## D28: Direct messages are peer to peer, and servers are only meeting points · Active
+## D28: Direct messages are peer to peer, and servers are only meeting points · Active (encryption, offline delivery, images and reach extended by D32)
 **Context:** DMs stored on the server (D27, first version) meant the host could read them and they only existed on one server. Friends wanted DMs that belong to the two people, reachable from anywhere in the app like a server, not inside one.
 **Decision:**
 - Messages travel over a WebRTC data channel between the two clients (DTLS-encrypted) and are stored only in each client's IndexedDB, per local profile. The server never sees or stores them.
@@ -274,22 +275,66 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** while the repo is private, servers need `GITHUB_TOKEN` (and Watchtower `GHCR_USER`/`GHCR_TOKEN`), and installed apps can't see releases at all: in-app updates start working when the repo goes public. Releases use GitHub Actions minutes, and macOS minutes count 10× on private repos. Watchtower recreates the container from the same config, so compose changes (new env vars) still need a stack redeploy. A server and its clients can briefly run different versions, which the protocol has to tolerate (add fields; don't repurpose them).
 **Alternatives:** CI deploying over SSH on every push (no maintenance window, and CI would need credentials for every host); giving friendspeak the Docker socket (root-equivalent access for a chat server); Watchtower polling on its own schedule (no warnings, and no tie to a published release); a signed auto-updater for macOS (needs the $99/yr Apple Developer ID, so later).
 
-## D32: Calls in DMs are signaled over the DM link and reuse the voice-channel media code · Active
+## D30: Themes are sets of CSS variables, stored per device · Active
+**Context:** issue #8 asked for themes, a custom palette, and font size and density. The stylesheet already drew almost everything from custom properties on `:root`, and the client has no build step (D1).
+**Decision:**
+- A theme is a value for each of the 17 color variables, and nothing else. `theme.js` sets them on `<html>`. There are three built-in themes (dark, which is the stylesheet's defaults, light and high contrast) and one custom palette in `settings.themeColors` with a color picker per variable. Hard-coded tints in the stylesheet became `color-mix()` of the variables, and text on a filled accent/green/red/yellow surface uses `--on-*`, which `theme.js` picks by contrast.
+- Color schemes come from [Gogh](https://github.com/Gogh-Co/Gogh) (MIT or Apache-2.0): 50 well-known ones are copied into `gogh.js` as seven colors each. Gogh has no popularity data, so the 50 are a hand-picked list. They're terminal palettes, so the UI palette is derived: surfaces are shades of the background, the accent is the scheme's magenta, links are its blue, and any color that doesn't read on the background is pushed toward white or black until it does (Solarized's and One Dark's foregrounds are too dim for body text as published). Clicking a scheme fills the custom palette, so a scheme is a starting point you can edit and there's no "scheme" state to keep in sync.
+- Text size multiplies every `font-size` (`--font-scale`), density multiplies row padding and line height (`--density`), and fonts are stacks of fonts that ship with operating systems, plus a free-text name for one the user has installed.
+- It's all per device in `fs.settings`, like the other settings. Nothing is sent to the server, and other people's profile colors are theirs, not part of a theme.
+
+**Consequences:** a new color in the stylesheet must be one of the variables or a `color-mix()` of them, or it will be wrong in light themes. A new `font-size` must use `calc(… * var(--font-scale))`. Fixed layout sizes (header heights, the rail) don't scale with text size, which is why the slider stops at 20px. No web fonts are bundled, so the font list depends on the OS. The game iframe, video stages and the Electron window's pre-load background keep their own fixed colors.
+**Alternatives:** a stylesheet per theme (can't express a custom palette); fetching schemes from Gogh at runtime (the client would depend on a third-party host, and the app works offline on a LAN today); `zoom` or `webFrame.setZoomFactor` for text size (scales the whole layout, which the View menu's zoom already does); letting a server set a theme for everyone (it's a personal preference, and D3's trust model would let anyone change it).
+
+## D31: A voice call keeps its own server connection · Active
+**Context:** the client assumed one connected server: clicking another server in the rail closed the socket and with it the call (issue #9). Friends who share several servers want to stay in voice on one while reading another, like Discord.
+**Decision:**
+- Per-server state moved from `S` into connection objects (ARCHITECTURE.md → Connections). `S.conn` is the server in view and `S.call` the one the call is on. Leaving a server keeps its connection open only while the call is on it, so there are at most two.
+- One call at a time, because there is one microphone and one outgoing audio graph (`audio.js`). Joining voice elsewhere hangs up first.
+- The background connection carries voice only: it keeps `users`, channels and the server's name current for the voice panel and the stage, but ignores messages. Coming back loads history again, like a fresh connect.
+- No server or protocol change. To the call's server you are simply still connected, and you appear online there.
+
+**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
+**Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
+
+## D32: DMs get keypair identities, end-to-end sealing, server mailboxes, friend codes and images · Active
+**Context:** D28's DMs needed both people online at once and a server both had bookmarked, anyone who knew a profile id could pose as that profile, the signaling server could sit in the middle of the handshake, and there were no images (issues #5 and #6). Two devices behind home routers can't find each other or hold messages for each other without some third party, so the question was which one, and how little it has to be trusted.
+**Decision:**
+- **Identity:** every local profile gets an Ed25519 signing pair and an X25519 pair, made in the app with WebCrypto and stored in `fs.keys`, apart from the profile so they never reach a server. The public half is a signed **card**. A contact's card is pinned the first time it's seen (trust on first use, like D20), and a different key for the same profile id is refused and shown as "different key" until the user accepts it. Profile ids stay the names of conversations, so nothing stored had to move.
+- **Sealing:** each pair of people derives one AES-256-GCM key from their X25519 keys. Every op and every image chunk is sealed with it, on the data channel as well as in a mailbox, with the direction in the additional data. Only the two key holders can produce or read it, which authenticates the sender without a signature per message. The last 400 op ids per contact are remembered, so a relay can't replay an old edit.
+- **Offline delivery:** servers keep **mailboxes** on `/dm`. A mailbox is filed under the hash of its owner's signing key and handed only to a socket that signs the server's nonce with that key, so there's nothing to register and nothing to squat. Senders leave sealed blobs there: at once when the friend is offline, and after 8 s when a direct connection doesn't come up, which also covers strict NATs (D28 had no answer for those). Mail is deleted when collected, after 30 days, or when the mailbox is full (500 blobs, 8 MB). It's stored in `data/mail.json`, not in `state.json`.
+- **Outside shared servers:** a **friend code** carries a card and the addresses of the owner's bookmarked servers (their relays); `hello` and every mailed op keep that list current. A client connects to a contact's relays as a **guest**: no password, no member list, no mailbox of its own, and presence only for profile ids it names. Guests can signal and leave mail for people whose id or address they already hold. A guest can't use the profile id of one of the server's stored profiles. `DM_GUESTS=off` turns guests away.
+- **Images:** the message carries a small thumbnail per image, so it fits in a mailbox like any other op. The image stays on the sender's device and is pulled over the sealed data channel when both are online (16 KB chunks, `bufferedAmount` backpressure), then stored in IndexedDB (`dmFiles`). Png, jpeg, gif and webp, 10 MB each, 4 per message. Nothing needs a transfer outbox: the receiver keeps a list of what it lacks and asks again on the next connection.
+- **Old apps:** a peer that shows no card is answered in plain, as before, unless a key is already pinned for that profile. Old servers have no `challenge`, so there are no mailboxes there and delivery works as in D28.
+
+**Consequences:**
+- The host of a relay sees who leaves mail for whom, when, and how big it is (the sender's card is on the blob), but never the content. It can drop or delay mail.
+- The keys are long-lived and there is no ratchet: someone who steals a profile's keys (or an exported profile file, which contains them) can read mail they recorded earlier. No forward secrecy.
+- The first card seen is trusted. A server could hand out a wrong card for a member you have never talked to; a friend code swapped out of band avoids that. Chat on servers is unchanged: profile ids there are still spoofable (D3), and `card` in a server profile is only as trustworthy as that server.
+- Presence and signaling are still by profile id, so someone can still *appear* as a friend or knock their `/dm` socket off (newest wins). They can't read or write that friend's DMs.
+- A friend code tells its holder which servers you use, and makes the app open a socket to each of a contact's relays (at most 8 guest relays in total). A server with a self-signed certificate that isn't pinned yet fails silently there (D20), as for bookmarked servers.
+- By default a password-protected server accepts sealed DM traffic from people without the password. They can't see or join anything; the caps above bound what they can store.
+- **One device at a time.** An exported profile carries its keys, so the same identity works on a second device, but the two don't sync: mail goes to whichever device collects it first, history stays where it was received, and `/dm` still lets only the newest socket per profile stay connected. Real multi-device needs per-device mailbox cursors and a way to send your own messages to your other devices.
+- An image is only fetched while both are online, and it's gone for good if the sender deleted the conversation first (the thumbnail stays, marked "no longer available").
+
+**Alternatives:** a DHT or public WebRTC trackers for discovery (third-party infrastructure the project would depend on, and no offline delivery without storing data on strangers' machines); mutual friends' clients as relays and mailboxes (no server change, but it only works while a mutual friend is online and every client would have to hold connections to all its contacts); the profile id becoming the key hash (cleaner, but it would rename every profile and break history and bans); a Signal-style double ratchet (forward secrecy, at the cost of per-message state that an op queue with resends and two delivery paths makes fragile); images through the mailbox (works offline, but megabytes of other people's data on a host's disk); mailbox cursors per device instead of delete-on-collect (the first step to multi-device, costing storage for the whole retention period).
+
+## D33: Calls in DMs are signaled over the DM link and reuse the voice-channel media code · Active
 **Context:** Friends wanted to call each other from a conversation, with camera and screen sharing, without meeting in a server's voice channel.
 **Decision:**
-- A call is between the two people in a DM, one call at a time. Ringing and the WebRTC handshake travel over the DM data channel (D28) as `{ t: 'call', d }`. The server isn't involved beyond the DM rendezvous, and there are no server changes.
+- A call is between the two people in a DM, one call at a time. Ringing and the WebRTC handshake travel over the DM data channel (D28) as `{ t: 'call', d }`, sealed end to end like messages (D32) and only accepted from a friend whose key is known. The server isn't involved beyond the DM rendezvous, and there are no server changes.
 - The media uses its own peer connection, not the DM one. The DM connection never renegotiates and is dropped and rebuilt freely; a call adds and removes tracks all the time.
 - That connection is driven by the existing `VoiceClient`, through an adapter that looks like the chat socket. Mute, push-to-talk, the soundboard, cameras, screen shares, codec preferences and per-viewer encoder sizing are shared with voice channels (D5, D22) instead of written twice.
 - With one viewer there is nothing to save by opting in, so each side receives whatever the other shares.
-- A call and a voice channel don't run together: there is one microphone graph. Starting or accepting a call leaves the voice channel, and joining a voice channel hangs up.
+- A call and a voice channel don't run together: there is one microphone graph (D31). Starting or accepting a call leaves the voice channel, and joining a voice channel hangs up.
 - The call view lives in the conversation. Elsewhere in the app the call goes on, with a panel in the sidebar; the video is paused for you until you come back.
 - Results are written into the thread as local-only notes ("Call · 4:05", "Missed call"), each side writing its own.
 
 **Consequences:**
-- Calls inherit the DM link's limits: both people online, reachable through a shared bookmarked server, no TURN (D5), and no stronger proof of who is calling than D28 gives.
+- Calls inherit the DM link's limits: both people online, reachable through a shared bookmarked server, no TURN (D5), and the caller is as certain as the sender of a message is (D32). A friend on an app without keys can't be called.
 - An app from before calls ignores the ring, so the caller hears ringing and then "didn't answer".
 - If the DM link drops mid-call, the media usually keeps flowing. Signals (camera on, a new share) wait in a queue until the link is back. The call ends after 20 s without media.
 - You can't be called while offline, and a call that rang while your app was closed leaves no trace on your side.
 - No group calls: that's what voice channels are for.
 
-**Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
+**Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).

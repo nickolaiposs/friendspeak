@@ -40,10 +40,13 @@ updater.js             server self-update: GitHub Releases check, cron maintenan
 public/                the client UI, bundled into the desktop app (no bundler; files load as-is)
   js/main.js           UI, app state (object S), socket handlers, settings, game view
   js/voice.js          WebRTC mesh (VoiceClient)
-  js/dm.js             peer-to-peer direct messages (DirectMessages), signaled via /dm on bookmarked servers
+  js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
+  js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
-  js/store.js          localStorage (profiles, servers, settings) + IndexedDB (sounds, DMs)
+  js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
+  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
+  js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)
@@ -55,7 +58,7 @@ game/assets-extra/     (gitignored) art for the extra rooms
 scripts/build-game.js  builds both vendored projects
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
 .github/workflows/     ci.yml (dev + PRs: syntax, server boot, game build); release.yml (push to prod → release, D29)
-data/                  (gitignored) server state when run via `npm start`
+data/                  (gitignored) server state when run via `npm start` (state.json, mail.json, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
 Dockerfile, docker-compose.yaml, docker/   production server image and stack (D21)
