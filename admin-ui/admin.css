@@ -200,3 +200,16 @@ input[type='color'] { width: 48px; height: 36px; padding: 2px; }
 .rolenew { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .rolenew .field { flex: 1; min-width: 180px; max-width: 320px; }
 .idchip { white-space: nowrap; }
+
+/* PR 3 */
+.nav-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 10px 10px 2px; }
+.nav-h:first-child { padding-top: 2px; }
+.bar.thin { height: 4px; margin-top: 9px; min-width: 60px; }
+.dot-on { color: var(--green); }
+.marks { color: var(--muted); font-size: 12px; margin-left: 4px; }
+.voicelist { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.countdown { font-variant-numeric: tabular-nums; font-weight: 600; }
+.icon-preview { width: 64px; height: 64px; border-radius: 14px; object-fit: cover; background: var(--bg-3); display: grid; place-items: center; font-size: 26px; flex: none; overflow: hidden; }
+.msg-ok { color: var(--green); }
+.stack { display: flex; flex-direction: column; gap: 12px; max-width: 560px; }
+@media (max-width: 720px) { .nav-h { display: none; } }

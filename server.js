@@ -1082,6 +1082,8 @@ async function startServer(opts = {}) {
         inDocker: !!opts.update?.inDocker,
         startedAt: Date.now(),
         state: () => state,
+        game: () => gameRef.current, // for players() and maxUsers
+        gameOff: opts.game === false, // GAME=off
         users,
         lastIp,
         actions,

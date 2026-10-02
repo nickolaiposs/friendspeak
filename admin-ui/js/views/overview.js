@@ -1,5 +1,5 @@
 import { h, fmtBytes, fmtTime, debounce } from '../util.js';
-import { load } from '../ui.js';
+import { load, usageBar } from '../ui.js';
 
 function fmtUptime(s) {
   s = Math.max(0, Math.floor(s));
@@ -30,10 +30,7 @@ function updateSummary(u) {
 }
 
 function render(o, uptimeEl) {
-  const pct = o.storage.max ? Math.min(100, (o.storage.used / o.storage.max) * 100) : 0;
-  const bar = h('div', { class: `bar ${pct > 90 ? 'high' : ''}`, role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(pct) },
-    h('div', { style: { width: pct + '%' } }));
-  const g = o.game || {};
+    const g = o.game || {};
   const icon = /^(data:image\/|https:\/\/)/.test(o.icon || '') && h('img', { src: o.icon, alt: '', referrerpolicy: 'no-referrer' });
   return h('div', {},
     h('div', { class: 'title-row' }, icon, h('div', {}, h('div', { class: 'name' }, o.name), h('div', { class: 'muted small' }, `Version ${o.version}`))),
@@ -58,14 +55,14 @@ function render(o, uptimeEl) {
         ['Bans', o.counts.bans],
         ['Channels', o.counts.channels],
       ])),
-      card('Storage', h('div', {}, `${fmtBytes(o.storage.used)} of ${fmtBytes(o.storage.max)}`), bar),
+      card('Storage', h('div', {}, `${fmtBytes(o.storage.used)} of ${fmtBytes(o.storage.max)}`), usageBar(o.storage.used, o.storage.max)),
       card('Game', kv([
         ['Available', yn(g.available)],
         ['Enabled', yn(g.enabled)],
         g.world && ['World', g.world],
         g.reason && ['Note', g.reason],
       ])),
-      card('Updates', kv(updateSummary(o.update || {})))));
+      card('Updates', kv(updateSummary(o.update || {})), h('p', { class: 'small' }, h('a', { href: '#/updates' }, 'Manage updates')))));
 }
 
 export default {
