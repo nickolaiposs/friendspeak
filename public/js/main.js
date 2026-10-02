@@ -8,20 +8,14 @@ import { DirectMessages } from './dm.js';
 // ---------------------------------------------------------------- state
 
 const S = {
-  entry: null, // server bookmark we're connected to
-  socket: null,
-  voice: null,
-  sid: null,
-  connected: false,
-  server: null, // { name, icon, channels, emojis, profiles }
-  users: [],
+  entry: null, // server bookmark in view
+  conn: null, // its connection (see openSocket)
+  call: null, // the connection the voice call is on: `conn`, or another server's kept open in the background
   channelId: null, // a text channel, or "dm:<profileId>" while the DM view is open
   messages: new Map(), // channelId -> []
   hasMore: new Map(),
   unread: new Set(),
   typing: new Map(), // channelId -> Map(sid -> { name, until })
-  voiceChannel: null,
-  rejoinVoice: null,
   muted: false,
   deafened: false,
   replyTo: null,
@@ -30,6 +24,31 @@ const S = {
   sounds: [],
   game: { open: false, visible: false, origin: null, frame: null },
   stage: null, // video view: { screen: sid|null, tiles: Map(key -> tile), ... } (see openStage)
+
+  // The server in view
+  get socket() {
+    return this.conn?.socket || null;
+  },
+  get sid() {
+    return this.conn?.sid || null;
+  },
+  get connected() {
+    return !!this.conn?.connected;
+  },
+  // { name, icon, channels, emojis, profiles }
+  get server() {
+    return this.conn?.server || null;
+  },
+  get users() {
+    return this.conn?.users || [];
+  },
+  // The call, whichever server it is on
+  get voice() {
+    return this.call?.voice || null;
+  },
+  get voiceChannel() {
+    return this.call?.voiceChannel || null;
+  },
 };
 
 // Present when running inside the desktop app (see desktop/preload.js)
@@ -521,7 +540,7 @@ function welcome() {
 function applyProfileChange() {
   renderUserPanel();
   DM.updateProfile(me());
-  if (S.connected) S.socket.emit('profile:update', me());
+  for (const c of conns()) if (c.connected) c.socket.emit('profile:update', me());
 }
 
 // ---------------------------------------------------------------- server rail
@@ -565,21 +584,24 @@ function renderRail() {
     ...(railServersHidden ? [] : list).map((s) => {
       const label = serverLabel(s);
       const active = S.entry?.id === s.id;
+      const calling = S.call?.entry.id === s.id; // the voice call is on this server, in view or not
       return h(
         'button',
         {
           class: 'rail-server' + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : ''),
-          title: `${label}\n${s.address}`,
+          title: `${label}\n${s.address}` + (calling ? '\nYou’re in voice here' : ''),
           onclick: () => connectTo(s),
           oncontextmenu: (e) =>
             contextMenu(e, [
               { label: 'Edit', run: () => serverDialog(s) },
               active && S.connected && { label: 'Server name & icon…', run: () => openSettings('server') },
+              calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
-              { label: 'Remove', danger: true, run: () => (active && disconnect(true), servers.remove(s.id), DM.setServers(servers.all()), renderRail()) },
+              { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), DM.setServers(servers.all()), renderRail()) },
             ]),
         },
-        s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label)
+        s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label),
+        calling ? h('span', { class: 'rail-call', html: I.speaker }) : null
       );
     }),
     h('button', { class: 'rail-add', title: 'Connect to a server', onclick: () => serverDialog() }, icon('plus'))
@@ -613,17 +635,33 @@ function serverDialog(existing) {
 
 // ---------------------------------------------------------------- connection
 
-function disconnect(manual = false) {
+// One connection per server: { entry, socket, voice, sid, connected, server,
+// users, voiceChannel, rejoinVoice }. `S.conn` is the server in view. A call
+// keeps its connection (`S.call`) open after you switch to another server, so
+// at most two are open: the one in view and the one the call is on.
+const conns = () => [...new Set([S.conn, S.call])].filter(Boolean);
+
+// Close a connection for good, hanging up if the call is on it
+function dropConn(c) {
+  if (S.call === c) {
+    closeStage();
+    S.call = null;
+  }
+  c.voice.destroy();
+  c.socket.removeAllListeners();
+  c.socket.disconnect();
+}
+
+// Leave the server in view. With `keepCall`, a call on it carries on in the background.
+function disconnect(manual = false, keepCall = false) {
   closePopover();
   closeGame();
-  if (S.voice) {
-    S.voice.destroy();
-    S.voice = null;
-  }
-  S.socket?.removeAllListeners();
-  S.socket?.disconnect();
+  closeStage();
+  const c = S.conn;
+  S.conn = null;
+  if (c && !(keepCall && S.call === c)) dropConn(c);
   // DMs don't depend on the server: stay in the DM view if it's open
-  Object.assign(S, { socket: null, connected: false, server: null, users: [], voiceChannel: null, rejoinVoice: null, channelId: inDmView() ? S.channelId : null });
+  if (!inDmView()) S.channelId = null;
   S.messages.clear();
   S.unread.clear();
   S.typing.clear();
@@ -634,26 +672,52 @@ function disconnect(manual = false) {
   renderAll();
 }
 
-function connectTo(entry) {
+function connectTo(entry, { rejoinVoice = null } = {}) {
   if (S.entry?.id === entry.id && S.connected) return inDmView() && leaveDmView();
-  disconnect();
+  // Switching servers keeps the call going; clicking the same server again is a fresh start
+  disconnect(false, S.entry?.id !== entry.id);
   S.channelId = null; // clicking a server leaves the DM view
   S.entry = entry;
   servers.setLast(entry.id);
+  // Back to the server the call is on: its connection is still open
+  if (S.call?.entry.id === entry.id) return viewConn(S.call);
   renderAll();
 
   // Desktop: self-signed https servers need the user's OK (pinned after the first time)
-  if (!desktop?.trustServer) return openSocket(entry);
+  if (!desktop?.trustServer) return openSocket(entry, rejoinVoice);
   desktop.trustServer(entry.address).then((ok) => {
-    if (S.entry !== entry || S.socket) return; // switched servers meanwhile
-    if (ok) openSocket(entry);
+    if (S.entry !== entry || S.conn) return; // switched servers meanwhile
+    if (ok) openSocket(entry, rejoinVoice);
     else renderMain(`Not connected: you didn't trust the certificate of ${entry.address}. Click the server to try again.`);
   });
 }
 
-function openSocket(entry) {
-  const socket = (S.socket = io(entry.address, { transports: ['websocket', 'polling'], reconnectionDelayMax: 5000 }));
-  S.voice = new VoiceClient(socket, {
+// Bring the call's connection back into view
+function viewConn(c) {
+  S.conn = c;
+  S.entry = c.entry;
+  if (c.connected) showServer(c);
+  else renderAll();
+}
+
+// Draw the server in view from scratch. Messages aren't tracked in the background, so they load again.
+function showServer(c) {
+  S.messages.clear();
+  const last = settings.get().lastChannel[c.entry.id];
+  const target = chatById(S.channelId) || chatById(last) || c.server.channels.find((ch) => ch.type === 'text');
+  S.channelId = null;
+  renderAll();
+  if (target) selectChannel(target.id);
+  checkAppAgainstServer();
+}
+
+function openSocket(entry, rejoinVoice = null) {
+  const socket = io(entry.address, { transports: ['websocket', 'polling'], reconnectionDelayMax: 5000 });
+  const c = (S.conn = { entry, socket, voice: null, sid: null, connected: false, server: null, users: [], voiceChannel: null, rejoinVoice });
+  // Every handler keeps `c` up to date; only the server in view is drawn
+  const viewed = () => S.conn === c;
+  const calling = () => S.call === c;
+  c.voice = new VoiceClient(socket, {
     onPeersChange: renderChannels,
     onMediaChange: () => {
       renderChannels();
@@ -661,32 +725,35 @@ function openSocket(entry) {
       syncStage();
     },
   });
-  S.voice.profileIdFor = (sid) => S.users.find((u) => u.sid === sid)?.id;
+  c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
 
   socket.on('connect', async () => {
     const res = await socket.emitWithAck('hello', { profile: me(), password: entry.password || '' });
     if (res.error) {
       toast(res.error, 'error');
+      if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
+      if (!viewed()) return;
       socket.disconnect();
       renderMain(res.error);
       if (/password/i.test(res.error)) serverDialog(entry);
       return;
     }
-    Object.assign(S, { sid: res.sid, server: res.server, users: res.users, connected: true });
-    S.messages.clear();
-    rememberServerLook();
-    const last = settings.get().lastChannel[entry.id];
-    const target = chatById(S.channelId) || chatById(last) || S.server.channels.find((c) => c.type === 'text');
-    S.channelId = null;
-    renderAll();
-    if (target) selectChannel(target.id);
-    if (S.rejoinVoice && channelById(S.rejoinVoice)) joinVoice(S.rejoinVoice, true);
-    S.rejoinVoice = null;
-    checkAppAgainstServer();
+    Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true });
+    rememberServerLook(c);
+    if (viewed()) showServer(c);
+    else renderRail();
+    if (c.rejoinVoice && c.server.channels.some((ch) => ch.id === c.rejoinVoice)) return joinVoice(c.rejoinVoice, true, c);
+    c.rejoinVoice = null;
+    if (calling()) {
+      endCall();
+      renderVoicePanel();
+      renderRail();
+      toast('Your voice channel is gone');
+    }
   });
 
   socket.on('connect_error', (err) => {
-    if (!S.connected) renderMain(`Can't reach ${entry.address} (${err.message}). Retrying…`);
+    if (viewed() && !c.connected) renderMain(`Can't reach ${entry.address} (${err.message}). Retrying…`);
   });
 
   // The server keeps one session per profile; a newer one (another window or
@@ -699,10 +766,16 @@ function openSocket(entry) {
   socket.on('removed', () => (removed = true));
 
   socket.on('disconnect', (reason) => {
-    closeStage();
+    if (calling()) closeStage();
+    const here = viewed();
     if (replaced || banned || removed || reason === 'io server disconnect') {
-      disconnect(); // socket.io won't retry a server-side disconnect; keep the bookmark selected
-      if (inDmView()) return toast(banned ? 'You were banned from this server' : removed ? 'You were removed from this server' : 'Disconnected from the server', 'error');
+      // socket.io won't retry a server-side disconnect
+      if (here) disconnect(); // keep the bookmark selected
+      else (dropConn(c), renderVoicePanel(), renderRail());
+      if (!here || inDmView()) {
+        const where = here ? 'this server' : serverLabel(entry);
+        return toast(banned ? `You were banned from ${where}` : removed ? `You were removed from ${where}` : `Disconnected from ${here ? 'the server' : where}`, 'error');
+      }
       renderMain(
         banned
           ? 'You were banned from this server.'
@@ -714,75 +787,82 @@ function openSocket(entry) {
       );
       return;
     }
-    if (S.voiceChannel) {
-      S.rejoinVoice = S.voiceChannel;
-      S.voice.leave(true);
-      S.voiceChannel = null;
+    if (c.voiceChannel) {
+      c.rejoinVoice = c.voiceChannel;
+      c.voice.leave(true);
+      c.voiceChannel = null;
     }
-    S.connected = false;
-    renderAll();
-    toast('Disconnected — reconnecting…', 'error');
+    c.connected = false;
+    if (here) renderAll();
+    else renderVoicePanel();
+    toast(here ? 'Disconnected — reconnecting…' : `Lost ${serverLabel(entry)}, where your call is — reconnecting…`, 'error');
   });
 
   socket.on('users', (users) => {
-    const prev = S.users;
-    S.users = users;
+    const prev = c.users;
+    c.users = users;
     // voice join/leave cues for our channel
-    if (S.voiceChannel) {
-      const was = new Set(prev.filter((u) => u.voice === S.voiceChannel).map((u) => u.sid));
-      const now = new Set(users.filter((u) => u.voice === S.voiceChannel).map((u) => u.sid));
-      for (const sid of now) if (!was.has(sid) && sid !== S.sid) S.voice.applyVolume(sid);
+    if (c.voiceChannel) {
+      const was = new Set(prev.filter((u) => u.voice === c.voiceChannel).map((u) => u.sid));
+      const now = new Set(users.filter((u) => u.voice === c.voiceChannel).map((u) => u.sid));
+      for (const sid of now) if (!was.has(sid) && sid !== c.sid) c.voice.applyVolume(sid);
     }
-    syncStage();
+    if (calling()) syncStage();
+    if (!viewed()) return calling() && renderVoicePanel(); // its video button follows who is sharing
     renderChannels();
     renderMembers();
   });
 
   socket.on('profile', (p) => {
-    if (!S.server) return;
-    S.server.profiles[p.id] = p;
+    if (!c.server) return;
+    c.server.profiles[p.id] = p;
+    if (!viewed()) return;
     if (S.channelId) renderMessages(true);
     renderMembers();
   });
 
   socket.on('profile:removed', ({ id }) => {
-    if (!S.server) return;
-    delete S.server.profiles[id];
+    if (!c.server) return;
+    delete c.server.profiles[id];
+    if (!viewed()) return;
     if (S.channelId && !inDmView()) renderMessages(true);
     renderMembers();
   });
 
   socket.on('bans', (bans) => {
-    S.server.bans = bans;
-    renderMembers();
+    c.server.bans = bans;
+    if (viewed()) renderMembers();
   });
 
   socket.on('server', ({ name, icon, game }) => {
-    Object.assign(S.server, { name, icon });
+    Object.assign(c.server, { name, icon });
     if (game) {
-      const wasOn = S.server.game?.enabled;
-      S.server.game = game;
-      if (wasOn && !game.enabled && (S.game.open || S.game.popout)) {
+      const wasOn = c.server.game?.enabled;
+      c.server.game = game;
+      if (viewed() && wasOn && !game.enabled && (S.game.open || S.game.popout)) {
         closeGame();
         toast('Club Penguin was turned off on this server');
       }
-      if (!inDmView()) renderChannels();
+      if (viewed() && !inDmView()) renderChannels();
     }
-    rememberServerLook();
+    rememberServerLook(c);
     renderRail();
-    renderHeader();
+    if (viewed()) renderHeader();
+    if (calling()) renderVoicePanel();
   });
 
   socket.on('server:update', (update) => {
-    S.server.update = update;
-    if (update.installing) toast(`${S.server.name} is updating to friendspeak ${update.latest?.version}. Hang tight…`, 'info', 8000);
-    renderBanners();
+    c.server.update = update;
+    if (update.installing) toast(`${c.server.name} is updating to friendspeak ${update.latest?.version}. Hang tight…`, 'info', 8000);
+    if (viewed()) renderBanners();
   });
 
   socket.on('channels', (channels) => {
-    S.server.channels = channels;
+    c.server.channels = channels;
+    if (calling()) renderVoicePanel();
+    if (!viewed()) return;
     if (!chatById(S.channelId)) {
-      const first = channels.find((c) => c.type === 'text');
+      const first = channels.find((ch) => ch.type === 'text');
       if (first) selectChannel(first.id);
     }
     renderChannels();
@@ -791,7 +871,8 @@ function openSocket(entry) {
   });
 
   socket.on('emojis', (emojis) => {
-    S.server.emojis = emojis;
+    c.server.emojis = emojis;
+    if (!viewed()) return;
     updatePickerEmojis();
     renderChannels();
     refreshChatTitle();
@@ -799,6 +880,7 @@ function openSocket(entry) {
   });
 
   socket.on('msg:new', ({ channelId, message }) => {
+    if (!viewed()) return;
     const list = S.messages.get(channelId);
     if (list) list.push(message);
     S.typing.get(channelId)?.forEach((t, sid) => t.name === message.name && S.typing.get(channelId).delete(sid));
@@ -816,6 +898,7 @@ function openSocket(entry) {
   });
 
   socket.on('msg:update', ({ channelId, message }) => {
+    if (!viewed()) return;
     const list = S.messages.get(channelId);
     const i = list?.findIndex((m) => m.id === message.id) ?? -1;
     if (i >= 0) list[i] = message;
@@ -826,31 +909,34 @@ function openSocket(entry) {
   });
 
   socket.on('msg:deleted', ({ channelId, messageId }) => {
+    if (!viewed()) return;
     const list = S.messages.get(channelId);
     if (list) S.messages.set(channelId, list.filter((m) => m.id !== messageId));
     if (channelId === S.channelId) renderMessages(true);
   });
 
   socket.on('files:new', ({ storage }) => {
-    S.server.storage = storage;
-    fileBrowser?.reload();
+    c.server.storage = storage;
+    if (viewed()) fileBrowser?.reload();
   });
 
   socket.on('files:deleted', ({ storage }) => {
-    S.server.storage = storage;
-    fileBrowser?.reload();
+    c.server.storage = storage;
+    if (viewed()) fileBrowser?.reload();
   });
 
   socket.on('typing', ({ channelId, sid, name }) => {
+    if (!viewed()) return;
     if (!S.typing.has(channelId)) S.typing.set(channelId, new Map());
     S.typing.get(channelId).set(sid, { name, until: Date.now() + 4000 });
     if (channelId === S.channelId) renderTyping();
   });
 
   socket.on('voice:kicked', () => {
-    closeStage();
-    S.voice.leave(true);
-    S.voiceChannel = null;
+    c.voice.leave(true);
+    c.voiceChannel = null;
+    if (calling()) endCall(true);
+    renderRail();
     renderChannels();
     renderVoicePanel();
     toast('Voice channel was deleted');
@@ -858,47 +944,70 @@ function openSocket(entry) {
 }
 
 // Cache the server's name and icon on its bookmark, so the rail shows them offline too
-function rememberServerLook() {
-  const look = { serverName: S.server.name, serverIcon: S.server.icon || '' };
-  Object.assign(S.entry, look);
-  servers.upsert({ id: S.entry.id, ...look });
+function rememberServerLook(c) {
+  const look = { serverName: c.server.name, serverIcon: c.server.icon || '' };
+  Object.assign(c.entry, look);
+  servers.upsert({ id: c.entry.id, ...look });
 }
 
 // ---------------------------------------------------------------- voice
 
-async function joinVoice(channelId, silent = false) {
-  if (!S.connected) return;
-  if (S.voiceChannel === channelId) return;
+// Is the call in this voice channel of the server in view?
+const inCall = (channelId) => !!S.call && S.call === S.conn && S.call.voiceChannel === channelId;
+// The call's channel (the one it returns to while its server reconnects)
+const callChannel = () => S.call?.server?.channels.find((ch) => ch.id === (S.call.voiceChannel || S.call.rejoinVoice));
+
+// `c` is the server in view, or the call's own connection when it rejoins after a reconnect
+async function joinVoice(channelId, silent = false, c = S.conn) {
+  if (!c?.connected) return;
+  if (S.call === c && c.voiceChannel === channelId) return;
+  if (S.call !== c) endCall(); // one call at a time: hang up the one on another server
   audio.ensure();
   try {
-    await S.voice.join(channelId);
+    await c.voice.join(channelId);
   } catch (e) {
+    c.rejoinVoice = null;
+    if (S.call === c && !c.voiceChannel) (endCall(), renderVoicePanel());
+    renderRail();
     return toast('Could not join voice: ' + e.message, 'error');
   }
-  S.voiceChannel = channelId;
-  if (S.voice.micError) {
+  c.voiceChannel = channelId;
+  c.rejoinVoice = null;
+  S.call = c;
+  if (c.voice.micError) {
     toast(
       window.isSecureContext
-        ? `No microphone (${S.voice.micError.message}). You joined listen-only — soundboard still works.`
+        ? `No microphone (${c.voice.micError.message}). You joined listen-only — soundboard still works.`
         : 'Mic needs a secure page. Open friendspeak from localhost or run the server with HTTPS=1. Joined listen-only.',
       'error',
       7000
     );
   }
   audio.setMuted(S.muted || S.deafened);
-  S.voice.setDeafened(S.deafened);
-  S.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
+  c.voice.setDeafened(S.deafened);
+  c.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
   if (!silent) audio.cue('join');
+  renderRail();
   renderChannels();
   renderVoicePanel();
 }
 
-function leaveVoice() {
-  if (!S.voiceChannel) return;
+// Hang up. A connection that was only open for the call closes with it.
+function endCall(silent = false) {
+  const c = S.call;
+  if (!c) return;
   closeStage();
-  S.voice.leave();
-  S.voiceChannel = null;
+  c.voice.leave(silent);
+  c.voiceChannel = c.rejoinVoice = null;
+  S.call = null;
+  if (c !== S.conn) dropConn(c);
+}
+
+function leaveVoice() {
+  if (!S.call) return;
+  endCall();
   audio.cue('leave');
+  renderRail();
   renderChannels();
   renderVoicePanel();
 }
@@ -922,16 +1031,16 @@ function syncVoiceState() {
   audio.setMuted(S.muted || S.deafened);
   audio.setMonitor(!S.deafened && settings.get().soundboardMonitor);
   S.voice?.setDeafened(S.deafened);
-  if (S.connected) S.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
+  for (const c of conns()) if (c.connected) c.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
   renderUserPanel();
   syncStage();
 }
 
 // Speaking indicators, polled from analysers.
 setInterval(() => {
-  if (!S.voiceChannel || !S.voice) return;
+  if (!S.voiceChannel) return;
   const levels = S.voice.levels();
-  if (audio.selfAnalyser) levels.set(S.sid, Level(audio.selfAnalyser));
+  if (audio.selfAnalyser) levels.set(S.call.sid, Level(audio.selfAnalyser));
   for (const el of $$('.voice-user, .tile[data-sid]')) el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
 }, 90);
 
@@ -1022,7 +1131,7 @@ function renderChannels() {
         h(
           'div',
           {
-            class: 'channel voice' + (ch.id === S.voiceChannel ? ' connected' : '') + (video ? ' has-video' : ''),
+            class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : ''),
             onclick: () => joinVoice(ch.id),
             oncontextmenu: chMenu(ch),
           },
@@ -1033,7 +1142,7 @@ function renderChannels() {
                 'button',
                 {
                   class: 'video-badge',
-                  title: ch.id === S.voiceChannel ? 'Open video grid' : 'Join and open video grid',
+                  title: inCall(ch.id) ? 'Open video grid' : 'Join and open video grid',
                   onclick: (e) => (e.stopPropagation(), openVideoGrid(ch.id)),
                 },
                 icon('cam')
@@ -1172,16 +1281,17 @@ function gamesSection() {
 function voiceUserEl(u) {
   const peer = S.voice?.peers.get(u.sid);
   const isMe = u.sid === S.sid;
+  const together = inCall(u.voice); // we're in this channel too
   return h(
     'div',
     {
       class: 'voice-user' + (peer && peer.state !== 'connected' && !isMe ? ' pending' : ''),
       'data-sid': u.sid,
       title: peer && !isMe ? `connection: ${peer.state}` : '',
-      onclick: (e) => (!isMe && S.voiceChannel === u.voice ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
+      onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
       oncontextmenu: (e) => {
         e.preventDefault();
-        if (!isMe && S.voiceChannel === u.voice) userVolumePopover(e.currentTarget, u);
+        if (!isMe && together) userVolumePopover(e.currentTarget, u);
       },
     },
     avatarEl(u, 24),
@@ -1191,10 +1301,10 @@ function voiceUserEl(u) {
           'button',
           {
             class: 'live-badge' + (S.stage?.tiles.get('screen:' + u.sid)?.live ? ' watching' : ''),
-            title: S.voiceChannel === u.voice ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : 'Join the channel to watch',
+            title: together ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : 'Join the channel to watch',
             onclick: (e) => {
               e.stopPropagation();
-              if (S.voiceChannel === u.voice) openStage({ screen: u.sid });
+              if (together) openStage({ screen: u.sid });
               else toast('Join the voice channel to watch');
             },
           },
@@ -1205,11 +1315,11 @@ function voiceUserEl(u) {
       ? h(
           'button',
           {
-            class: 'cam-badge' + (S.stage ? ' watching' : ''),
-            title: S.voiceChannel === u.voice ? 'Show cameras' : 'Join the channel to see cameras',
+            class: 'cam-badge' + (S.stage && together ? ' watching' : ''),
+            title: together ? 'Show cameras' : 'Join the channel to see cameras',
             onclick: (e) => {
               e.stopPropagation();
-              if (S.voiceChannel === u.voice) openStage();
+              if (together) openStage();
               else toast('Join the voice channel to see cameras');
             },
           },
@@ -1240,7 +1350,7 @@ function userVolumePopover(anchor, u) {
           const v = +e.target.value;
           settings.set({ userVolumes: { ...settings.get().userVolumes, [u.id]: v } });
           val.textContent = Math.round(v * 100) + '%';
-          S.voice.applyVolume(u.sid);
+          S.voice?.applyVolume(u.sid);
         },
       })
     ),
@@ -1250,38 +1360,58 @@ function userVolumePopover(anchor, u) {
 
 function renderVoicePanel() {
   const p = $('#voice-panel');
-  const ch = channelById(S.voiceChannel);
+  const c = S.call;
+  const ch = callChannel();
   p.hidden = !ch;
   if (!ch) return p.replaceChildren();
-  p.replaceChildren(
+  const live = !!c.voiceChannel; // false while the call's server reconnects
+  const away = c !== S.conn; // the call is on another server than the one in view
+  const serverName = c.server.name || serverLabel(c.entry);
+  const where = ch.name + ' / ' + serverName;
+  const video = live && c.users.some((u) => u.voice === c.voiceChannel && (u.camera || u.sharing));
+  const buttons = [
+    // On its own row: the way back to the server the call is on
+    away ? h('button', { class: 'vp-channel vp-jump', title: `Go to ${serverName}`, onclick: () => connectTo(c.entry) }, icon('jump'), h('span', {}, where)) : null,
     h(
       'div',
       { class: 'vp-info' },
-      h('div', { class: 'vp-status' }, S.voice?.micError ? 'Listen-only' : 'Voice Connected', S.voice?.local.screen ? h('span', { class: 'live-badge' }, 'LIVE') : null),
-      h('div', { class: 'vp-channel' }, ch.name + ' / ' + (S.server?.name || ''))
+      h(
+        'div',
+        { class: 'vp-status' + (live ? '' : ' pending') },
+        !live ? 'Reconnecting…' : c.voice.micError ? 'Listen-only' : 'Voice Connected',
+        c.voice.local.screen ? h('span', { class: 'live-badge' }, 'LIVE') : null
+      ),
+      away ? null : h('div', { class: 'vp-channel' }, where)
     ),
-    h(
-      'button',
-      {
-        class: 'icon-btn' + (S.voice?.local.screen ? ' sharing' : ''),
-        title: S.voice?.local.screen ? 'Change source or stop sharing' : 'Share your screen',
-        onclick: (e) => (S.voice?.local.screen ? sharePopover(e.currentTarget) : screenPicker()),
-      },
-      icon('screen')
-    ),
-    h(
-      'button',
-      {
-        class: 'icon-btn' + (S.voice?.local.camera ? ' sharing' : ''),
-        title: (S.voice?.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
-        onclick: toggleCamera,
-        oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
-      },
-      icon(S.voice?.local.camera ? 'cam' : 'camOff')
-    ),
+    // The channel list has this button too, but that list now shows another server
+    away && video ? h('button', { class: 'icon-btn' + (S.stage ? ' sharing' : ''), title: 'Open video grid', onclick: () => openStage() }, icon('expand')) : null,
+    live
+      ? h(
+          'button',
+          {
+            class: 'icon-btn' + (c.voice.local.screen ? ' sharing' : ''),
+            title: c.voice.local.screen ? 'Change source or stop sharing' : 'Share your screen',
+            onclick: (e) => (S.voice?.local.screen ? sharePopover(e.currentTarget) : screenPicker()),
+          },
+          icon('screen')
+        )
+      : null,
+    live
+      ? h(
+          'button',
+          {
+            class: 'icon-btn' + (c.voice.local.camera ? ' sharing' : ''),
+            title: (c.voice.local.camera ? 'Turn off camera' : 'Turn on camera') + ' (right-click to pick a camera)',
+            onclick: toggleCamera,
+            oncontextmenu: (e) => (e.preventDefault(), cameraPopover(e.currentTarget)),
+          },
+          icon(c.voice.local.camera ? 'cam' : 'camOff')
+        )
+      : null,
     h('button', { class: 'icon-btn', title: 'Soundboard', onclick: (e) => openSoundboard(e.currentTarget) }, icon('board')),
-    h('button', { class: 'icon-btn danger', title: 'Disconnect', onclick: leaveVoice }, icon('hangup'))
-  );
+    h('button', { class: 'icon-btn danger', title: 'Disconnect', onclick: leaveVoice }, icon('hangup')),
+  ];
+  p.replaceChildren(...buttons.filter(Boolean)); // replaceChildren(null) would print "null"
 }
 
 function renderUserPanel() {
@@ -1291,7 +1421,7 @@ function renderUserPanel() {
     h(
       'div',
       { class: 'up-me', title: 'Switch profile', onclick: (e) => profileSwitcher(e.currentTarget) },
-      h('div', { class: 'voice-user self', 'data-sid': S.sid || '' }, avatarEl(p, 32)),
+      h('div', { class: 'voice-user self', 'data-sid': S.call?.sid || S.sid || '' }, avatarEl(p, 32)),
       h('div', { class: 'up-names' }, h('div', { class: 'up-name' }, p.name), h('div', { class: 'up-status' }, p.status || (S.connected ? 'Online' : 'Offline')))
     ),
     h('button', { class: 'icon-btn' + (S.muted || S.deafened ? ' off' : ''), title: 'Mute', onclick: toggleMute }, icon(S.muted || S.deafened ? 'micOff' : 'mic')),
@@ -1343,13 +1473,14 @@ function switchProfile(id) {
   if (inDmView()) S.channelId = null; // those DMs belong to the previous profile
   DM.start(me(), servers.all());
   renderUserPanel();
-  // The server identifies you by profile id, so reconnect as the new one.
+  // Servers identify you by profile id, so reconnect as the new one. A call on
+  // the server in view is rejoined; one on another server ends.
+  const rejoinVoice = S.call === S.conn ? S.voiceChannel : null;
+  endCall();
   if (S.entry) {
     const entry = S.entry;
-    const voiceCh = S.voiceChannel;
     disconnect();
-    connectTo(entry);
-    S.rejoinVoice = voiceCh;
+    connectTo(entry, { rejoinVoice });
   } else renderAll();
 }
 
@@ -2713,7 +2844,7 @@ async function switchShare(opts) {
   if (!stream) return;
   await S.voice.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
   // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
-  const own = S.stage?.tiles.get('screen:' + S.sid);
+  const own = S.stage?.tiles.get('screen:' + S.call?.sid);
   if (own?.video) {
     own.video.srcObject = null;
     own.video.srcObject = S.voice.local.screen;
@@ -2846,8 +2977,8 @@ function openStage({ screen } = {}) {
 // The channel list's video icon: join the channel if needed, then show the
 // stage in grid mode (nothing focused)
 async function openVideoGrid(channelId) {
-  if (S.voiceChannel !== channelId) await joinVoice(channelId);
-  if (S.voiceChannel !== channelId) return;
+  if (!inCall(channelId)) await joinVoice(channelId);
+  if (!inCall(channelId)) return;
   openStage();
   if (S.stage?.focus) setStageFocus(S.stage.focus);
 }
@@ -2863,7 +2994,7 @@ function statsTile() {
 // Start or stop receiving someone's screen share (our own is always shown).
 function watchScreen(sid, on = true, sync = true) {
   const st = S.stage;
-  if (!st || sid === S.sid || on === st.watching.has(sid)) return;
+  if (!st || sid === S.call?.sid || on === st.watching.has(sid)) return;
   if (on) st.watching.add(sid);
   else st.watching.delete(sid);
   S.voice?.watch(sid, 'screen', on);
@@ -2883,13 +3014,14 @@ function setStageFocus(key) {
 
 // kind: 'screen' (live video, or a "Watch stream" card), 'camera' or 'user' (avatar)
 function stageTile(key, sid, kind, live) {
-  const u = S.users.find((x) => x.sid === sid);
+  const u = S.call.users.find((x) => x.sid === sid);
+  const mine = sid === S.call.sid;
   const name = u?.name || 'someone';
   const tile = { key, sid, kind, live, el: null, video: null, status: null };
   // A single click focuses; wait a moment so a double click can go fullscreen instead
   let clickTimer;
   const attrs = {
-    class: 'tile ' + kind + (sid === S.sid && kind === 'camera' ? ' mirror' : '') + (kind === 'screen' && !live ? ' card' : ''),
+    class: 'tile ' + kind + (mine && kind === 'camera' ? ' mirror' : '') + (kind === 'screen' && !live ? ' card' : ''),
     onclick: () => {
       clearTimeout(clickTimer);
       clickTimer = setTimeout(() => setStageFocus(key), 220);
@@ -2917,7 +3049,7 @@ function stageTile(key, sid, kind, live) {
   tile.video = video;
   tile.status = h('div', { class: 'stream-status' }, kind === 'screen' ? 'Connecting to stream…' : 'Connecting…');
   const extras = [];
-  if (kind === 'screen' && sid !== S.sid) {
+  if (kind === 'screen' && !mine) {
     const out = settings.get().outputDevice;
     if (out && video.setSinkId) video.setSinkId(out).catch(() => {});
     const stop = (e) => e.stopPropagation();
@@ -2943,7 +3075,7 @@ function stageTile(key, sid, kind, live) {
     );
   }
   tile.el = h('div', attrs, video, tile.status, label, ...extras);
-  if (sid !== S.sid) {
+  if (!mine) {
     // Tell the sender how many device pixels we show, so their encoder for us
     // is no bigger than that (and pauses while this window is hidden).
     let timer;
@@ -2961,7 +3093,7 @@ function stageTile(key, sid, kind, live) {
     tile.ro = new ResizeObserver(tile.report);
     tile.ro.observe(video);
   }
-  if (kind === 'camera' && sid !== S.sid) S.voice?.watch(sid, 'camera', true);
+  if (kind === 'camera' && !mine) S.voice?.watch(sid, 'camera', true);
   return tile;
 }
 
@@ -2970,7 +3102,7 @@ function dropTile(key) {
   const tile = st?.tiles.get(key);
   if (!tile) return;
   st.tiles.delete(key);
-  if (tile.kind === 'camera' && tile.sid !== S.sid && S.connected) S.voice?.watch(tile.sid, 'camera', false);
+  if (tile.kind === 'camera' && tile.sid !== S.call?.sid && S.call?.connected) S.voice.watch(tile.sid, 'camera', false);
   if (tile.video) tile.video.srcObject = null;
   tile.ro?.disconnect();
   tile.el.remove();
@@ -3000,22 +3132,23 @@ function formatVideoStats(info) {
 function syncStage() {
   const st = S.stage;
   if (!st) return;
-  if (!S.voiceChannel || !S.voice) return closeStage();
-  const inChannel = S.users.filter((u) => u.voice === S.voiceChannel);
+  const c = S.call; // the stage shows the call's channel, whichever server is in view
+  if (!c?.voiceChannel) return closeStage();
+  const inChannel = c.users.filter((u) => u.voice === c.voiceChannel);
   const byId = new Map(inChannel.map((u) => [u.sid, u]));
 
   for (const sid of [...st.watching]) {
     if (byId.get(sid)?.sharing) continue;
     st.watching.delete(sid);
     S.voice.watch(sid, 'screen', false);
-    const name = S.users.find((u) => u.sid === sid)?.name;
+    const name = c.users.find((u) => u.sid === sid)?.name;
     toast(name ? `${name}'s stream ended` : 'The stream ended');
   }
   if (!inChannel.some((u) => u.sharing || u.camera)) return closeStage();
 
   // Screens first, then everyone in the channel (camera or avatar)
   const want = [
-    ...inChannel.filter((u) => u.sharing).map((u) => ({ key: 'screen:' + u.sid, sid: u.sid, kind: 'screen', live: u.sid === S.sid || st.watching.has(u.sid) })),
+    ...inChannel.filter((u) => u.sharing).map((u) => ({ key: 'screen:' + u.sid, sid: u.sid, kind: 'screen', live: u.sid === c.sid || st.watching.has(u.sid) })),
     ...inChannel.map((u) => ({ key: (u.camera ? 'camera:' : 'user:') + u.sid, sid: u.sid, kind: u.camera ? 'camera' : 'user', live: true })),
   ];
   const wanted = new Map(want.map((w) => [w.key, w]));
@@ -3041,17 +3174,17 @@ function syncStage() {
     }
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = t.sid === S.sid || S.deafened;
+      t.video.muted = t.sid === c.sid || S.deafened;
       t.video.volume = st.volumes.get(t.sid) ?? 1;
     }
   }
 
   // Header: what's focused, plus controls for your own share
   const fu = focused && byId.get(focused.sid);
-  const mineFocused = focused?.sid === S.sid;
+  const mineFocused = focused?.sid === c.sid;
   st.title.replaceChildren(
     !focused
-      ? channelById(S.voiceChannel)?.name || 'Voice'
+      ? callChannel()?.name || 'Voice'
       : focused.kind === 'screen'
         ? mineFocused
           ? 'Your stream'
@@ -3103,7 +3236,7 @@ function closeStage() {
   clearInterval(st.timer);
   st.ro.disconnect();
   for (const key of [...st.tiles.keys()]) dropTile(key);
-  if (S.connected && S.voice) for (const sid of st.watching) S.voice.watch(sid, 'screen', false);
+  if (S.call?.connected) for (const sid of st.watching) S.voice.watch(sid, 'screen', false);
   S.stage = null;
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   $('#stream-view').replaceChildren();

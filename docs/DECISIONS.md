@@ -273,3 +273,15 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** while the repo is private, servers need `GITHUB_TOKEN` (and Watchtower `GHCR_USER`/`GHCR_TOKEN`), and installed apps can't see releases at all: in-app updates start working when the repo goes public. Releases use GitHub Actions minutes, and macOS minutes count 10× on private repos. Watchtower recreates the container from the same config, so compose changes (new env vars) still need a stack redeploy. A server and its clients can briefly run different versions, which the protocol has to tolerate (add fields; don't repurpose them).
 **Alternatives:** CI deploying over SSH on every push (no maintenance window, and CI would need credentials for every host); giving friendspeak the Docker socket (root-equivalent access for a chat server); Watchtower polling on its own schedule (no warnings, and no tie to a published release); a signed auto-updater for macOS (needs the $99/yr Apple Developer ID, so later).
+
+## D31: A voice call keeps its own server connection · Active
+**Context:** the client assumed one connected server: clicking another server in the rail closed the socket and with it the call (issue #9). Friends who share several servers want to stay in voice on one while reading another, like Discord.
+**Decision:**
+- Per-server state moved from `S` into connection objects (ARCHITECTURE.md → Connections). `S.conn` is the server in view and `S.call` the one the call is on. Leaving a server keeps its connection open only while the call is on it, so there are at most two.
+- One call at a time, because there is one microphone and one outgoing audio graph (`audio.js`). Joining voice elsewhere hangs up first.
+- The background connection carries voice only: it keeps `users`, channels and the server's name current for the voice panel and the stage, but ignores messages. Coming back loads history again, like a fresh connect.
+- No server or protocol change. To the call's server you are simply still connected, and you appear online there.
+
+**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
+**Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
+
