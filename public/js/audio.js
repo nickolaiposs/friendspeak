@@ -4,10 +4,25 @@
 //                                        └──> selfAnalyser (speaking indicator)
 //   soundboard clips ──> sbBus ──────────┬──> outDest
 //                                        ├──> selfAnalyser
-//                                        └──> monitor ──> speakers (hear it yourself)
+//                                        └──> monitor ──> master (hear it yourself)
+//
+//   friend's voice ──> user gain ──(limiter while boosted)──> voiceBus ──> master
+//                 └──> analyser (speaking indicator)
+//   cues ──> cueBus ──> master ──> speakers (the chosen output device)
 //
 // Mixing the soundboard into the outgoing stream is what lets friends hear it.
+// Voices play through the graph instead of <audio> elements because an
+// element's volume stops at 100%, and a gain node can boost a quiet friend.
 import { settings } from './store.js';
+
+export const MAX_USER_VOLUME = 3;
+
+// A boosted voice passes through this so its peaks are squeezed under full
+// scale instead of clipping. Hard knee: below the threshold it changes nothing.
+const LIMITER = { threshold: -2, knee: 0, ratio: 20, attack: 0.001, release: 0.2 };
+// DynamicsCompressorNode adds makeup gain on its own: 0.6 of (in dB) what it
+// takes off a full-scale signal. This takes it back out.
+const LIMITER_TRIM = 10 ** ((0.6 * LIMITER.threshold * (1 - 1 / LIMITER.ratio)) / 20);
 
 class AudioEngine {
   constructor() {
@@ -34,6 +49,12 @@ class AudioEngine {
     this.sbBus.gain.value = s.soundboardVolume;
     this.monitor = ctx.createGain();
     this.monitor.gain.value = s.soundboardMonitor ? 1 : 0;
+    this.voiceBus = ctx.createGain();
+    this.voiceBus.gain.value = s.voiceVolume;
+    this.cueBus = ctx.createGain();
+    this.cueBus.gain.value = s.cueVolume;
+    this.master = ctx.createGain();
+    this.master.gain.value = s.masterVolume;
     this.outDest = ctx.createMediaStreamDestination();
     this.selfAnalyser = ctx.createAnalyser();
     this.selfAnalyser.fftSize = 512;
@@ -44,8 +65,12 @@ class AudioEngine {
     this.sbBus.connect(this.outDest);
     this.sbBus.connect(this.selfAnalyser);
     this.sbBus.connect(this.monitor);
-    this.monitor.connect(ctx.destination);
+    this.monitor.connect(this.master);
+    this.voiceBus.connect(this.master);
+    this.cueBus.connect(this.master);
+    this.master.connect(ctx.destination);
     this.updateGate();
+    if (s.outputDevice) this.setOutputDevice(s.outputDevice);
   }
 
   get outStream() {
@@ -81,6 +106,19 @@ class AudioEngine {
   }
   setSoundboardVolume(v) {
     if (this.sbBus) this.sbBus.gain.value = v;
+  }
+  setMasterVolume(v) {
+    if (this.master) this.master.gain.value = v;
+  }
+  setVoiceVolume(v) {
+    if (this.voiceBus) this.voiceBus.gain.value = v;
+  }
+  setCueVolume(v) {
+    if (this.cueBus) this.cueBus.gain.value = v;
+  }
+  // '' is the system default. A device that is gone leaves the output where it was.
+  setOutputDevice(deviceId) {
+    this.ctx?.setSinkId?.(deviceId || '').catch(() => {});
   }
   setMonitor(on) {
     if (this.monitor) this.monitor.gain.value = on ? 1 : 0;
@@ -143,13 +181,37 @@ class AudioEngine {
 
   // ----- levels -----
 
-  analyserFor(stream) {
+  // A friend's incoming voice. setGain takes 0..MAX_USER_VOLUME.
+  voiceInput(stream) {
     this.ensure();
-    const src = this.ctx.createMediaStreamSource(stream);
-    const an = this.ctx.createAnalyser();
-    an.fftSize = 512;
-    src.connect(an);
-    return { analyser: an, dispose: () => src.disconnect() };
+    const ctx = this.ctx;
+    const src = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    const gain = ctx.createGain();
+    src.connect(analyser);
+    src.connect(gain);
+    gain.connect(this.voiceBus);
+    let limiter = null; // { comp, trim }, only in the path while boosted
+    return {
+      analyser,
+      setGain: (v) => {
+        gain.gain.setTargetAtTime(v, ctx.currentTime, 0.015);
+        if (v > 1 === !!limiter) return;
+        gain.disconnect();
+        limiter?.trim.disconnect();
+        limiter = null;
+        if (v > 1) {
+          limiter = { comp: new DynamicsCompressorNode(ctx, LIMITER), trim: new GainNode(ctx, { gain: LIMITER_TRIM }) };
+          gain.connect(limiter.comp).connect(limiter.trim).connect(this.voiceBus);
+        } else gain.connect(this.voiceBus);
+      },
+      dispose: () => {
+        src.disconnect();
+        gain.disconnect();
+        limiter?.trim.disconnect();
+      },
+    };
   }
 
   static level(analyser) {
@@ -186,7 +248,7 @@ class AudioEngine {
       g.gain.setValueAtTime(0, t);
       g.gain.linearRampToValueAtTime(0.12, t + 0.01);
       g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
-      o.connect(g).connect(this.ctx.destination);
+      o.connect(g).connect(this.cueBus);
       o.start(t);
       o.stop(t + 0.15);
     });
