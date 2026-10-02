@@ -302,7 +302,7 @@ Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail
 | `fs.keys` | `{ <profileId>: { sign: { pub, priv }, dh: { pub, priv } } }`: the profile's key pairs (base64url; raw public, PKCS#8 private). Included in profile export files as `keys` |
 | `fs.servers` | `[{ id, address (origin), password, serverName, serverIcon }]` (name and icon are cached from the server for the rail; there are no per-user nicknames) |
 | `fs.lastServer` | server bookmark id |
-| `fs.settings` | see `DEFAULT_SETTINGS` (devices, volumes, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
+| `fs.settings` | see `DEFAULT_SETTINGS` (devices, volumes, mic processing, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, …) |
 | IndexedDB `friendspeak/sounds` | `{ id, name, emoji, volume, hotkey, blob, type, created }` |
 | IndexedDB `friendspeak/dmContacts` | `{ key: "<myId>\|<theirId>", owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, relays: [address], seen: [opId], wants: [fileId], conflict? }` (index `owner`). Queued ops also carry `at` and `mailed` (timestamps) |
 | IndexedDB `friendspeak/dmMessages` | `{ key: "<thread>\|<msgId>", thread, id, author, name, text, gif, replyTo, reactions, ts, edited?, pending?, mailed?, files?, note? }` (index `thread`); `note` marks a local-only line such as a call result |
@@ -314,7 +314,9 @@ Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`
 
 ```mermaid
 flowchart LR
-  Mic["getUserMedia"] --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT)"]
+  Mic["getUserMedia<br/>(browser echo cancellation,<br/>noise suppression, auto gain)"] -- "High only" --> RNN["RNNoise<br/>(AudioWorklet + WASM)"] --> NG["mic-worklet.js<br/>(noise gate, speaker mode)"]
+  Mic --> NG
+  NG --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT)"]
   Gate --> Out["MediaStreamDestination<br/>= outgoing track"]
   Gate --> SelfA["analyser<br/>(own speaking ring)"]
   SB["soundboard clips<br/>(per-sound gain)"] --> Bus["sbBus<br/>(soundboard volume)"]
@@ -326,7 +328,15 @@ flowchart LR
   Remote --> PeerA["analyser<br/>(their speaking ring)"]
   UserGain -- "above 100%: limiter" --> VoiceBus["voiceBus<br/>(voices volume)"] --> Master
   Cues["cues"] --> CueBus["cueBus<br/>(notification volume)"] --> Master
+  Master -. "sidechain (speaker mode)" .-> NG
 ```
+
+- **Mic processing (D35):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`; the browser resamples for other devices). `audio.startMic()` builds the mic chain from four settings, and `audio.micInfo` records what the track really applied (`track.getSettings()`), which Settings → Voice shows when a device or OS refused something.
+  - `noiseReduction`: `off`, `standard` (the browser's `noiseSuppression` constraint) or `high`: RNNoise in an `AudioWorkletNode`, with the browser's suppression turned off so the two don't fight. The worklet and its two `.wasm` builds (SIMD and plain) are prebuilt files in `public/vendor/web-noise-suppressor/` (see its README for the origin and licences); `audio.processors()` fetches the wasm, validates it and hands it to the worklet. If that fails, or the context isn't at 48 kHz, `high` falls back to `standard`. It adds about 21 ms and well under 1% of a core.
+  - `noiseGate` (`off`, `auto`, `manual`) and `noiseGateThreshold` (dB): `mic-worklet.js` passes the mic while its level is above the threshold (5 dB hysteresis, 250 ms hold, 2 ms open and 60 ms close ramps). `auto` puts the threshold 10 dB above a tracked noise floor, between −60 and −25 dB. The processor posts `{ level, threshold, open, ducked }` about 45 times a second (`audio.micLevel`), which draws the level bar under the slider in Settings.
+  - `speakerMode`: the same processor takes `master` (everything the app plays) as a second input and turns the mic down 18 dB while that is above −50 dB, with a 300 ms hold. Screen share audio plays through `<video>` elements and isn't part of it.
+  - `echoCancellation` and `autoGainControl` are the browser's, as constraints.
+  - Only the mic passes through these stages. The soundboard joins after them, at `outDest`. The gate and speaker mode settings apply live (`audio.applyMicProcessing()`); the others restart the mic.
 
 - **Full mesh:** the newcomer calls everyone already in the channel (`voice:join` ack lists their socket ids). Existing members answer.
 - **Signaling order:** each peer has a promise chain (`enqueue`), so ICE candidates never race the SDP.
