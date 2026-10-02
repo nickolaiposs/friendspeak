@@ -630,7 +630,7 @@ function createAdmin(ctx) {
   const serverView = () => {
     const { name, icon } = ctx.state();
     const { available, enabled, reason, world } = ctx.gameInfo();
-    return { name, icon, game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
+    return { name, icon, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
   };
   api.get('/server', (_req, res) => res.json(serverView()));
 
@@ -640,6 +640,7 @@ function createAdmin(ctx) {
     if (b.name !== undefined) patch.name = b.name;
     if (b.icon !== undefined) patch.icon = b.icon;
     if (b.game !== undefined) patch.game = b.game;
+    if (b.audioQuality !== undefined) patch.audioQuality = b.audioQuality;
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
     if (patch.name !== undefined && typeof patch.name !== 'string') return res.status(400).json({ error: 'Server name required' });
     if (patch.icon !== undefined && typeof patch.icon !== 'string') return res.status(400).json({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
@@ -649,6 +650,7 @@ function createAdmin(ctx) {
       if (patch.name !== undefined) what.push(`name "${ctx.state().name}"`);
       if (patch.icon !== undefined) what.push(patch.icon ? 'icon' : 'icon removed');
       if (patch.game !== undefined) what.push(patch.game ? 'game on' : 'game off');
+      if (patch.audioQuality !== undefined) what.push(`voice quality ${patch.audioQuality}`);
       logAction(req, 'server.update', what.join(', '));
     });
   });
