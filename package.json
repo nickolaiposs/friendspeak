@@ -1,6 +1,6 @@
 {
   "name": "friendspeak",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Self-hosted Discord/TeamSpeak-style chat for friends with voice, GIFs, emojis, soundboards and an optional virtual penguin world (Yukon, assets not included). No accounts.",
   "main": "desktop/main.js",
   "scripts": {
