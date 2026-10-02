@@ -19,6 +19,7 @@ const MODULES = path.join(ROOT, 'node_modules');
 const ROUTES = [
   ['/vendor/emoji-picker-element/', path.join(MODULES, 'emoji-picker-element')],
   ['/vendor/emoji-data/', path.join(MODULES, 'emoji-picker-element-data')],
+  ['/vendor/mediapipe/', path.join(MODULES, '@mediapipe/tasks-vision')], // camera backgrounds (D37)
   ['/socket.io/socket.io.js', path.join(MODULES, 'socket.io/client-dist/socket.io.js')],
   ['/', PUBLIC],
 ];
@@ -33,6 +34,7 @@ const MIME = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.map': 'application/json',
+  '.wasm': 'application/wasm', // must be exact for streaming compilation
 };
 
 protocol.registerSchemesAsPrivileged([

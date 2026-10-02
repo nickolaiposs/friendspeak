@@ -551,6 +551,24 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .tile.camera video { object-fit: cover; }
 .stage-main .tile.camera video { object-fit: contain; }
 .tile.mirror video { transform: scaleX(-1); }
+.cam-preview { position: relative; width: 100%; aspect-ratio: 16 / 9; background: var(--bg-0); border-radius: 8px; overflow: hidden; }
+.cam-preview video { display: block; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+.cam-status { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: calc(13px * var(--font-scale)); }
+.settings-body .cam-preview { max-width: 420px; }
+.cam-dialog .cam-preview { margin-bottom: 14px; }
+.bg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); gap: 8px; padding: 3px; }
+.bg-picker .field { margin: 12px 0 0; }
+.bg-tile { position: relative; aspect-ratio: 16 / 10; border-radius: 8px; overflow: hidden; background: var(--bg-1) center / cover no-repeat; border: 1px solid var(--line); outline: 2px solid transparent; outline-offset: 1px; cursor: pointer; display: grid; place-items: center; color: var(--muted); }
+.bg-tile:hover, .bg-tile:focus-visible, .bg-tile.selected { outline-color: var(--accent); }
+.bg-tile.selected::after { content: '✓'; position: absolute; top: 4px; left: 4px; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; background: var(--accent); color: var(--on-accent); }
+.bg-tile svg { width: 22px; height: 22px; fill: currentColor; margin-bottom: 12px; }
+.bg-tile.blur { background: radial-gradient(circle at 30% 35%, color-mix(in srgb, var(--accent) 55%, transparent), transparent 55%), radial-gradient(circle at 72% 60%, color-mix(in srgb, var(--green) 45%, transparent), transparent 55%), var(--bg-1); }
+.bg-tile.add { border-style: dashed; }
+.bg-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 8px 6px 3px; font-size: 11px; font-weight: 600; text-align: left; color: #fff; background: linear-gradient(transparent, rgba(0, 0, 0, .65)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bg-tile.plain .bg-name { background: none; color: var(--muted); text-align: center; }
+.bg-remove { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; display: none; place-items: center; font-size: 14px; line-height: 1; color: #fff; background: rgba(0, 0, 0, .65); }
+.bg-tile:hover .bg-remove, .bg-remove:focus-visible { display: grid; }
+.bg-remove:hover { background: var(--red); }
 .tile-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.6); color: white; font-size: calc(12.5px * var(--font-scale)); font-weight: 600; padding: 2px 8px; border-radius: 4px; }
 .cam-badge { width: 20px; height: 18px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); margin-left: 4px; flex: none; }
 .cam-badge .icon { width: 16px; height: 16px; }

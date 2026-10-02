@@ -18,6 +18,7 @@
   },
   "type": "commonjs",
   "dependencies": {
+    "@mediapipe/tasks-vision": "^1.0.1",
     "bcryptjs": "^3.0.3",
     "electron-updater": "^6.8.9",
     "emoji-picker-element": "^1.29.1",
@@ -67,6 +68,10 @@
       "desktop/**",
       "public/**",
       "!node_modules/phaser/**",
+      "!node_modules/@mediapipe/tasks-vision/wasm/*_nosimd_*",
+      "!node_modules/@mediapipe/tasks-vision/wasm/*_module_*",
+      "!node_modules/@mediapipe/tasks-vision/*.cjs",
+      "!node_modules/@mediapipe/tasks-vision/vision_bundle.js",
       "!**/*.map"
     ],
     "mac": {
