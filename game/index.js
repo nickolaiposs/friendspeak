@@ -116,7 +116,7 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
     game: { preferredSpawn: process.env.GAME_SPAWN !== undefined ? Number(process.env.GAME_SPAWN) || 0 : 100, iglooIdOffset: 2000 },
     logging: process.env.GAME_DEBUG === '1',
   };
-  const { db } = await startWorlds(config);
+  const { db, worlds } = await startWorlds(config);
   const bcrypt = require('bcryptjs');
 
   await db.sequelize.query(
@@ -186,7 +186,10 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
     return { username: user.username, token: `${selector}:${validator}`, path: '/game/' };
   }
 
-  return { available: true, worldName, login };
+  // Everyone connected to the game world (not the login world), for the admin dashboard
+  const maxUsers = config.worlds[worldName].maxUsers;
+  const players = () => Object.keys(worlds[worldName].users).length;
+  return { available: true, worldName, login, players, maxUsers };
 }
 
 module.exports = { startGame };

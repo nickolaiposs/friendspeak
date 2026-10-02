@@ -103,3 +103,13 @@ export function idChip(id) {
   } }, id.slice(0, 8) + (id.length > 8 ? '…' : ''));
   return btn;
 }
+
+// Horizontal meter; pct is 0 to 100
+export function meter(pct, label = '', thin = false) {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  const fill = h('div', {});
+  fill.style.width = p + '%';
+  return h('div', { class: `bar ${p > 90 && !thin ? 'high' : ''} ${thin ? 'thin' : ''}`, role: 'progressbar', 'aria-label': label || null, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(p) }, fill);
+}
+
+export const usageBar = (used, max) => meter(max ? (used / max) * 100 : 0, 'Storage used');
