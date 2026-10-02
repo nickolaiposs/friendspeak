@@ -10,12 +10,13 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
 - **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. Anyone can delete any file. The host caps total storage with `MAX_STORAGE` (default 2 GB).
 - **Embeds:** links to YouTube, Vimeo, Streamable, Spotify, SoundCloud and direct image/video/audio files embed a player under the message. Wrap a link in `<angle brackets>` to post it without an embed.
-- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen, push-to-talk, per-user volume, speaking indicators, device selection, and echo/noise suppression.
+- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen, push-to-talk, per-user volume, speaking indicators, device selection, and echo/noise suppression. The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
 - **Screen sharing:** share an entire screen or a single window, with audio, at up to 1080p 60 fps, from the monitor button in the voice panel. Friends click the red **LIVE** badge to watch. Video is only sent to people who are watching.
 - **Cameras:** the camera button next to it turns on your webcam (720p 30 fps). Right-click it, or go to **Settings → Voice & video**, to pick a device. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
 - **Emojis:** a full searchable emoji picker, plus **custom server emojis** that you upload and use as `:name:`. Channel names can have emojis too: use the emoji button in the create/rename dialog.
 - **GIFs:** GIPHY search built into the composer.
 - **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON.
+- **Themes:** **Settings → Appearance** has dark, light and high-contrast themes, 50 popular color schemes (Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, … from the [Gogh](https://github.com/Gogh-Co/Gogh) collection) with a preview of each, and a color picker for every color in the UI. You can also change the font, text size and density. It's stored on your device and nobody else sees it.
 - **Connect by IP:** save any number of servers in the left rail, with optional passwords.
 - **Server name and icon:** click the server name (or **Settings → Server**). Anyone can set the icon from any image (it's resized for you), an animated GIF, a GIPHY GIF or an https link. Everyone on the server sees it, like Discord.
 - **Soundboard:** add your own audio files (drag and drop works). They're stored locally, and when you play one it's mixed into your voice stream so everyone in the channel hears it, even while you're muted. Each sound can have its own emoji, volume and hotkey.
@@ -77,7 +78,7 @@ The game is built into every friendspeak server. Click the 🐧 game under *Game
 
 Anyone on the server can turn it on or off in **Settings → Server → Games**. When it's off, or the server doesn't have the game assets, the *Games* section doesn't appear at all.
 
-- You're logged straight in. Your penguin is created from your friendspeak profile the first time you play: its name comes from your display name, and its color is the closest penguin color to your profile color. It's saved on that server.
+- You're logged straight in. Your penguin is created from your friendspeak profile the first time you play: its name comes from your display name, and its color is the closest penguin color to your profile color. It's saved on that server. If you change your display name, your penguin is renamed the next time you open the game.
 - Everyone on the server shares the same world (default name *Blizzard*), and the member list shows who's playing.
 - The game keeps running while you switch to text channels, and voice keeps working. **Pop out** opens it in its own window.
 - Push-to-talk and soundboard hotkeys keep working while the game has focus.
@@ -213,6 +214,8 @@ public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server m
 public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
 public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
+public/js/theme.js  Themes, fonts, text size and density (CSS variables)
+public/js/gogh.js   The 50 bundled color schemes
 public/js/util.js   Helpers: markdown, avatars, formatting
 desktop/main.js     Electron main process: secure app origin, certificate pinning, global hotkeys
 desktop/preload.js  window.friendspeakDesktop bridge

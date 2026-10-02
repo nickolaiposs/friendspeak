@@ -41,9 +41,11 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/main.js           UI, app state (object S), socket handlers, settings, game view
   js/voice.js          WebRTC mesh (VoiceClient)
   js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
-  js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D30)
+  js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
+  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
+  js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)

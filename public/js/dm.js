@@ -1,4 +1,4 @@
-// Direct messages, peer to peer and end-to-end encrypted (D28, D30).
+// Direct messages, peer to peer and end-to-end encrypted (D28, D32).
 //
 // Servers are only meeting points and mailboxes. The client keeps a socket on
 // the /dm namespace of every bookmarked server, and (as a guest, without the
@@ -15,7 +15,7 @@
 //   { t: 'id', card }          plain, first thing on every connection
 //   { t: 'x', d }              a sealed op (below)
 //   binary                     a sealed chunk of an image: u32 transfer, u32 index, bytes
-//   plain ops                  only with apps from before D30, which have no keys
+//   plain ops                  only with apps from before D32, which have no keys
 // Ops:
 //   { t: 'hello', p: { name, color, avatar?, status, relays } }   on open and on profile change
 //   { t: 'msg', op, m: { id, text, gif, replyTo, ts, files? } }
@@ -73,7 +73,7 @@ export class DirectMessages {
     const [identity, contacts] = await Promise.all([identityFor(profile), dmStore.contacts(profile.id).catch(() => [])]);
     if (this.me !== me) return; // switched again meanwhile
     this.identity = identity;
-    // Contacts saved before D30 lack the newer fields
+    // Contacts saved before D32 lack the newer fields
     this.contacts = new Map(contacts.map((c) => [c.id, Object.assign(c, { relays: c.relays || [], seen: c.seen || [], wants: c.wants || [] })]));
     this.syncServers();
     this.on.change();
@@ -153,7 +153,7 @@ export class DirectMessages {
     // Banned, wrong password, or a server that takes no guests: don't keep knocking
     socket.on('connect_error', (err) => /banned|password/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
-    // Servers with mailboxes (D30) ask who we are: prove it with the profile's key
+    // Servers with mailboxes (D32) ask who we are: prove it with the profile's key
     socket.on('challenge', async ({ nonce } = {}) => {
       const identity = this.identity;
       if (typeof nonce !== 'string' || !identity) return;
@@ -494,7 +494,7 @@ export class DirectMessages {
   addContact(p) {
     let c = this.contacts.get(p.id);
     if (!c) {
-      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#5865f2', avatar: '', status: '', last: 0, unread: 0, outbox: [], relays: [], seen: [], wants: [] };
+      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#8b6cf6', avatar: '', status: '', last: 0, unread: 0, outbox: [], relays: [], seen: [], wants: [] };
       this.contacts.set(p.id, c);
     }
     Object.assign(c, { name: p.name || c.name, color: p.color || c.color, avatar: p.avatar ?? c.avatar, status: p.status ?? c.status });
@@ -605,7 +605,7 @@ export class DirectMessages {
     this.flush(peerId);
   }
 
-  // Images need a friend with keys (an app from D30 on)
+  // Images need a friend with keys (an app from D32 on)
   canSendFiles(peerId) {
     return !!this.contacts.get(peerId)?.card;
   }
@@ -718,7 +718,7 @@ export class DirectMessages {
       return;
     }
     // Not sealed: only from someone who has never shown a key (an app from
-    // before D30). Once a key is pinned, plain ops are ignored.
+    // before D32). Once a key is pinned, plain ops are ignored.
     if (peer.key || this.contacts.get(peerId)?.card) return;
     if (!peer.legacy) {
       peer.legacy = true;
