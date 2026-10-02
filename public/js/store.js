@@ -84,6 +84,8 @@ const DEFAULT_SETTINGS = {
   inputDevice: '',
   outputDevice: '',
   videoDevice: '', // camera
+  cameraBackground: 'none', // a key of BACKGROUNDS (background.js): 'none' | 'blur'
+  cameraBlur: 0.5, // blur strength, 0..1
   micVolume: 1,
   masterVolume: 1, // everything this app plays: voices, streams, soundboard, cues
   voiceVolume: 1, // other people's voices

@@ -6,6 +6,7 @@ import { VoiceClient, SCREEN, MEDIA } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
+import { BACKGROUNDS, CAPTURE, backgroundOf, setBackground, withBackground } from './background.js';
 import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
 
 applyAppearance(); // before the first render
@@ -3405,42 +3406,92 @@ async function switchShare(opts) {
   if (!stream) return;
   const v = liveVoice();
   await v.replaceMedia('screen', stream); // starts a new share if it ended while the picker was open
-  // Our own preview keeps the same MediaStream object; reattach so it shows the new tracks
-  const own = v === DMCALL.voice ? dmCallUi.tiles.get('screen:' + me().id) : S.stage?.tiles.get('screen:' + S.call?.sid);
-  if (own?.video) {
-    own.video.srcObject = null;
-    own.video.srcObject = v.local.screen;
-    own.video.play().catch(() => {});
-  }
+  reattachOwn(v, 'screen');
   renderVoicePanel();
   toast('Switched what you’re sharing', 'info', 3000);
 }
 
+// After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
+function reattachOwn(v, kind) {
+  const own = v === DMCALL.voice ? dmCallUi.tiles.get(kind + ':' + me().id) : S.stage?.tiles.get(kind + ':' + S.call?.sid);
+  if (!own?.video) return;
+  own.video.srcObject = null;
+  own.video.srcObject = v.local[kind];
+  own.video.play().catch(() => {});
+}
+
 // ---------------------------------------------------------------- camera
+
+// The choices offered for what is behind you (background.js). Custom pictures would be listed here too.
+const BACKGROUND_CHOICES = { none: 'None', blur: 'Blur' };
+
+// The camera with the chosen background (D35), or null after telling the user why not
+async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000), null;
+  const dev = settings.get().videoDevice;
+  const cam = MEDIA.camera;
+  const capture = (effect) => {
+    const ideal = effect ? CAPTURE : cam.ideal;
+    return navigator.mediaDevices.getUserMedia({
+      audio: false, // your voice already carries the audio
+      video: {
+        deviceId: dev ? { ideal: dev } : undefined,
+        width: { ideal: ideal.width, max: cam.width },
+        height: { ideal: ideal.height, max: cam.height },
+        frameRate: { ideal: ideal.fps, max: effect ? ideal.fps : cam.fps },
+      },
+    });
+  };
+  const bg = backgroundOf();
+  setBackground(bg);
+  try {
+    const raw = await capture(!!BACKGROUNDS[bg.type]);
+    try {
+      return await withBackground(raw);
+    } catch (e) {
+      // Better a plain camera than none
+      console.warn('camera background', e);
+      toast('The camera background isn’t available: ' + e.message, 'error', 6000);
+      raw.getTracks().forEach((t) => t.stop());
+      setBackground({ ...bg, type: 'none' });
+      return await capture(false);
+    }
+  } catch (e) {
+    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000), null;
+  }
+}
 
 async function toggleCamera() {
   if (!liveVoice()) return;
   if (liveVoice().local.camera) return liveVoice().stopMedia('camera');
-  if (!navigator.mediaDevices?.getUserMedia) return toast('The camera needs a secure page (localhost, HTTPS or the desktop app).', 'error', 6000);
-  const dev = settings.get().videoDevice;
-  const cam = MEDIA.camera;
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false, // your voice already carries the audio
-      video: {
-        deviceId: dev ? { ideal: dev } : undefined,
-        width: { ideal: cam.ideal.width, max: cam.width },
-        height: { ideal: cam.ideal.height, max: cam.height },
-        frameRate: { ideal: cam.ideal.fps, max: cam.fps },
-      },
-    });
-  } catch (e) {
-    return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000);
-  }
+  const stream = await openCamera();
+  if (!stream) return;
   if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
   liveVoice().setMedia('camera', stream);
   renderVoicePanel();
+}
+
+// Change the camera background, also mid-call. The strength applies to the
+// running camera at once. Another kind of background needs a new capture
+// (a plain camera has no pipeline, and is captured larger), which is swapped
+// in without ending the camera for viewers.
+let cameraSwap = Promise.resolve();
+function setCameraBackground(patch) {
+  const before = backgroundOf();
+  const bg = backgroundOf(settings.set(patch));
+  setBackground(bg);
+  if (bg.type === before.type) return cameraSwap;
+  return (cameraSwap = cameraSwap
+    .then(async () => {
+      const v = liveVoice();
+      if (!v?.local.camera) return;
+      const stream = await openCamera();
+      if (!stream) return;
+      if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop());
+      await v.replaceMedia('camera', stream);
+      reattachOwn(v, 'camera');
+    })
+    .catch((e) => console.warn('camera background', e)));
 }
 
 async function cameraPopover(anchor) {
@@ -3455,6 +3506,7 @@ async function cameraPopover(anchor) {
       await toggleCamera();
     }
   };
+  const bg = backgroundOf().type;
   popover(
     anchor,
     h(
@@ -3464,7 +3516,12 @@ async function cameraPopover(anchor) {
         ? [{ deviceId: '', label: 'Default camera' }, ...cams].map((d, i) =>
             h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Camera ${i}`))
           )
-        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found')
+        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found'),
+      h('div', { class: 'menu-sep' }),
+      h('div', { class: 'menu-label' }, 'Background'),
+      Object.entries(BACKGROUND_CHOICES).map(([type, label]) =>
+        h('button', { class: 'menu-item' + (type === bg ? ' active' : ''), onclick: () => (closePopover(), setCameraBackground({ cameraBackground: type })) }, (type === bg ? '✓ ' : '') + label)
+      )
     ),
     { align: 'right' }
   );
@@ -4234,10 +4291,57 @@ function settingsVoice(body) {
       onchange: async (e) => {
         settings.set({ videoDevice: e.target.value });
         if (liveVoice()?.local.camera) (liveVoice().stopMedia('camera', true), await toggleCamera());
+        if (previewing) showPreview();
       },
     },
     h('option', { value: '' }, 'Default')
   );
+  // Camera preview: the live camera while you're on one, otherwise a capture of its own
+  const preview = h('video', { class: 'cam-preview', muted: true, playsinline: true, hidden: true });
+  const previewBtn = h('button', { class: 'btn small ghost', onclick: () => (previewing ? stopPreview() : showPreview()) }, 'Preview');
+  let previewing = false;
+  let previewStream = null;
+  let previewRun = 0;
+  const closePreviewStream = () => {
+    previewStream?.getTracks().forEach((t) => t.stop());
+    previewStream = null;
+  };
+  const stopPreview = () => {
+    previewRun++;
+    previewing = false;
+    closePreviewStream();
+    preview.srcObject = null;
+    preview.hidden = true;
+    previewBtn.textContent = 'Preview';
+  };
+  const showPreview = async () => {
+    const run = ++previewRun;
+    previewing = true;
+    previewBtn.textContent = 'Stop preview';
+    closePreviewStream();
+    const stream = liveVoice()?.local.camera ? null : await openCamera();
+    if (run !== previewRun) return stream?.getTracks().forEach((t) => t.stop());
+    previewStream = stream;
+    const src = liveVoice()?.local.camera || stream;
+    if (!src) return stopPreview();
+    preview.srcObject = null;
+    preview.srcObject = src;
+    preview.hidden = false;
+    preview.play().catch(() => {});
+  };
+  const blurField = h('div', { hidden: st.cameraBackground !== 'blur' });
+  const bgSel = h(
+    'select',
+    {
+      onchange: async (e) => {
+        blurField.hidden = e.target.value !== 'blur';
+        await setCameraBackground({ cameraBackground: e.target.value });
+        if (previewing) showPreview();
+      },
+    },
+    Object.entries(BACKGROUND_CHOICES).map(([type, label]) => h('option', { value: type }, label))
+  );
+  bgSel.value = backgroundOf(st).type;
   navigator.mediaDevices?.enumerateDevices().then((devs) => {
     for (const d of devs) {
       const opt = h('option', { value: d.deviceId }, d.label || `${d.kind} ${d.deviceId.slice(0, 6)}`);
@@ -4329,10 +4433,14 @@ function settingsVoice(body) {
     );
   };
 
+  blurField.append(slider('cameraBlur', 'Blur strength', 1, () => setBackground(backgroundOf())));
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
-    h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
+    h('h3', {}, 'Camera'),
+    h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Camera'), camSel), h('label', { class: 'field grow' }, h('span', {}, 'Background'), bgSel)),
+    blurField,
+    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
@@ -4361,6 +4469,7 @@ function settingsVoice(body) {
   );
   return () => {
     clearInterval(iv);
+    stopPreview();
     if (testing && !liveVoice()) audio.stopMic();
   };
 }
