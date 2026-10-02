@@ -42,6 +42,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/voice.js          WebRTC mesh (VoiceClient)
   js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
   js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
+  js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
