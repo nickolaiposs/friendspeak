@@ -7,11 +7,18 @@ servers link to it. Newest first.
 
 ## Unreleased
 
-- Screen share quality: pick a tier (Auto, 720p30, 1080p60, 1440p60 or Source)
+- Screen share quality: pick a tier (Auto, 720p30, 1080p60 or 1440p60)
   and what to optimize for (smooth motion or sharp text) when you share, and
   change both while live from the share button
+- Screen shares now stop at 1440p 60 fps instead of 4K 120 fps: no screen
+  capture tested came near 120 fps
 - Each viewer's stream now adapts to its connection and your computer: it drops
   resolution (smooth) or frame rate (sharp) when needed and climbs back up
+- A share now reaches full resolution sooner when the screen updates slower
+  than the tier's frame rate (about 7 s instead of 25 s in one test)
+- Windows: screen capture keeps frames on the GPU, which raised a 1440p share
+  from about 30 to about 57 fps in motion in one test. If a share comes out
+  black or frozen, start the app with `FRIENDSPEAK_LEGACY_CAPTURE=1`
 - The encoded picture size is kept even, and the video codec is chosen for your
   machine and mode. This may fix low frame rates on shares where hardware
   encoding was being skipped, but it isn't confirmed yet

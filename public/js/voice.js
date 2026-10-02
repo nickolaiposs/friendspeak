@@ -13,24 +13,25 @@ import { settings } from './store.js';
 
 export const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
 
-// Capture ceilings: up to 4K at 120 fps. Cameras ask for 1080p60 by default
-// (4K webcam modes cost a lot to capture and rarely look better in a tile) but
-// may go up to the same ceiling. What each viewer actually gets is set per
-// viewer (see applyView) and by WebRTC's bandwidth estimate.
+// Capture ceilings. Screens stop at 1440p60 (see TIERS). Cameras ask for
+// 1080p60 by default (4K webcam modes cost a lot to capture and rarely look
+// better in a tile) but may go up to 4K at 120 fps. What each viewer actually
+// gets is set per viewer (see applyView) and by WebRTC's bandwidth estimate.
 export const MEDIA = {
-  screen: { width: 3840, height: 2160, fps: 120 },
+  screen: { width: 2560, height: 1440, fps: 60 },
   camera: { width: 3840, height: 2160, fps: 120, ideal: { width: 1920, height: 1080, fps: 60 } },
 };
 export const KINDS = ['screen', 'camera'];
 
 // Screen share quality tiers: the ceiling for capture and for what any viewer
-// gets. "auto" is what the bandwidth ladder (below) climbs to by default.
+// gets. "auto" is what the bandwidth ladder (below) climbs to by default, and
+// nothing goes above MEDIA.screen. A saved tier that no longer exists (the old
+// 4K120 "source") falls back to "auto".
 export const TIERS = {
-  auto: { width: 2560, height: 1440, fps: 60 },
+  auto: MEDIA.screen,
   '720p30': { width: 1280, height: 720, fps: 30 },
   '1080p60': { width: 1920, height: 1080, fps: 60 },
   '1440p60': { width: 2560, height: 1440, fps: 60 },
-  source: MEDIA.screen,
 };
 // smooth: games and video, keep the frame rate. sharp: text and code, keep the
 // pixels and drop frames instead. bpp is the bits per pixel a rung needs to look clean.
@@ -155,7 +156,7 @@ const CODEC_EFFICIENCY = { H264: 1.0, VP8: 1.1, VP9: 0.75, H265: 0.7, AV1: 0.65 
 const bppFor = (mode, codec) => MODES[mode].bpp * (CODEC_EFFICIENCY[codec] ?? 1);
 
 // Bitrate ceiling for w×h at fps: ~0.06 bits per pixel suits H.264 on screen
-// content and motion (1080p60 ≈ 7.5 Mbps; 4K120 hits the 50 Mbps cap). Below
+// content and motion (1080p60 ≈ 7.5 Mbps, 1440p60 ≈ 13 Mbps; capped at 50 Mbps). Below
 // 30 fps each frame needs more bits, hence the floor. It is a ceiling only; the
 // bandwidth estimate decides what is actually sent.
 const bitrateFor = (w, h, fps) => Math.round(Math.min(50e6, Math.max(2.5e6, w * h * Math.max(fps, 30) * 0.06)));
@@ -179,6 +180,8 @@ const SETTLE_MS = 2000; // ignore samples this long after a step; the encoder is
 const BITRATE_HOLD_MS = 8000; // no step up this long after a bitrate step down
 const LOAD_HOLD_MS = 20000; // ...and after a load step down
 const SOFT_SAMPLES = 5; // consecutive samples of software H.264 before the probe is overruled
+const NEED_MIN_FPS = 30; // a rung is costed at the source's real frame rate, but not below this
+const SRC_FPS_DECAY = 0.9; // per sample; the source rate is a decaying peak so a pause in motion doesn't flap the rung
 
 // Scale (>= the given one's neighbourhood) at which width/scale and height/scale
 // both come out even: the hardware H.264 encoder rejects odd frame sizes. The
@@ -196,11 +199,14 @@ export function evenScale(width, height, scale) {
   return scale;
 }
 const even = (n) => Math.max(2, Math.round(n / 2) * 2);
-const rungNeed = (r, bpp) => (r.w * r.h * r.fps * bpp) / 1e6; // Mbps
+// Mbps a rung needs. `srcFps` is what the source really delivers (see
+// ladderStep): a 120 fps tier on a screen that produces 35 frames a second
+// needs the bits for 35, not 120. Without it the rung's own rate is used.
+const rungNeed = (r, bpp, srcFps) => (r.w * r.h * (srcFps ? Math.min(r.fps, Math.max(NEED_MIN_FPS, srcFps)) : r.fps) * bpp) / 1e6;
 
 // Best rung whose need (times headroom) fits the target bitrate; the lowest when none does
-function ladderFit(rungs, bpp, target, headroom = 1) {
-  for (let i = 0; i < rungs.length; i++) if (rungNeed(rungs[i], bpp) * headroom <= target) return i;
+function ladderFit(rungs, bpp, target, headroom = 1, srcFps) {
+  for (let i = 0; i < rungs.length; i++) if (rungNeed(rungs[i], bpp, srcFps) * headroom <= target) return i;
   return rungs.length - 1;
 }
 
@@ -219,13 +225,16 @@ export function ladderRungs(mode, w, h, fps) {
 }
 
 // One decision per second for one viewer. `st` is { idx, down, load, up, hold,
-// settle } (idx null until the first usable target), `s` the sender sample
+// settle, srcFps } (idx null until the first usable target; srcFps the recent
+// peak of the capture's real frame rate), `s` the sender sample
 // ({ mbps, sentMbps, capFps, fps, encMs, limit }), `rungs` from ladderRungs,
 // `now` in ms. Returns the new state; pure so it can be driven with synthetic samples.
 export function ladderStep(st, s, rungs, bpp, now) {
+  const srcFps = s.capFps > 0 ? Math.max(s.capFps, (st.srcFps || 0) * SRC_FPS_DECAY) : st.srcFps;
+  st = { ...st, srcFps };
   const last = rungs.length - 1;
-  const need = (r) => rungNeed(r, bpp);
-  const fit = (target, headroom) => ladderFit(rungs, bpp, target, headroom);
+  const need = (r) => rungNeed(r, bpp, srcFps);
+  const fit = (target, headroom) => ladderFit(rungs, bpp, target, headroom, srcFps);
   const target = s.mbps > 0 ? s.mbps : 0;
   const sent = s.sentMbps;
   if (st.idx == null) return target ? { ...st, idx: fit(target), settle: now + SETTLE_MS } : st;
@@ -331,6 +340,7 @@ export class VoiceClient {
       out: { screen: [], camera: [] },
       in: { screen: null, camera: null },
       view: { screen: null, camera: null }, // how big they display our media: { w, h, hidden }
+      viewed: { screen: null, camera: null }, // the same, for their media as we last reported it to them
       ladder: { screen: null, camera: null }, // our encoder's rung for them (see ladderStep)
       codec: { screen: null, camera: null }, // codec of their latest sample, for the ladder's bits-per-pixel
       soft: { screen: 0, camera: 0 }, // consecutive samples of software H.264 (see guard)
@@ -592,7 +602,8 @@ export class VoiceClient {
     let ladder = peer.ladder[kind];
     if (!ladder || ladder.sig !== sig || Math.abs(ladder.ceilH - ceil.h) > 0.1 * ceil.h) {
       const target = ladder?.target;
-      ladder = peer.ladder[kind] = { sig, ceilH: ceil.h, idx: target ? ladderFit(rungs, bppFor(mode, peer.codec[kind]), target) : null, target, down: 0, load: 0, up: 0, hold: 0, settle: 0 };
+      const srcFps = ladder?.srcFps;
+      ladder = peer.ladder[kind] = { sig, ceilH: ceil.h, idx: target ? ladderFit(rungs, bppFor(mode, peer.codec[kind]), target, 1, srcFps) : null, target, srcFps, down: 0, load: 0, up: 0, hold: 0, settle: 0 };
     }
     const rung = rungs[Math.min(ladder.idx ?? rungs.length - 1, rungs.length - 1)]; // a new viewer starts on the lowest rung
     return { mode, tier, width, height, fps, scale, ceil, rungs, ladder, rung };
@@ -650,8 +661,10 @@ export class VoiceClient {
   // Tell a peer how big we show their screen or camera (device pixels), or that
   // we can't see it right now, so they can size their encoder for us.
   view(sid, kind, { w = 0, h = 0, hidden = false } = {}) {
-    if (!this.peers.has(sid)) return;
-    this.send(sid, { view: kind, w: Math.round(w), h: Math.round(h), hidden });
+    const peer = this.peers.get(sid);
+    if (!peer) return;
+    peer.viewed[kind] = { w: Math.round(w), h: Math.round(h), hidden };
+    this.send(sid, { view: kind, ...peer.viewed[kind] });
   }
 
   unsendMediaTo(sid, kind) {
@@ -687,9 +700,13 @@ export class VoiceClient {
   //   remote:  loss (fraction 0..1), rtt (ms), jitter (s)   (remote-inbound-rtp)
   //   path:    availMbps, pathRtt (ms), cand ("host/udp → srflx/udp")
   //   viewer:  view ({ w, h, hidden }), enc ({ scale, maxMbps, maxFps, active })
-  //   ladder:  rung ({ w, h, fps }), mode, tier
+  //   ladder:  rung ({ w, h, fps }), needMbps (the rung's), upMbps (target that
+  //            climbs a rung, null on the top one), mode, tier
   // Receiver: codec, hw, w/h/fps, mbps (received), dropped, freezes, freezeSec,
-  //   jbMs (jitter buffer delay), decoder, lost (packets), nack, pli, decMs, plus path fields
+  //   jbMs (jitter buffer delay), jitterMs (network), keyframes, qp (avg over
+  //   interval), decoder, lost (packets), nack, pli, decMs, view (what we told
+  //   the sender we display), plus pathRtt and cand. No availMbps: the pair's
+  //   estimate is for what we send, and Chromium reports none for what we receive.
   async videoStats(sid, kind) {
     const codecName = (stats, id) => stats.get(id)?.mimeType?.replace('video/', '') || '?';
     if (sid === this.socket.id) return this.latest[kind] || [];
@@ -699,9 +716,9 @@ export class VoiceClient {
     const stats = await tr.receiver.getStats().catch(() => null);
     const r = stats && [...stats.values()].find((x) => x.type === 'inbound-rtp');
     if (!r) return null;
-    const path = await this.pathStats(stats, peer.pc);
+    const { availMbps, ...path } = await this.pathStats(stats, peer.pc);
     const prev = this.statPrev.get(`in|${sid}|${kind}`);
-    const cur = { t: r.timestamp, bytes: r.bytesReceived, jb: r.jitterBufferDelay, jbn: r.jitterBufferEmittedCount, frames: r.framesDecoded, dec: r.totalDecodeTime };
+    const cur = { t: r.timestamp, bytes: r.bytesReceived, jb: r.jitterBufferDelay, jbn: r.jitterBufferEmittedCount, frames: r.framesDecoded, dec: r.totalDecodeTime, qp: r.qpSum };
     this.statPrev.set(`in|${sid}|${kind}`, cur);
     return {
       codec: codecName(stats, r.codecId),
@@ -714,11 +731,15 @@ export class VoiceClient {
       freezes: r.freezeCount,
       freezeSec: r.totalFreezesDuration,
       jbMs: ratio(cur, prev, 'jb', 'jbn', 1000),
+      jitterMs: r.jitter != null ? r.jitter * 1000 : undefined,
+      keyframes: r.keyFramesDecoded,
+      qp: ratio(cur, prev, 'qp', 'frames'),
       decoder: r.decoderImplementation,
       lost: r.packetsLost,
       nack: r.nackCount,
       pli: r.pliCount,
       decMs: ratio(cur, prev, 'dec', 'frames', 1000),
+      view: peer.viewed[kind],
       ...path,
     };
   }
@@ -824,7 +845,11 @@ export class VoiceClient {
       if (sample.mbps > 0) p.ladder.target = sample.mbps;
       if (p.ladder.idx !== before) this.enqueue(sid, () => this.applyView(sid, kind));
     }
-    sample.rung = p.rungs[Math.min(p.ladder.idx ?? p.rungs.length - 1, p.rungs.length - 1)];
+    const at = Math.min(p.ladder.idx ?? p.rungs.length - 1, p.rungs.length - 1);
+    const bpp = bppFor(p.mode, sample.codec);
+    sample.rung = p.rungs[at];
+    sample.needMbps = rungNeed(p.rungs[at], bpp, p.ladder.srcFps);
+    sample.upMbps = at > 0 ? UP_HEADROOM * rungNeed(p.rungs[at - 1], bpp, p.ladder.srcFps) : null;
     sample.mode = p.mode;
     sample.tier = p.tier;
     // A note only stands while the codec and quality it was written for do

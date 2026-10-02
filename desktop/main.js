@@ -48,6 +48,12 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // System audio for screen sharing on macOS (13+). Windows supports it natively.
 if (process.platform === 'darwin') app.commandLine.appendSwitch('enable-features', 'MacLoopbackAudioForScreenShare,MacSckSystemAudioLoopbackOverride');
 
+// Screen capture on Windows: keep frames on the GPU instead of copying each one
+// through memory. Chromium's capturer spends at most half its time capturing,
+// so the copy capped a 1440p share at about 30 fps in motion (D34).
+// FRIENDSPEAK_LEGACY_CAPTURE=1 turns this off if a share comes out black or frozen.
+if (process.platform === 'win32' && process.env.FRIENDSPEAK_LEGACY_CAPTURE !== '1') app.commandLine.appendSwitch('enable-features', 'WebRtcAllowWgcUsingTexture,ZeroCopyDesktopCapture');
+
 // Single instance: a second launch focuses the existing window
 if (!app.requestSingleInstanceLock()) app.quit();
 
