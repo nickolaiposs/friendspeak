@@ -85,13 +85,19 @@ const DEFAULT_SETTINGS = {
   outputDevice: '',
   videoDevice: '', // camera
   micVolume: 1,
+  masterVolume: 1, // everything this app plays: voices, streams, soundboard, cues
+  voiceVolume: 1, // other people's voices
+  cueVolume: 1, // join/leave/mute/message sounds
   soundboardVolume: 0.8,
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
   echoCancellation: true,
   noiseSuppression: true,
-  userVolumes: {}, // profileId -> 0..2
+  userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
+  userMutes: {}, // profileId -> true: muted for us only
+  muteHotkey: '', // combos like the soundboard's (comboFromEvent)
+  deafenHotkey: '',
   lastChannel: {}, // serverId -> channelId
   showMembers: true,
   hideOffline: false, // collapse the member list's Offline section
