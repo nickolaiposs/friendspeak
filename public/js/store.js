@@ -95,12 +95,7 @@ const DEFAULT_SETTINGS = {
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
-  echoCancellation: true,
-  autoGainControl: true,
-  noiseReduction: 'high', // 'off' | 'standard' (the browser's) | 'high' (RNNoise, D35)
-  noiseGate: 'off', // 'off' | 'auto' (follows the room's noise) | 'manual' (noiseGateThreshold)
-  noiseGateThreshold: -50, // dB
-  speakerMode: false, // turn the mic down while friends are heard, for people on speakers
+  noiseSuppression: true, // the browser's (WebRTC's) own; the only mic processing there is (D38)
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)
@@ -127,8 +122,10 @@ export const settings = {
   get() {
     const saved = read('fs.settings', {});
     const s = { ...DEFAULT_SETTINGS, ...saved };
-    // noiseReduction replaced a "Noise suppression" checkbox: keep an explicit off
-    if (saved.noiseSuppression === false && !saved.noiseReduction) s.noiseReduction = 'off';
+    // Before D38 this was noiseReduction ('off' | 'standard' | 'high'): keep an
+    // explicit off. The old key goes away with the next set().
+    if (saved.noiseReduction) s.noiseSuppression = saved.noiseReduction !== 'off';
+    delete s.noiseReduction;
     return s;
   },
   set(patch) {

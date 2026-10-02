@@ -48,9 +48,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/background.js     camera backgrounds (blur, pictures): MediaPipe person segmentation, composited per frame into the track that is sent (D37)
   models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
-  js/audio.js          Web Audio graph: mic → noise reduction → noise gate → mute/PTT gate → outgoing track, soundboard mixing
-  js/mic-worklet.js    AudioWorklet (audio thread): the mic's noise gate and speaker-mode ducking (D35)
-  vendor/              prebuilt third-party files loaded as-is: the RNNoise worklet and wasm (see its README)
+  js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, mic test loopback, soundboard mixing (D38)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
   js/gogh.js           data: 50 terminal color schemes from Gogh

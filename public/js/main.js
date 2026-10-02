@@ -1,8 +1,8 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
 import { profiles, servers, settings, sounds, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME, GATE_RANGE } from './audio.js';
-import { VoiceClient, MEDIA, TIERS, MODES } from './voice.js';
+import { audio, Level, MAX_USER_VOLUME } from './audio.js';
+import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
@@ -262,6 +262,8 @@ const DMCALL = new DmCalls(DM, {
 
 // Whichever is live, the DM call or the voice channel's call (S.call): its VoiceClient takes the camera and the screen share
 const liveVoice = () => DMCALL.voice || (S.voiceChannel ? S.voice : null);
+// What friends are told about our mic. The mic test (Settings) keeps it from them, so it counts as muted.
+const micOff = () => S.muted || audio.micTest;
 
 // A watched stream's sound plays through its <video>, outside the audio graph
 // (audio.js), so the master volume and the output device are set on each one.
@@ -284,7 +286,7 @@ function startDmCall(peerId, video = false) {
   if (!DM.canSendFiles(peerId)) return toast(`${name} needs to connect with a current friendspeak before you can call them`, 'error'); // calls are sealed (D33)
   if (S.call) leaveVoice(); // one microphone: a DM call or a voice channel, not both
   audio.ensure();
-  DMCALL.sync(S.muted, S.deafened);
+  DMCALL.sync(micOff(), S.deafened);
   DMCALL.start(peerId, video);
 }
 
@@ -293,7 +295,7 @@ async function acceptDmCall() {
   if (c?.state !== 'ringing') return;
   if (S.call) leaveVoice();
   audio.ensure();
-  DMCALL.sync(S.muted, S.deafened);
+  DMCALL.sync(micOff(), S.deafened);
   selectChannel('dm:' + c.peerId);
   await DMCALL.accept();
 }
@@ -468,7 +470,7 @@ function renderDmCall() {
     if (src && head && t.video.paused) t.video.play().catch(() => {});
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = !theirs || S.deafened;
+      t.video.muted = !theirs || S.deafened || audio.micTest;
       t.video.volume = streamVolume(ui.volume);
     }
     t.report?.();
@@ -1159,6 +1161,7 @@ function openSocket(entry, rejoinVoice = null) {
       return;
     }
     Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true });
+    c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     rememberServerLook(c);
     if (viewed()) showServer(c);
     else renderRail();
@@ -1262,8 +1265,9 @@ function openSocket(entry, rejoinVoice = null) {
     if (viewed()) renderMembers();
   });
 
-  socket.on('server', ({ name, icon, game }) => {
+  socket.on('server', ({ name, icon, game, audioQuality }) => {
     Object.assign(c.server, { name, icon });
+    if (audioQuality) c.voice.setAudioQuality((c.server.audioQuality = audioQuality));
     if (game) {
       const wasOn = c.server.game?.enabled;
       c.server.game = game;
@@ -1414,7 +1418,7 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   }
   audio.setMuted(S.muted || S.deafened);
   c.voice.setDeafened(S.deafened);
-  c.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
+  c.socket.emit('voice:state', { muted: micOff(), deafened: S.deafened });
   if (!silent) audio.cue('join');
   renderRail();
   renderChannels();
@@ -1460,8 +1464,8 @@ function syncVoiceState() {
   audio.setMuted(S.muted || S.deafened);
   audio.setMonitor(!S.deafened && settings.get().soundboardMonitor);
   S.voice?.setDeafened(S.deafened);
-  DMCALL.sync(S.muted, S.deafened);
-  for (const c of conns()) if (c.connected) c.socket.emit('voice:state', { muted: S.muted, deafened: S.deafened });
+  DMCALL.sync(micOff(), S.deafened);
+  for (const c of conns()) if (c.connected) c.socket.emit('voice:state', { muted: micOff(), deafened: S.deafened });
   renderUserPanel();
   syncStage();
   renderDmCall();
@@ -4091,7 +4095,7 @@ function syncStage() {
     }
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = t.sid === c.sid || S.deafened;
+      t.video.muted = t.sid === c.sid || S.deafened || audio.micTest;
       t.video.volume = streamVolume(st.volumes.get(t.sid) ?? 1);
     }
   }
@@ -4623,87 +4627,57 @@ function settingsVoice(body) {
     outSel.value = st.outputDevice;
     camSel.value = st.videoDevice;
   });
+  let busy = false; // the mic is starting
+  let closed = false;
   const restartMic = async () => {
     if (!liveVoice() && !testing) return;
+    busy = true;
     try {
       await audio.startMic();
       if (liveVoice()) liveVoice().micError = null;
     } catch (e) {
       toast(e.message, 'error');
     }
+    busy = false;
   };
   const meter = h('div', { class: 'meter' }, h('div', { class: 'meter-fill' }));
+  // Mic test: your mic is played back to you and everything else goes quiet
+  // (audio.setMicTest). It also keeps the mic from friends, who see you muted.
   let testing = false;
-  const testBtn = h('button', { class: 'btn small ghost' }, liveVoice() ? 'Mic active' : 'Test mic');
+  const testBtn = h('button', { class: 'btn small ghost' }, 'Test mic');
+  const setTest = (on) => {
+    testing = on;
+    audio.setMicTest(on);
+    testBtn.textContent = on ? 'Stop test' : 'Test mic';
+    syncVoiceState();
+  };
+  const stopTest = () => {
+    setTest(false);
+    if (!liveVoice()) audio.stopMic(); // the test started it
+  };
   testBtn.onclick = async () => {
-    if (liveVoice()) return;
-    if (testing) {
-      audio.stopMic();
-      testing = false;
-      testBtn.textContent = 'Test mic';
-      return;
-    }
+    if (testing) return stopTest();
+    if (busy) return;
+    busy = true;
     try {
-      await audio.startMic();
-      testing = true;
-      testBtn.textContent = 'Stop test';
+      if (!audio.micStream) await audio.startMic();
+      if (closed) !liveVoice() && audio.stopMic();
+      else setTest(true);
     } catch (e) {
       toast(e.message, 'error');
     }
+    busy = false;
   };
-  // Noise gate, like Discord's input sensitivity: the bar is the mic's level
-  // before the gate, and the slider on it is the level the gate opens at. In
-  // automatic mode the slider moves on its own, following the room's noise.
-  const gatePct = (db) => Math.min(100, Math.max(0, ((db - GATE_RANGE.min) / (GATE_RANGE.max - GATE_RANGE.min)) * 100)) + '%';
-  const gateVal = h('span', {});
-  const gateSlider = h('input', {
-    type: 'range',
-    ...GATE_RANGE,
-    step: 1,
-    value: st.noiseGateThreshold,
-    'aria-label': 'Noise gate threshold',
-    oninput: (e) => (settings.set({ noiseGateThreshold: +e.target.value }), audio.applyMicProcessing(), syncGate()),
-  });
-  const gateBox = h('div', { class: 'gate' }, h('div', { class: 'gate-track' }), h('div', { class: 'gate-level' }), gateSlider);
-  const micNote = h('p', { class: 'muted small' });
-  const syncGate = () => {
-    const { noiseGate: mode, noiseGateThreshold } = settings.get();
-    const live = audio.micStream ? audio.micLevel : null;
-    const threshold = mode === 'manual' ? noiseGateThreshold : mode === 'auto' ? live?.threshold : null;
-    gateBox.classList.toggle('off', threshold == null);
-    gateBox.classList.toggle('closed', !!live && !live.open);
-    gateBox.style.setProperty('--thr', threshold == null ? '0%' : gatePct(threshold));
-    gateBox.style.setProperty('--lvl', live ? gatePct(live.level) : '0%');
-    gateSlider.disabled = mode !== 'manual';
-    if (mode === 'auto' && threshold != null) gateSlider.value = threshold;
-    const text = threshold == null ? '' : `opens above ${Math.round(threshold)} dB`.replace('-', '−');
-    if (gateVal.textContent !== text) gateVal.textContent = text;
-    const note = micStatus();
+  const micNote = h('p', { class: 'muted small', hidden: true });
+  const iv = setInterval(() => {
+    const lvl = audio.micStream ? Level(audio.micAnalyser) : 0;
+    meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
+    if (testing && !busy && !audio.micStream) setTest(false); // the call it ran in ended, and took the mic with it
+    // A device or OS can refuse a constraint without an error
+    const info = audio.micInfo;
+    const note = info?.want.noiseSuppression && info.got.noiseSuppression === false ? 'This microphone or system didn’t apply noise suppression.' : '';
     if (micNote.textContent !== note) micNote.textContent = note;
     micNote.hidden = !note;
-  };
-  // What the running mic really applies: a device or OS can refuse a constraint without an error
-  const micStatus = () => {
-    const info = audio.micInfo;
-    if (!info) return 'Join a voice channel or press Test mic to see your level here.';
-    const notes = [];
-    if (info.fallback) notes.push('High noise reduction couldn’t start on this device, so the standard one is used.');
-    const refused = [
-      ['echoCancellation', 'echo cancellation'],
-      ['noiseSuppression', 'noise suppression'],
-      ['autoGainControl', 'automatic gain control'],
-    ]
-      .filter(([k]) => info.want[k] && info.got[k] === false)
-      .map(([, label]) => label);
-    if (refused.length) notes.push(`This microphone or system didn’t apply ${refused.join(' or ')}.`);
-    if (!info.got.echoCancellation) notes.push('Echo cancellation is off: use headphones, or friends will hear themselves.');
-    if (audio.micLevel?.ducked) notes.push('Speaker mode is holding your mic down.');
-    return notes.join(' ');
-  };
-  const iv = setInterval(() => {
-    const lvl = audio.selfAnalyser ? Level(audio.selfAnalyser) : 0;
-    meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
-    syncGate();
   }, 60);
 
   const pttBtn = h('button', { class: 'btn ghost small hotkey-btn' }, st.pttKey.replace(/^Key|^Digit/, ''));
@@ -4761,6 +4735,7 @@ function settingsVoice(body) {
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
     h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
+    h('p', { class: 'muted small' }, 'Test mic plays your microphone back to you. While it runs you hear nobody else, and nobody hears you. Use headphones, or your speakers feed back into the mic.'),
     h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
@@ -4772,19 +4747,8 @@ function settingsVoice(body) {
     h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
     h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
-    h('label', { class: 'field' }, h('span', {}, 'Noise reduction'), select('noiseReduction', { off: 'Off', standard: 'Standard', high: 'High (RNNoise)' }, restartMic)),
-    h('p', { class: 'muted small' }, 'Standard is the browser’s own filter. High runs a neural network on your mic that also takes out keyboards, fans and other noise that isn’t a voice.'),
-    h(
-      'div',
-      { class: 'field' },
-      h('span', {}, 'Noise gate ', gateVal),
-      h('div', { class: 'row' }, select('noiseGate', { off: 'Off', auto: 'Automatic', manual: 'Manual' }, () => (audio.applyMicProcessing(), syncGate())), gateBox)
-    ),
-    h('p', { class: 'muted small' }, 'The gate silences your mic while it is quieter than the marker. The bar shows how loud your mic is: set the marker above your background noise and below your voice, or let Automatic follow the room.'),
-    check('echoCancellation', 'Echo cancellation', restartMic),
-    check('autoGainControl', 'Automatic gain control', restartMic),
-    check('speakerMode', 'Speaker mode: turn my mic down while friends are talking', () => audio.applyMicProcessing()),
-    h('p', { class: 'muted small' }, 'Echo cancellation works best with headphones. If friends still hear themselves through your speakers, speaker mode stops it, at the cost of talking over each other.'),
+    check('noiseSuppression', 'Noise suppression', restartMic),
+    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. Nothing else is done to your voice. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
     micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
@@ -4804,10 +4768,11 @@ function settingsVoice(body) {
     check('cues', 'Play join/leave/mute sounds')
   );
   return () => {
+    closed = true;
     clearInterval(iv);
     preview.stop();
     picker.dispose();
-    if (testing && !liveVoice()) audio.stopMic();
+    if (testing) stopTest();
   };
 }
 
@@ -4876,6 +4841,8 @@ function settingsAbout(body) {
   return () => ((aboutRefresh = null), S.socket?.off('server:update', draw));
 }
 
+const VOICE_QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', standard: 'Standard (64 kbps)', low: 'Low (32 kbps)' };
+
 function settingsServer(body) {
   if (!S.connected) return body.append(h('p', { class: 'muted' }, 'Connect to a server to manage it.'));
   const nameIn = h('input', { placeholder: 'party_parrot', maxlength: 32 });
@@ -4931,10 +4898,15 @@ function settingsServer(body) {
     if (!(await update({ game: gameToggle.checked }))) drawGame();
   };
   drawGame();
+  // Voice quality: the bitrate everyone sends their voice at in this server's channels
+  const quality = h('select', { onchange: async () => (await update({ audioQuality: quality.value })) || drawQuality() }, Object.entries(VOICE_QUALITIES).map(([k, label]) => h('option', { value: k }, label)));
+  const drawQuality = () => (quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max');
+  drawQuality();
   const onServer = () => {
     if (document.activeElement !== serverName) serverName.value = S.server.name;
     drawIcon();
     drawGame();
+    drawQuality();
   };
   S.socket.on('server', onServer);
 
@@ -4982,6 +4954,9 @@ function settingsServer(body) {
       h('label', { class: 'field grow' }, h('span', {}, 'Server name'), serverName),
       h('button', { class: 'btn', style: { alignSelf: 'flex-end' }, onclick: saveName }, 'Save')
     ),
+    h('h3', {}, 'Voice'),
+    h('label', { class: 'field' }, h('span', {}, 'Voice quality'), quality),
+    h('p', { class: 'muted small' }, 'How much data everyone’s voice uses in this server’s voice channels. Each person sends their voice to every other person in the channel, so lower it if a big channel strains someone’s upload. Anyone connected can change it.'),
     h('h3', {}, 'Games'),
     h('label', { class: 'check-row' + (gameToggle.disabled ? ' disabled' : '') }, gameToggle, h('span', {}, 'Club Penguin')),
     gameNote,
