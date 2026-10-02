@@ -43,6 +43,8 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/dm.js             peer-to-peer direct messages (DirectMessages), signaled via /dm on bookmarked servers
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
   js/store.js          localStorage (profiles, servers, settings) + IndexedDB (sounds, DMs)
+  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
+  js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)

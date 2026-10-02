@@ -233,7 +233,7 @@ export class DirectMessages {
   addContact(p) {
     let c = this.contacts.get(p.id);
     if (!c) {
-      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#5865f2', avatar: '', status: '', last: 0, unread: 0, outbox: [] };
+      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#8b6cf6', avatar: '', status: '', last: 0, unread: 0, outbox: [] };
       this.contacts.set(p.id, c);
     }
     Object.assign(c, { name: p.name || c.name, color: p.color || c.color, avatar: p.avatar ?? c.avatar, status: p.status ?? c.status });
