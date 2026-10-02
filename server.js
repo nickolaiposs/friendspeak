@@ -102,7 +102,7 @@ async function startServer(opts = {}) {
     return {
       id: str(p.id, 64) || id(),
       name: str(p.name, 32).trim() || 'anon',
-      color: isHexColor(p.color) ? p.color : '#5865f2',
+      color: isHexColor(p.color) ? p.color : '#8b6cf6',
       avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : str(p.avatar, 16), // image or emoji
       banner: isImageRef(p.banner, MAX_BANNER_BYTES) || isHexColor(p.banner) ? p.banner : '', // profile background: image or color
       status: str(p.status, 64),
