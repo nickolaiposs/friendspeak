@@ -273,3 +273,23 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** while the repo is private, servers need `GITHUB_TOKEN` (and Watchtower `GHCR_USER`/`GHCR_TOKEN`), and installed apps can't see releases at all: in-app updates start working when the repo goes public. Releases use GitHub Actions minutes, and macOS minutes count 10× on private repos. Watchtower recreates the container from the same config, so compose changes (new env vars) still need a stack redeploy. A server and its clients can briefly run different versions, which the protocol has to tolerate (add fields; don't repurpose them).
 **Alternatives:** CI deploying over SSH on every push (no maintenance window, and CI would need credentials for every host); giving friendspeak the Docker socket (root-equivalent access for a chat server); Watchtower polling on its own schedule (no warnings, and no tie to a published release); a signed auto-updater for macOS (needs the $99/yr Apple Developer ID, so later).
+
+## D32: Calls in DMs are signaled over the DM link and reuse the voice-channel media code · Active
+**Context:** Friends wanted to call each other from a conversation, with camera and screen sharing, without meeting in a server's voice channel.
+**Decision:**
+- A call is between the two people in a DM, one call at a time. Ringing and the WebRTC handshake travel over the DM data channel (D28) as `{ t: 'call', d }`. The server isn't involved beyond the DM rendezvous, and there are no server changes.
+- The media uses its own peer connection, not the DM one. The DM connection never renegotiates and is dropped and rebuilt freely; a call adds and removes tracks all the time.
+- That connection is driven by the existing `VoiceClient`, through an adapter that looks like the chat socket. Mute, push-to-talk, the soundboard, cameras, screen shares, codec preferences and per-viewer encoder sizing are shared with voice channels (D5, D22) instead of written twice.
+- With one viewer there is nothing to save by opting in, so each side receives whatever the other shares.
+- A call and a voice channel don't run together: there is one microphone graph. Starting or accepting a call leaves the voice channel, and joining a voice channel hangs up.
+- The call view lives in the conversation. Elsewhere in the app the call goes on, with a panel in the sidebar; the video is paused for you until you come back.
+- Results are written into the thread as local-only notes ("Call · 4:05", "Missed call"), each side writing its own.
+
+**Consequences:**
+- Calls inherit the DM link's limits: both people online, reachable through a shared bookmarked server, no TURN (D5), and no stronger proof of who is calling than D28 gives.
+- An app from before calls ignores the ring, so the caller hears ringing and then "didn't answer".
+- If the DM link drops mid-call, the media usually keeps flowing. Signals (camera on, a new share) wait in a queue until the link is back. The call ends after 20 s without media.
+- You can't be called while offline, and a call that rang while your app was closed leaves no trace on your side.
+- No group calls: that's what voice channels are for.
+
+**Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
