@@ -1,6 +1,8 @@
 import { h, fileToDataUrl, debounce } from '../util.js';
 import { load } from '../ui.js';
 
+const QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', standard: 'Standard (64 kbps)', low: 'Low (32 kbps)' };
+
 export default {
   id: 'settings',
   title: 'Server settings',
@@ -31,6 +33,8 @@ export default {
       const link = h('input', { id: 'slink', type: 'url', placeholder: 'https://example.com/icon.png', autocomplete: 'off' });
       const g = d.game || {};
       const toggle = h('input', { id: 'sgame', type: 'checkbox', checked: !!g.enabled, disabled: !g.available, onChange: () => patch({ game: toggle.checked }, toggle.checked ? 'Game turned on.' : 'Game turned off.') });
+      const quality = h('select', { id: 'squality', onChange: () => patch({ audioQuality: quality.value }, 'Voice quality saved.') },
+        Object.entries(QUALITIES).map(([k, label]) => h('option', { value: k, selected: k === (QUALITIES[d.audioQuality] ? d.audioQuality : 'max') }, label)));
       return h('div', { class: 'stack' },
         h('form', { class: 'card stack', onSubmit: (e) => { e.preventDefault(); patch({ name: name.value.trim() }, 'Name saved.'); } },
           h('div', { class: 'field' }, h('label', { for: 'sname' }, 'Server name'), name),
@@ -42,6 +46,9 @@ export default {
               d.icon && h('button', { type: 'button', class: 'btn danger small', onClick: () => patch({ icon: '' }, 'Icon removed.') }, 'Remove'))),
           h('form', { class: 'field', onSubmit: (e) => { e.preventDefault(); if (link.value.trim()) patch({ icon: link.value.trim() }, 'Icon updated.'); } },
             h('label', { for: 'slink' }, 'Or an https:// image link'), h('div', { class: 'row' }, h('div', { class: 'grow' }, link), h('button', { type: 'submit', class: 'btn ghost' }, 'Use link')))),
+        h('div', { class: 'card stack' },
+          h('div', { class: 'field' }, h('label', { for: 'squality' }, 'Voice quality'), quality),
+          h('span', { class: 'small muted' }, 'The bitrate everyone sends their voice at in the voice channels. Each person sends to every other person in a channel.')),
         h('div', { class: 'card stack' },
           h('label', { class: 'row', for: 'sgame' }, toggle, 'Penguin game'),
           !g.available && h('span', { class: 'small muted' }, g.reason || 'Not available on this server.')),

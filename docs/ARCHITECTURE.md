@@ -127,7 +127,7 @@ Every event except `hello` requires a successful `hello` first. `on()` inside `a
 | Event | Payload | Ack | Effect |
 |---|---|---|---|
 | `hello` | `{ profile, password }` | `{ ok, sid, server: { name, icon, channels, emojis, profiles, bans, roles, memberRoles, game, update }, users }` or `{ error, banned? }` | refused if the profile id or IP is banned. Registers the socket; broadcasts `profile`, `users`. **One session per profile:** any older socket with the same profile id is taken out of voice (`voice:peer-left`), sent `session:replaced` and disconnected. A reconnect after a network drop therefore never shows the person twice, even though the dead socket would otherwise linger until its ping timeout (~45 s). The replaced client doesn't auto-reconnect; it shows a message instead. |
-| `server:update` | `{ name?, icon?, game? }` (`icon: ''` removes it; ≤512KB data image or an https link. `game: true/false` switches the game on or off; switching it on is refused while the game isn't available, e.g. assets missing) | `{ ok }` / `{ error }` | `server { name, icon, game }` (and `users` when the game is switched off) |
+| `server:update` | `{ name?, icon?, game?, audioQuality? }` (`icon: ''` removes it; ≤512KB data image or an https link. `game: true/false` switches the game on or off; switching it on is refused while the game isn't available, e.g. assets missing. `audioQuality`: `low`, `standard`, `high` or `max`, the voice bitrate in this server's channels, D38) | `{ ok }` / `{ error }` | `server { name, icon, game, audioQuality }` (and `users` when the game is switched off) |
 | `profile:update` | profile | none | `profile`, `users` |
 | `msg:history` | `{ channelId, before? }` | `{ messages }` (≤50, oldest first) | none |
 | `msg:send` | `{ channelId, text?, gif?, replyTo?, files?: fileId[] }` | `{ ok }` / `{ error }` | `msg:new`; `files:new` if files were attached |
@@ -227,7 +227,7 @@ A web page at `/admin`, served by the server itself, with a JSON API and one eve
 | `GET /admin/api/channels` | session | `{ channels }` in server order. Text: `{ id, name, type, messages, lastMessage, files }`. Voice: `{ id, name, type, occupants: [{ sid, id, name, color, avatar, muted, deafened, sharing, camera }] }`. Read-only |
 | `GET /admin/api/game` | session | `{ available, enabled, reason, world, players, maxUsers, off }`. `players` is the number in the game world, null when it isn't running. `off` is `GAME=off` |
 | `GET /admin/api/server` | session | `{ name, icon, game: { available, enabled, reason, world } }` |
-| `PATCH /admin/api/server` | session | any of `{ name, icon, game }`, as the app's `server:update` (`icon`: ≤512 KB data image, https link or `""`; `game`: boolean) → `{ ok }`. 400 `Nothing to change` or the action's error. Goes through `actions.updateServer` |
+| `PATCH /admin/api/server` | session | any of `{ name, icon, game, audioQuality }`, as the app's `server:update` (`icon`: ≤512 KB data image, https link or `""`; `game`: boolean; `audioQuality`: `low`, `standard`, `high` or `max`) → `{ ok }`. 400 `Nothing to change` or the action's error. Goes through `actions.updateServer` |
 | `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke`, `user.remove`, `ban.add`, `ban.remove`, `role.create`, `role.update`, `role.delete`, `role.assign`, `update.check`, `update.now`, `update.cancel`, `update.settings`, `server.update`. `detail` has names, not ids, with control characters replaced by spaces |
 
 The user, ban and role routes call the same `actions` object in `server.js` as the chat sockets (`ban:add`, `member:remove`, `ban:remove`, `server:update`), so the rules and the broadcasts to the app are identical; `admin.js` only validates the URL, audits and answers. The `change` topics for them are `users` (connected, left, voice) and `state` (profiles, bans, roles). Timestamps are milliseconds since the epoch. "session" means a valid session or a local request (then the actor is `"local"`).
@@ -315,9 +315,9 @@ Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`
 
 ```mermaid
 flowchart LR
-  Mic["getUserMedia<br/>(browser echo cancellation,<br/>noise suppression, auto gain)"] -- "High only" --> RNN["RNNoise<br/>(AudioWorklet + WASM)"] --> NG["mic-worklet.js<br/>(noise gate, speaker mode)"]
-  Mic --> NG
-  NG --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT)"]
+  Mic["getUserMedia<br/>(noise suppression or nothing)"] --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT / mic test)"]
+  MicGain --> MicA["micAnalyser<br/>(Settings level meter)"]
+  MicGain --> Loop["loop<br/>(mic test only)"] --> Master
   Gate --> Out["MediaStreamDestination<br/>= outgoing track"]
   Gate --> SelfA["analyser<br/>(own speaking ring)"]
   SB["soundboard clips<br/>(per-sound gain)"] --> Bus["sbBus<br/>(soundboard volume)"]
@@ -329,15 +329,12 @@ flowchart LR
   Remote --> PeerA["analyser<br/>(their speaking ring)"]
   UserGain -- "above 100%: limiter" --> VoiceBus["voiceBus<br/>(voices volume)"] --> Master
   Cues["cues"] --> CueBus["cueBus<br/>(notification volume)"] --> Master
-  Master -. "sidechain (speaker mode)" .-> NG
 ```
 
-- **Mic processing (D35):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`; the browser resamples for other devices). `audio.startMic()` builds the mic chain from four settings, and `audio.micInfo` records what the track really applied (`track.getSettings()`), which Settings → Voice shows when a device or OS refused something.
-  - `noiseReduction`: `off`, `standard` (the browser's `noiseSuppression` constraint) or `high`: RNNoise in an `AudioWorkletNode`, with the browser's suppression turned off so the two don't fight. The worklet and its two `.wasm` builds (SIMD and plain) are prebuilt files in `public/vendor/web-noise-suppressor/` (see its README for the origin and licences); `audio.processors()` fetches the wasm, validates it and hands it to the worklet. If that fails, or the context isn't at 48 kHz, `high` falls back to `standard`. It adds about 21 ms and well under 1% of a core.
-  - `noiseGate` (`off`, `auto`, `manual`) and `noiseGateThreshold` (dB): `mic-worklet.js` passes the mic while its level is above the threshold (5 dB hysteresis, 250 ms hold, 2 ms open and 60 ms close ramps). `auto` puts the threshold 10 dB above a tracked noise floor, between −60 and −25 dB. The processor posts `{ level, threshold, open, ducked }` about 45 times a second (`audio.micLevel`), which draws the level bar under the slider in Settings.
-  - `speakerMode`: the same processor takes `master` (everything the app plays) as a second input and turns the mic down 18 dB while that is above −50 dB, with a 300 ms hold. Screen share audio plays through `<video>` elements and isn't part of it.
-  - `echoCancellation` and `autoGainControl` are the browser's, as constraints.
-  - Only the mic passes through these stages. The soundboard joins after them, at `outDest`. The gate and speaker mode settings apply live (`audio.applyMicProcessing()`); the others restart the mic.
+- **Mic (D38):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`, the rate Opus sends; the browser resamples for other devices). `audio.startMic()` asks for the mic with `echoCancellation` and `autoGainControl` off and `noiseSuppression` from the one setting (`settings.noiseSuppression`, on by default). Nothing else processes it. `audio.micInfo` records what the track really applied (`track.getSettings()`), and Settings → Voice says when a device or OS refused noise suppression. Changing the setting restarts the mic; the outgoing track stays the same, so nothing renegotiates. A saved `noiseReduction: 'off'` from before D38 reads as noise suppression off.
+- **Mic test (Settings → Voice):** `audio.setMicTest(true)` opens `loop` (the mic after its volume, straight to `master`), sets `voiceBus` and the soundboard `monitor` to 0 and closes `gate`, so you hear only yourself and friends hear nothing. `main.js` also mutes screen share `<video>` elements and reports you as muted (`micOff()` in `voice:state` and DM call state) while it runs. It works in or out of a call (out of one it starts the mic and stops it after). It ends when you press Stop, leave the Voice tab or close Settings, or when the call it ran in ends. Volume changes during the test don't undo it (`setVoiceVolume`, `setMonitor` respect `audio.micTest`).
+- **Opus (D38):** `tuneOpus()` in `voice.js` writes `stereo=1; sprop-stereo=1; maxaveragebitrate=510000; maxplaybackrate=48000; useinbandfec=1; usedtx=0; cbr=0` into the fmtp line of every Opus payload type. It runs on our local description (`setLocal`: `createOffer`/`createAnswer`, edited, then `setLocalDescription`; the plain SDP is the fallback if a browser refuses the edit) and on every remote description before `setRemoteDescription`. The receiver's fmtp is what a sender encodes to, so a friend on an older app sends us this, and we send it to them. Screen share audio gets stereo from it too, under its own 192 kbps cap.
+- **Voice quality (per server):** `VoiceClient.setAudioQuality(key)` caps the voice sender's `maxBitrate` (`AUDIO_QUALITY`: `low` 32, `standard` 64, `high` 128, `max` 510 kbps) on every peer, live, with no renegotiation (`capVoice`, also run after each negotiation). The key comes from the server's `audioQuality` (hello state and the `server` event); a server without the field means `max`. DM calls always use `max`. Each sender caps itself, so a friend on an older app keeps sending at `max`.
 
 - **Full mesh:** the newcomer calls everyone already in the channel (`voice:join` ack lists their socket ids). Existing members answer.
 - **Signaling order:** each peer has a promise chain (`enqueue`), so ICE candidates never race the SDP.

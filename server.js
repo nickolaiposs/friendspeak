@@ -35,6 +35,7 @@ async function startServer(opts = {}) {
   const MAX_AVATAR_BYTES = 384 * 1024;
   const MAX_BANNER_BYTES = 640 * 1024; // profile background
   const MAX_ICON_BYTES = 512 * 1024;
+  const AUDIO_QUALITIES = ['low', 'standard', 'high', 'max']; // voice quality levels, lowest first
   const MAX_ROLES = 50;
   const MAX_ROLES_PER_MEMBER = 10;
   const MAX_ROLE_NAME = 32;
@@ -79,6 +80,7 @@ async function startServer(opts = {}) {
       bans: [], // { id, profileId, name, ip, by, ts } (ip is never sent to clients)
       files: [], // uploaded files: { id, name, size, type, channelId, messageId, by, byName, ts }
       gameEnabled: true, // game on/off, from Settings → Server (only takes effect with assets)
+      audioQuality: 'max', // voice bitrate in the voice channels, from Settings → Server: a key of AUDIO_QUALITY in the client's voice.js (D38)
       roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
@@ -406,10 +408,14 @@ async function startServer(opts = {}) {
     }));
   }
 
+  // A hand-edited state.json may hold anything
+  const audioQuality = () => (AUDIO_QUALITIES.includes(state.audioQuality) ? state.audioQuality : 'max');
+
   function publicState() {
     return {
       name: state.name,
       icon: state.icon,
+      audioQuality: audioQuality(),
       channels: state.channels,
       emojis: state.emojis,
       profiles: state.profiles,
@@ -652,7 +658,7 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
-      updateServer({ name, icon, game }) {
+      updateServer({ name, icon, game, audioQuality: quality }) {
         if (name !== undefined) {
           name = str(name, 40).trim();
           if (!name) return { error: 'Server name required' };
@@ -662,13 +668,17 @@ async function startServer(opts = {}) {
           if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
           state.icon = icon || '';
         }
+        if (quality !== undefined) {
+          if (!AUDIO_QUALITIES.includes(quality)) return { error: 'Voice quality must be one of ' + AUDIO_QUALITIES.join(', ') };
+          state.audioQuality = quality;
+        }
         if (game !== undefined) {
           if (game && !gameRef.current?.available) return { error: gameInfo().reason || 'The game is not available on this server' };
           state.gameEnabled = !!game;
           if (!game) for (const u of users.values()) u.playing = false;
         }
         save();
-        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo() });
+        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo(), audioQuality: audioQuality() });
         if (game === false) broadcastUsers();
         return { ok: true };
       },
@@ -891,8 +901,8 @@ async function startServer(opts = {}) {
 
       // --- server name / icon (anyone can change them, D3) ---
 
-      on('server:update', ({ name, icon, game }, ack) => {
-        ack(actions.updateServer({ name, icon, game }));
+      on('server:update', ({ name, icon, game, audioQuality }, ack) => {
+        ack(actions.updateServer({ name, icon, game, audioQuality }));
       });
 
       // --- channels ---
@@ -1099,6 +1109,7 @@ async function startServer(opts = {}) {
         actions,
         usage,
         gameInfo,
+        audioQuality,
         updater,
         saveUpdateSettings: (o) => {
           state.updateSettings = o;
