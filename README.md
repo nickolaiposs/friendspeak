@@ -127,8 +127,8 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `GAME_MAX_USERS`| `300`         | Player limit for the world                                     |
 | `GAME_SPAWN`    | `100` (Town)  | Room new logins start in; `0` = random, like upstream Yukon    |
 | `GAME_DEBUG`    | off           | `1` = log every game packet                                    |
-| `AUTO_UPDATE`   | `off`         | `notify` = check for new releases and tell everyone on the server. `on` = also install them in the maintenance window (**Docker only**, see [Automatic updates](#automatic-updates)) |
-| `MAINTENANCE_CRON` | `0 6 * * 0` | When updates are installed, in cron format (minute hour day month weekday) and the server's local time (`TZ`). Default: Sundays at 06:00 |
+| `AUTO_UPDATE`   | `off`         | `notify` = check for new releases and tell everyone on the server. `on` = also install them in the maintenance window (**Docker only**, see [Automatic updates](#automatic-updates)). The admin dashboard can change it, and then takes precedence |
+| `MAINTENANCE_CRON` | `0 6 * * 0` | When updates are installed, in cron format (minute hour day month weekday) and the server's local time (`TZ`). Default: Sundays at 06:00. The admin dashboard can change it, and then takes precedence |
 | `MAINTENANCE_WARN` | `24h`      | How long before the window users see the warning (`90m`, `2d`, …) |
 | `GITHUB_TOKEN`  | none          | Lets the server read releases while the GitHub repo is private |
 | `ADMIN_KEY`     | generated     | Admin key for the [admin dashboard](#admin-dashboard) (16+ characters). If unset, a key is generated and printed once on first start |
@@ -147,7 +147,7 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 - **Channels:** each channel's message and file counts, and who is in each voice channel. Read-only: manage channels in the app.
 - **Storage:** space used against `MAX_STORAGE`, usage by channel, the largest files and the size of the data files. Read-only.
 - **Penguin game:** whether the game is available and on, the world, and how many players are in it.
-- **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now** (see [Automatic updates](#automatic-updates)).
+- **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now**, and settings for the update mode and the maintenance window (see [Automatic updates](#automatic-updates)).
 - **Server settings:** the server's name, icon and the game switch, like **Settings → Server** in the app.
 - **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
 - **Admin keys:** create a named key for each admin and revoke it.
@@ -237,6 +237,8 @@ Only the watchtower container gets the Docker socket, and it only touches contai
 Examples: `0 4 * * *` is every day at 04:00. `30 3 * * 1-5` is weekdays at 03:30. `0 6 1 * *` is the 1st of each month.
 
 **From the dashboard.** With the Watchtower sidecar running and `WATCHTOWER_TOKEN` set, the **Updates** page has an **Update now** button when a newer version is out. It works with `AUTO_UPDATE=notify` too. Everyone on the server gets a two-minute warning, then the server updates as in step 3 above. You can cancel during the countdown. Without the sidecar the page shows the manual steps instead, and outside Docker the button isn't offered.
+
+**Mode and window from the dashboard.** The **Updates** page also sets the update mode (off, notify or on) and the maintenance window (a cron expression, with a preview of the next runs and the server's time zone). It applies at once, with no restart. A value set there takes precedence over `AUTO_UPDATE` and `MAINTENANCE_CRON` and is kept across restarts, so changing the variable afterwards does nothing until you press **Reset** next to it, which brings back the environment value. The page shows both. `on` still needs the Docker image and `WATCHTOWER_TOKEN`; without them the server stays on notify.
 
 To update by hand instead, set `AUTO_UPDATE=notify` (or pin `FRIENDSPEAK_IMAGE` to a version), then click **Update the stack** with "Re-pull image" checked. Hosts using `npm start` can use `AUTO_UPDATE=notify` and `git pull && npm install` themselves.
 

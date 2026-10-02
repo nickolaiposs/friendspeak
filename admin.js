@@ -544,6 +544,32 @@ function createAdmin(ctx) {
   const updater = ctx.updater;
   api.get('/updates', (_req, res) => res.json({ ...updater.status(), docker: !!ctx.inDocker }));
 
+  api.get('/updates/preview', (req, res) => {
+    // Checked on every keystroke: a schedule that doesn't parse is an answer, not a failed request
+    const r = updater.preview(typeof req.query.cron === 'string' ? req.query.cron : undefined);
+    res.json(r.error ? { ok: false, error: r.error } : r);
+  });
+
+  // mode: off | notify | on, cron: 5 fields; null removes the override (back to AUTO_UPDATE / MAINTENANCE_CRON)
+  api.patch('/updates', async (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const patch = {};
+    for (const k of ['mode', 'cron']) {
+      if (b[k] === undefined) continue;
+      if (b[k] !== null && typeof b[k] !== 'string') return res.status(400).json({ error: k === 'mode' ? 'Mode must be off, notify or on' : 'Invalid schedule: expected text' });
+      patch[k] = b[k];
+    }
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+    const r = await updater.configure(patch);
+    answer(res, r.error ? r : { ok: true, update: { ...updater.status(), docker: !!ctx.inDocker } }, () => {
+      ctx.saveUpdateSettings(updater.overrides());
+      const what = [];
+      if (patch.mode !== undefined) what.push(patch.mode === null ? 'mode reset' : `mode ${patch.mode}`);
+      if (patch.cron !== undefined) what.push(patch.cron === null ? 'window reset' : `window "${updater.overrides().cron}"`);
+      logAction(req, 'update.settings', what.join(', '));
+    });
+  });
+
   api.post('/update/check', async (req, res) => {
     const r = await updater.checkNow();
     answer(res, r.error ? r : { ok: true, update: r }, () => logAction(req, 'update.check', r.latest ? `${r.latest.version} available` : 'up to date'));
