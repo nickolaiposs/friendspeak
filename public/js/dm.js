@@ -36,6 +36,7 @@ const MAX_TEXT = 4000;
 const MAX_HELLO = 150 * 1024; // data channel messages above ~256KB aren't reliable; drop the avatar instead
 const MAX_BLOB = 160 * 1024; // what a mailbox accepts (MAX_MAIL_BLOB in server.js)
 const MAX_GUEST_RELAYS = 8;
+const OPEN_AFTER = 12e3; // a connection that hasn't opened by now is dropped, so the next attempt starts fresh
 const MAIL_AFTER = 8e3; // online but no connection yet (strict NATs): use the mailbox after this long
 const MAIL_AGAIN = 14 * 864e5; // mailed and never acked: leave it again
 const CHUNK = 16 * 1024;
@@ -257,6 +258,14 @@ export class DirectMessages {
         peer.via.emit('signal', { to: peerId, data: { sdp: pc.localDescription } });
       });
     pc.onconnectionstatechange = () => ['failed', 'closed'].includes(pc.connectionState) && this.lost(peerId, pc);
+    // A connection can sit in "new" forever without failing (a freshly started
+    // app sometimes gathers no ICE candidates for its first one), and nothing
+    // would ever retry it. Give up on it and try again if something is waiting.
+    setTimeout(() => {
+      if (peer.open || this.peers.get(peerId)?.pc !== pc) return;
+      this.lost(peerId, pc);
+      this.flush(peerId);
+    }, OPEN_AFTER);
     return peer;
   }
 
