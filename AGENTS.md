@@ -41,6 +41,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/main.js           UI, app state (object S), socket handlers, settings, game view
   js/voice.js          WebRTC mesh (VoiceClient)
   js/dm.js             peer-to-peer direct messages (DirectMessages), signaled via /dm on bookmarked servers
+  js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, soundboard mixing
   js/store.js          localStorage (profiles, servers, settings) + IndexedDB (sounds, DMs)
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing

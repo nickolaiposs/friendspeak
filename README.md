@@ -5,6 +5,7 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 
 - **Text channels:** markdown (`# heading` / `##` / `###`, `-# small text`, `**bold**`, `*italic*`, `__underline__`, `~~strike~~`, `||spoiler||`, `- lists`, `1. lists`, `> quotes`, `` `code` ``, ```` ``` ```` blocks), replies, edits, deletes, reactions, @mentions, typing indicators, and history that persists on the server.
 - **Direct messages:** peer to peer, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and open without leaving the server you're connected to (voice keeps going). Messages go straight between the two devices over an encrypted WebRTC connection and are stored only there; servers you have bookmarked just help you find each other. Messages to someone who's offline are delivered the next time you're both online. Text, GIFs, replies, edits, deletes and reactions work; files don't.
+- **Calls in DMs:** the phone and camera buttons at the top of a conversation start a voice or video call with that friend. During a call you can mute, turn on your camera, share your screen (with audio) and use the soundboard, like in a voice channel. Calls are peer to peer, like the messages. You can keep browsing servers and other conversations while you're in one; joining a voice channel hangs up, and starting or accepting a call leaves the voice channel.
 - **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible).
 - **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
 - **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
@@ -209,6 +210,7 @@ public/css/         Styles
 public/js/main.js   UI and app logic
 public/js/voice.js  WebRTC mesh voice
 public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels)
+public/js/call.js   Calls in direct messages (voice, camera, screen share)
 public/js/audio.js  Web Audio graph: mic, mute/PTT gate, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds and DMs (IndexedDB)
 public/js/util.js   Helpers: markdown, avatars, formatting
