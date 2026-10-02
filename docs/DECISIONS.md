@@ -285,3 +285,14 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** a new color in the stylesheet must be one of the variables or a `color-mix()` of them, or it will be wrong in light themes. A new `font-size` must use `calc(… * var(--font-scale))`. Fixed layout sizes (header heights, the rail) don't scale with text size, which is why the slider stops at 20px. No web fonts are bundled, so the font list depends on the OS. The game iframe, video stages and the Electron window's pre-load background keep their own fixed colors.
 **Alternatives:** a stylesheet per theme (can't express a custom palette); fetching schemes from Gogh at runtime (the client would depend on a third-party host, and the app works offline on a LAN today); `zoom` or `webFrame.setZoomFactor` for text size (scales the whole layout, which the View menu's zoom already does); letting a server set a theme for everyone (it's a personal preference, and D3's trust model would let anyone change it).
+
+## D31: A voice call keeps its own server connection · Active
+**Context:** the client assumed one connected server: clicking another server in the rail closed the socket and with it the call (issue #9). Friends who share several servers want to stay in voice on one while reading another, like Discord.
+**Decision:**
+- Per-server state moved from `S` into connection objects (ARCHITECTURE.md → Connections). `S.conn` is the server in view and `S.call` the one the call is on. Leaving a server keeps its connection open only while the call is on it, so there are at most two.
+- One call at a time, because there is one microphone and one outgoing audio graph (`audio.js`). Joining voice elsewhere hangs up first.
+- The background connection carries voice only: it keeps `users`, channels and the server's name current for the voice panel and the stage, but ignores messages. Coming back loads history again, like a fresh connect.
+- No server or protocol change. To the call's server you are simply still connected, and you appear online there.
+
+**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
+**Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
