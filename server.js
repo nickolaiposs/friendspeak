@@ -221,6 +221,57 @@ async function startServer(opts = {}) {
     return (state.messages[cid] ||= []);
   }
 
+  // ---------- mentions ----------
+
+  // Who a message mentions: { users: [profileId], roles: [roleId], everyone: true }, empty parts left out
+  // (null when nobody). Same rules as findMentions() in public/js/util.js, which is an ES module
+  // the server can't import, so keep the two in step: '@' at the start or after whitespace, then a
+  // name (case-insensitive, may have spaces), then the end or a char outside [\w-]; longest name
+  // wins; code spans are ignored. Replying to someone mentions them.
+  function mentionsOf(text, replied, senderId) {
+    // Code is blanked to the same length, so positions still point into the stored text
+    const plain = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => ' '.repeat(m.length));
+    const names = [{ name: 'everyone', kind: 'everyone', id: '' }];
+    for (const r of state.roles) names.push({ name: r.name, kind: 'role', id: r.id });
+    // People also answer to name#tag, which tells apart people with the same name
+    for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ name: p.name, kind: 'user', id: pid }, { name: `${p.name}#${mentionTag(pid)}`, kind: 'user', id: pid });
+    names.sort((a, b) => b.name.length - a.name.length);
+    const users = new Set();
+    const roles = new Set();
+    const spans = []; // [at, length, kind, id]: lets clients draw a mention with the current name
+    let everyone = false;
+    for (let i = plain.indexOf('@'); i >= 0; i = plain.indexOf('@', i + 1)) {
+      if (i > 0 && !/\s/.test(plain[i - 1])) continue;
+      const fits = (n) => plain.slice(i + 1, i + 1 + n.name.length).toLowerCase() === n.name.toLowerCase() && !/[\w-]/.test(plain[i + 1 + n.name.length] || '');
+      const hit = names.find(fits);
+      if (!hit) continue;
+      // An untagged name more than one person has mentions all of them
+      for (const n of names.filter((n) => n.name.length === hit.name.length && fits(n))) {
+        if (n.kind === 'everyone') everyone = true;
+        else (n.kind === 'role' ? roles : users).add(n.id);
+        spans.push([i, 1 + n.name.length, n.kind, n.id]);
+      }
+    }
+    if (replied && replied.author !== senderId) users.add(replied.author);
+    users.delete(senderId);
+    if (!users.size && !roles.size && !everyone && !spans.length) return null;
+    const out = {};
+    if (users.size) out.users = [...users];
+    if (roles.size) out.roles = [...roles];
+    if (everyone) out.everyone = true;
+    if (spans.length) out.spans = spans;
+    return out;
+  }
+
+  // Same as mentionTag() in public/js/util.js: a short tag from a profile id
+  function mentionTag(id) {
+    let h = 0;
+    for (const ch of String(id)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; // spread it, so similar ids get unlike tags
+    h = (h ^ (h >>> 16)) >>> 0;
+    return (h % 1679616).toString(36).padStart(4, '0');
+  }
+
   // ---------- bans ----------
 
   // Bans match the profile id and, optionally, the IP it last connected from.
@@ -896,6 +947,8 @@ async function startServer(opts = {}) {
           .map((fid) => fileById(str(fid, 64)))
           .filter((f, i, a) => f && !f.messageId && f.channelId === channelId && f.by === u.profile.id && a.indexOf(f) === i);
         if (!text && !g && !attached.length) return ack({ error: 'empty' });
+        const replied = (replyTo = str(replyTo, 32)) ? list.find((m) => m.id === replyTo) : null;
+        const mentions = mentionsOf(text, replied, u.profile.id);
         const msg = {
           id: id(),
           author: u.profile.id,
@@ -903,7 +956,8 @@ async function startServer(opts = {}) {
           text,
           gif: g,
           files: attached.length ? attached.map((f) => ({ id: f.id, name: f.name, size: f.size, type: f.type })) : undefined,
-          replyTo: str(replyTo, 32) || null,
+          replyTo: replyTo || null,
+          mentions: mentions || undefined,
           reactions: {}, // emoji -> [profileId]
           ts: Date.now(),
         };
@@ -912,6 +966,23 @@ async function startServer(opts = {}) {
         for (const f of attached) f.messageId = msg.id;
         save();
         io.emit('msg:new', { channelId, message: msg });
+        // People with this server bookmarked but not open hear about mentions over /dm (D41)
+        if (mentions) {
+          const rooms = new Set();
+          if (mentions.everyone) rooms.add('members');
+          else {
+            for (const pid of mentions.users || []) rooms.add('p:' + pid);
+            for (const [pid, held] of Object.entries(state.memberRoles)) if (held.some((r) => mentions.roles?.includes(r))) rooms.add('p:' + pid);
+          }
+          if (rooms.size) {
+            dm.to([...rooms]).except('p:' + msg.author).emit('mention', {
+              channelId,
+              channelName: channel(channelId).name,
+              serverName: state.name,
+              message: { id: msg.id, author: msg.author, name: msg.name, text: text.slice(0, 300), ts: msg.ts, replyTo: msg.replyTo, mentions },
+            });
+          }
+        }
         if (attached.length) io.emit('files:new', { files: attached.map(publicFile), storage: usage() });
         ack({ ok: true });
       });
@@ -923,6 +994,9 @@ async function startServer(opts = {}) {
         if (!m || m.author !== u.profile.id || !text) return;
         m.text = text;
         m.edited = Date.now();
+        const mentions = mentionsOf(text, m.replyTo && thread(channelId).find((x) => x.id === m.replyTo), m.author);
+        if (mentions) m.mentions = mentions;
+        else delete m.mentions;
         save();
         io.emit('msg:update', { channelId, message: m });
       });

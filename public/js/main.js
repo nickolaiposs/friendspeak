@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress } from './util.js';
-import { profiles, servers, settings, sounds, identities, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME } from './audio.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
+import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
+import { audio, Level, MAX_USER_VOLUME, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
@@ -124,9 +124,173 @@ const I = {
   folder: '<svg viewBox="0 0 24 24"><path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>',
   jump: '<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>',
+  bellOff: '<svg viewBox="0 0 24 24"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68c-.6.14-1.14.37-1.63.66L18 12.2V16zM4.27 3 3 4.27l3.07 3.07A5.9 5.9 0 0 0 6 11v5l-2 2v1h14.73l1 1L21 18.73 4.27 3z"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
 };
 const icon = (name, cls = '') => h('span', { class: 'icon ' + cls, html: I[name] });
+
+// ---------------------------------------------------------------- notifications and mentions
+
+// Is this notification switched off? (master, its type, a muted person, a muted server)
+function suppressed(kind, from, serverId) {
+  const st = settings.get();
+  return !st.notify || (kind === 'mention' ? !st.notifyMentions : !st.notifyDms) || !!st.notifyMutedUsers[from] || (kind === 'mention' && !!st.notifyMutedServers[serverId]);
+}
+
+// The one gate for DMs, mentions and incoming calls. Badges don't go through it.
+// `inView`: the conversation is open in the focused window, so no ping.
+function notify({ kind, from, serverId, title, body, icon: img, inView, open }) {
+  if (suppressed(kind, from, serverId)) return false;
+  if (kind !== 'call' && !inView) audio.cue(kind);
+  if (document.hasFocus()) return true;
+  try {
+    const n = new Notification(title, { body, silent: true, icon: typeof img === 'string' && /^(data:image\/|https?:)/.test(img) ? img : undefined });
+    n.onclick = () => {
+      n.close();
+      desktop?.focus?.() || window.focus();
+      open?.();
+    };
+  } catch {} // not allowed here
+  return true;
+}
+
+// Notification text is plain: one line, no markup
+const plainText = (t, m) => String(t || '').replace(/\s+/g, ' ').trim().slice(0, 200) || (m?.gif ? 'Sent a GIF' : m?.files?.length ? 'Sent a file' : '');
+const mentionTitle = (name, channelName, serverName) => `${name} in #${channelName}` + (serverName ? ` · ${serverName}` : '');
+
+// Dock/taskbar badge: unread DMs plus unread mentions
+let lastBadge = -1;
+function syncBadge() {
+  const n = DM.unreadTotal() + mentionUnread.total();
+  if (n !== lastBadge) desktop?.setBadge?.((lastBadge = n));
+}
+
+// Mute notifications from a person (anywhere) or from a whole server
+const userMuted = (id) => !!settings.get().notifyMutedUsers[id];
+function toggleUserMute(id, name) {
+  const cur = { ...settings.get().notifyMutedUsers };
+  if (cur[id]) delete cur[id];
+  else cur[id] = name || 'unknown';
+  settings.set({ notifyMutedUsers: cur });
+  renderRail();
+  renderChannels();
+}
+const userMuteItem = (id, name) => id !== me()?.id && { label: userMuted(id) ? 'Unmute notifications' : 'Mute notifications', run: () => toggleUserMute(id, name) };
+const serverMuted = (id) => !!settings.get().notifyMutedServers[id];
+function toggleServerMute(id) {
+  const cur = { ...settings.get().notifyMutedServers };
+  if (cur[id]) delete cur[id];
+  else cur[id] = true;
+  settings.set({ notifyMutedServers: cur });
+  renderRail();
+}
+
+// Everything mentionable on a server: @everyone, its roles, the people it knows
+function mentionCandidates(server = S.server) {
+  const roles = (Array.isArray(server?.roles) ? server.roles : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && r.name);
+  const people = Object.entries(server?.profiles || {}).filter(([, p]) => p && typeof p.name === 'string' && p.name);
+  return [{ kind: 'everyone', id: '', name: 'everyone' }, ...roles.map((r) => ({ kind: 'role', id: r.id, name: r.name, color: r.color })), ...people.flatMap(([id, p]) => [
+      { kind: 'user', id, name: p.name },
+      { kind: 'user', id, name: `${p.name}#${mentionTag(id)}`, tagged: true }, // tells apart people with the same name
+    ]),
+  ];
+}
+// Names more than one person here has (lowercased): those show their #tag
+function sharedNames(server = S.server) {
+  const seen = new Set();
+  const dup = new Set();
+  for (const p of Object.values(server?.profiles || {})) {
+    const n = typeof p?.name === 'string' && p.name.toLowerCase();
+    if (n) (seen.has(n) ? dup : seen).add(n);
+  }
+  return dup;
+}
+const nameTag = (id, name, dup = sharedNames()) => (typeof name === 'string' && dup.has(name.toLowerCase()) ? mentionTag(id) : '');
+// How a mention of someone or a role reads today: what autocomplete inserts and edits start from
+function mentionText(kind, id, server = S.server, dup = sharedNames(server)) {
+  if (kind === 'everyone') return '@everyone';
+  if (kind === 'role') {
+    const r = server?.roles?.find((r) => r.id === id);
+    return r ? '@' + r.name : null;
+  }
+  const n = server?.profiles?.[id]?.name;
+  return n ? '@' + n + (nameTag(id, n, dup) ? '#' + mentionTag(id) : '') : null;
+}
+// The server's mention positions in m.text ([at, length, kind, id]), grouped by position:
+// a group of several is an untagged name more than one person has
+function spanGroups(m) {
+  const spans = Array.isArray(m?.mentions?.spans) ? m.mentions.spans : null;
+  if (!spans) return null;
+  const byAt = new Map();
+  for (const sp of spans) if (Array.isArray(sp) && Number.isInteger(sp[0]) && Number.isInteger(sp[1]) && sp[1] > 0) byAt.set(sp[0], [...(byAt.get(sp[0]) || []), sp]);
+  return [...byAt.values()].sort((a, b) => a[0][0] - b[0][0]);
+}
+// formatText's `mentions`: drawn with today's names, so a rename carries over to old messages
+function mentionMarks(m, server = S.server) {
+  const groups = spanGroups(m);
+  if (!groups) return null;
+  const dup = sharedNames(server);
+  const mine = new Set(myRoleIds(server));
+  const my = me().id;
+  return groups.map((group) => {
+    const [at, len, kind, id] = group[0];
+    const written = String(m.text || '').slice(at + 1, at + len);
+    const isMe = group.some(([, , k, i]) => k === 'everyone' || (k === 'user' && i === my) || (k === 'role' && mine.has(i)));
+    if (group.length > 1) return { at, len, kind: 'user', id: '', name: written, me: isMe };
+    if (kind === 'everyone') return { at, len, kind, id: '', name: 'everyone', me: isMe };
+    if (kind === 'role') {
+      const r = server?.roles?.find((r) => r.id === id);
+      return { at, len, kind, id, name: r?.name || written, color: r?.color, me: isMe };
+    }
+    const n = server?.profiles?.[id]?.name;
+    return { at, len, kind: 'user', id, name: n || written, tag: n ? nameTag(id, n, dup) : '', me: isMe };
+  });
+}
+// A message's text for editing, with its mentions written the way they read today
+function editableText(m, server = S.server) {
+  let t = String(m.text || '');
+  const dup = sharedNames(server);
+  for (const group of (spanGroups(m) || []).reverse()) {
+    const [at, len, kind, id] = group[0];
+    const now = group.length === 1 && t[at] === '@' && mentionText(kind, id, server, dup);
+    if (now) t = t.slice(0, at) + now + t.slice(at + len);
+  }
+  return t;
+}
+const myRoleIds = (server = S.server) => (Array.isArray(server?.memberRoles?.[me().id]) ? server.memberRoles[me().id] : []);
+// For formatText: the same list, flagged with the ones that concern us
+function mentionables(server = S.server) {
+  const mine = new Set(myRoleIds(server));
+  return mentionCandidates(server).map((c) => ({ ...c, me: c.kind === 'everyone' || (c.kind === 'user' && c.id === me().id) || (c.kind === 'role' && mine.has(c.id)) }));
+}
+// Does this message mention us (or reply to us)? Uses what the server worked out, else works it out (older servers).
+function mentionsMe(m, server = S.server, channelId = S.channelId) {
+  const my = me().id;
+  if (!m || m.author === my) return false;
+  const mm = m.mentions;
+  if (mm && typeof mm === 'object') {
+    const mine = myRoleIds(server);
+    return !!(mm.everyone || (Array.isArray(mm.users) && mm.users.includes(my)) || (Array.isArray(mm.roles) && mm.roles.some((r) => mine.includes(r))));
+  }
+  if (m.replyTo && S.messages.get(channelId)?.find((x) => x.id === m.replyTo)?.author === my) return true;
+  if (!m.text || !m.text.includes('@')) return false;
+  const mine = new Set(myRoleIds(server));
+  return findMentions(m.text, mentionCandidates(server)).some((c) => c.kind === 'everyone' || (c.kind === 'user' && c.id === my) || (c.kind === 'role' && mine.has(c.id)));
+}
+// Is this channel of the server in view, in the focused window?
+const watching = (channelId) => channelId === S.channelId && document.hasFocus() && !S.game.visible;
+
+// Open a channel of a bookmarked server, connecting first if needed
+function openChannel(entry, channelId) {
+  if (S.entry?.id === entry.id && S.connected) return selectChannel(channelId);
+  settings.set({ lastChannel: { ...settings.get().lastChannel, [entry.id]: channelId } });
+  connectTo(entry);
+}
+
+function pruneMentions(c) {
+  const ids = new Set(c.server.channels.map((ch) => ch.id));
+  for (const id of Object.keys(mentionUnread.all()[c.entry.id] || {})) if (!ids.has(id)) mentionUnread.clear(c.entry.id, id);
+}
 
 // ---------------------------------------------------------------- direct messages (peer to peer, dm.js)
 
@@ -149,10 +313,11 @@ const DM = new DirectMessages({
       renderTyping();
       DM.opened(peerId);
     }
-    if (!mine && (cid !== S.channelId || document.hidden || S.game.visible)) {
-      audio.cue('message');
-      if (document.hidden) document.title = `(•) friendspeak`;
+    if (!mine && !m.note) {
+      const p = profileOf(peerId);
+      notify({ kind: 'dm', from: peerId, title: p.name, body: plainText(m.text, m), icon: p.avatar, inView: watching(cid), open: () => selectChannel(cid) });
     }
+    if (!mine && document.hidden) document.title = `(•) friendspeak`;
     renderRail();
     if (inDmView()) renderChannels();
   },
@@ -176,6 +341,29 @@ const DM = new DirectMessages({
     if (cid === S.channelId) renderTyping();
   },
   call: (peerId, d) => DMCALL.receive(peerId, d),
+  // Someone mentioned us on a bookmarked server (pushed over its /dm socket). The server in view
+  // tells us itself, so this is for the others.
+  mention(address, p) {
+    const entry = servers.all().find((s) => s.address === address);
+    const m = p?.message;
+    if (!entry || !m || typeof m !== 'object' || typeof p.channelId !== 'string' || m.author === me().id) return;
+    if (S.entry?.id === entry.id && S.connected) return;
+    const mm = m.mentions;
+    if (!mm || typeof mm !== 'object') return;
+    // Role mentions: we can't see our roles here, the server only sent it to the people who hold one
+    if (!(mm.everyone || (Array.isArray(mm.users) && mm.users.includes(me().id)) || (Array.isArray(mm.roles) && mm.roles.length))) return;
+    mentionUnread.add(entry.id, p.channelId);
+    renderRail();
+    const name = String(m.name || 'someone').slice(0, 60);
+    notify({
+      kind: 'mention',
+      from: m.author,
+      serverId: entry.id,
+      title: mentionTitle(name, String(p.channelName || '').slice(0, 60), String(p.serverName || '').slice(0, 60)),
+      body: plainText(typeof m.text === 'string' ? m.text : '', m),
+      open: () => openChannel(entry, p.channelId),
+    });
+  },
 });
 
 // Open the conversation with someone (from a server's member list or a message)
@@ -362,9 +550,15 @@ function renderDmCall() {
     ui.ringing = ringing;
     if (ringing) {
       const cue = ringing === 'ringing' ? 'ring' : 'calling';
-      audio.cue(cue);
-      ui.ringTimer = setInterval(() => audio.cue(cue), ringing === 'ringing' ? 2000 : 3000);
-      if (ringing === 'ringing' && document.hidden) document.title = `(•) friendspeak`;
+      // A caller you muted still shows the card, but doesn't ring or notify
+      if (ringing !== 'ringing' || !suppressed('call', c.peerId)) {
+        audio.cue(cue);
+        ui.ringTimer = setInterval(() => audio.cue(cue), ringing === 'ringing' ? 2000 : 3000);
+      }
+      if (ringing === 'ringing') {
+        notify({ kind: 'call', from: c.peerId, title: p.name, body: c.video ? 'Incoming video call' : 'Incoming call', icon: p.avatar, open: () => selectChannel('dm:' + c.peerId) });
+        if (document.hidden) document.title = `(•) friendspeak`;
+      }
     }
   }
 
@@ -994,13 +1188,14 @@ function renderRail() {
           h(
             'button',
             {
-              class: 'rail-server rail-dm' + (S.channelId === 'dm:' + c.id ? ' active' : ''),
-              title: c.name + (DM.online(c.id) ? '' : ' (offline)'),
+              class: 'rail-server rail-dm' + (S.channelId === 'dm:' + c.id ? ' active' : '') + (userMuted(c.id) ? ' silenced' : ''),
+              title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (userMuted(c.id) ? '\nNotifications muted' : ''),
               onclick: () => selectChannel('dm:' + c.id),
-              oncontextmenu: (e) => contextMenu(e, [{ label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
+              oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
             },
             avatarEl(c, 44),
             h('span', { class: 'presence' + (DM.online(c.id) ? '' : ' off') }),
+            userMuted(c.id) ? h('span', { class: 'rail-muted', html: I.bellOff }) : null,
             c.unread ? h('span', { class: 'rail-badge' }, c.unread > 99 ? '99+' : c.unread) : null
           )
         )),
@@ -1010,27 +1205,33 @@ function renderRail() {
       const label = serverLabel(s);
       const active = S.entry?.id === s.id;
       const calling = S.call?.entry.id === s.id; // the voice call is on this server, in view or not
+      const muted = serverMuted(s.id);
+      const mentions = mentionUnread.server(s.id);
       return h(
         'button',
         {
-          class: 'rail-server' + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : ''),
-          title: `${label}\n${s.address}` + (calling ? '\nYou’re in voice here' : ''),
+          class: 'rail-server' + (muted ? ' silenced' : '') + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : ''),
+          title: `${label}\n${s.address}` + (calling ? '\nYou’re in voice here' : '') + (muted ? '\nNotifications muted' : '') + (mentions ? `\n${mentions} unread mention${mentions > 1 ? 's' : ''}` : ''),
           onclick: () => connectTo(s),
           oncontextmenu: (e) =>
             contextMenu(e, [
+              { label: muted ? 'Unmute notifications' : 'Mute notifications', run: () => toggleServerMute(s.id) },
               { label: 'Edit', run: () => serverDialog(s) },
               active && S.connected && { label: 'Server name & icon…', run: () => openSettings('server') },
               calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
-              { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), DM.setServers(servers.all()), renderRail()) },
+              { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
             ]),
         },
         s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label),
-        calling ? h('span', { class: 'rail-call', html: I.speaker }) : null
+        calling ? h('span', { class: 'rail-call', html: I.speaker }) : null,
+        muted ? h('span', { class: 'rail-muted', html: I.bellOff }) : null,
+        mentions ? h('span', { class: 'rail-badge' }, mentions > 99 ? '99+' : mentions) : null
       );
     }),
     h('button', { class: 'rail-add', title: 'Connect to a server', onclick: () => serverDialog() }, icon('plus'))
   );
+  syncBadge();
 }
 
 function serverDialog(existing) {
@@ -1171,6 +1372,7 @@ function openSocket(entry, rejoinVoice = null) {
     Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true });
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     rememberServerLook(c);
+    pruneMentions(c);
     if (viewed()) showServer(c);
     else renderRail();
     if (c.rejoinVoice && c.server.channels.some((ch) => ch.id === c.rejoinVoice)) return joinVoice(c.rejoinVoice, true, c);
@@ -1270,7 +1472,9 @@ function openSocket(entry, rejoinVoice = null) {
     const { roles, memberRoles } = msg && typeof msg === 'object' ? msg : {};
     c.server.roles = Array.isArray(roles) ? roles : [];
     c.server.memberRoles = memberRoles && typeof memberRoles === 'object' && !Array.isArray(memberRoles) ? memberRoles : {};
-    if (viewed()) renderMembers();
+    if (!viewed()) return;
+    renderMembers();
+    if (S.channelId && !inDmView()) renderMessages(true); // role mentions read with the new names
   });
 
   socket.on('server', ({ name, icon, game, audioQuality }) => {
@@ -1299,6 +1503,7 @@ function openSocket(entry, rejoinVoice = null) {
 
   socket.on('channels', (channels) => {
     c.server.channels = channels;
+    pruneMentions(c);
     if (calling()) renderVoicePanel();
     if (!viewed()) return;
     if (!chatById(S.channelId)) {
@@ -1325,14 +1530,32 @@ function openSocket(entry, rejoinVoice = null) {
     if (list) list.push(message);
     S.typing.get(channelId)?.forEach((t, sid) => t.name === message.name && S.typing.get(channelId).delete(sid));
     const mine = message.author === me().id;
-    const mentioned = !mine && new RegExp(`@${me().name.replace(/[^\w-]/g, '')}\\b`, 'i').test(message.text);
-    if (mentioned) audio.cue('message');
+    const mentioned = mentionsMe(message, c.server, channelId);
+    const seen = watching(channelId);
     if (channelId === S.channelId) {
       appendMessage(message, mine);
       renderTyping();
     } else if (!mine) {
       S.unread.add(channelId);
       renderChannels();
+    }
+    // Regular messages only mark the channel unread; a mention also badges it and notifies
+    if (mentioned) {
+      if (!seen) {
+        mentionUnread.add(entry.id, channelId);
+        renderRail();
+        renderChannels();
+      }
+      notify({
+        kind: 'mention',
+        from: message.author,
+        serverId: entry.id,
+        title: mentionTitle(message.name, c.server.channels.find((ch) => ch.id === channelId)?.name || '', c.server.name),
+        body: plainText(message.text, message),
+        icon: profileOf(message.author).avatar,
+        inView: seen,
+        open: () => openChannel(entry, channelId),
+      });
     }
     if (document.hidden && !mine) document.title = `(•) friendspeak`;
   });
@@ -1558,12 +1781,13 @@ function renderChannels() {
       h(
         'div',
         {
-          class: 'channel' + (ch.id === S.channelId ? ' active' : '') + (S.unread.has(ch.id) ? ' unread' : ''),
+          class: 'channel' + (ch.id === S.channelId ? ' active' : '') + (S.unread.has(ch.id) ? ' unread' : '') + (mentionUnread.channel(S.entry.id, ch.id) ? ' mentioned' : ''),
           onclick: () => selectChannel(ch.id),
           oncontextmenu: chMenu(ch),
         },
         icon('hash'),
-        channelNameEl(ch.name, S.server.emojis)
+        channelNameEl(ch.name, S.server.emojis),
+        mentionUnread.channel(S.entry.id, ch.id) ? h('span', { class: 'count mention-count', title: 'Unread mentions' }, Math.min(99, mentionUnread.channel(S.entry.id, ch.id))) : null
       )
     ),
     cat('Voice channels', 'voice'),
@@ -1612,12 +1836,13 @@ function dmSidebar() {
         'div',
         {
           class: 'channel dm' + ('dm:' + c.id === S.channelId ? ' active' : '') + (c.unread ? ' unread' : ''),
-          title: c.name,
+          title: c.name + (userMuted(c.id) ? '\nNotifications muted' : ''),
           onclick: () => selectChannel('dm:' + c.id),
-          oncontextmenu: (e) => contextMenu(e, [{ label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
+          oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
         },
         h('div', { class: 'member-av' }, avatarEl(c, 20), h('span', { class: 'presence' + (DM.online(c.id) ? '' : ' off') })),
         h('span', { class: 'name' }, c.name),
+        userMuted(c.id) ? h('span', { class: 'icon state', title: 'Notifications muted', html: I.bellOff }) : null,
         c.unread ? h('span', { class: 'count' }, c.unread) : null
       )
     ),
@@ -1733,8 +1958,9 @@ function voiceUserEl(u) {
       title: peer && !isMe ? `connection: ${peer.state}` : '',
       onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
       oncontextmenu: (e) => {
-        e.preventDefault();
-        if (!isMe && together) userVolumePopover(e.currentTarget, u);
+        const el = e.currentTarget;
+        if (isMe) return e.preventDefault();
+        contextMenu(e, [together && { label: 'Volume…', run: () => userVolumePopover(el, u) }, userMuteItem(u.id, u.name)]);
       },
     },
     avatarEl(u, 24),
@@ -1980,6 +2206,7 @@ function renderMembers() {
     contextMenu(e, [
       inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') },
       { label: 'Message', run: () => openDm(u.id) },
+      userMuteItem(u.id, u.name),
       { label: 'Remove from server…', danger: true, run: () => removePrompt(u.id) },
       !isBanned(u.id) && { label: 'Ban…', danger: true, run: () => banPrompt(u.id) },
     ]);
@@ -1993,7 +2220,7 @@ function renderMembers() {
       h(
         'div',
         { class: 'member-names' },
-        h('div', { class: 'member-name', style: { color: u.color } }, u.name),
+        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
         h(
           'div',
           { class: 'member-status' },
@@ -2032,6 +2259,7 @@ function renderMembers() {
 
 function renderMain(error) {
   const main = $('#main');
+  mentionMenu = null; // its element goes with the composer
   if (!inDmView() && (!S.entry || (!S.connected && !S.server))) {
     const list = servers.all();
     main.replaceChildren(
@@ -2075,6 +2303,9 @@ function renderMain(error) {
     placeholder: dm ? `Message @${ch.name}` : `Message #${ch.name}`,
     onkeydown: onComposerKey,
     oninput: onComposerInput,
+    onclick: (e) => updateMentionMenu(e.target),
+    onkeyup: (e) => (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') && updateMentionMenu(e.target),
+    onblur: closeMentionMenu,
     onpaste: (e) => {
       const files = [...(e.clipboardData?.files || [])];
       if (files.length && canUpload) (e.preventDefault(), addAttachments(files));
@@ -2186,6 +2417,7 @@ async function selectChannel(id) {
   if (!ch) return;
   S.channelId = id;
   S.unread.delete(id);
+  if (!isDm(id) && S.entry && mentionUnread.clear(S.entry.id, id)) renderRail();
   showGame(false);
   closeStage();
   S.replyTo = null;
@@ -2219,11 +2451,13 @@ function messageEl(m, prev) {
   const grouped = isGrouped(m, prev);
   const author = profileOf(m.author, m.name);
   const mine = m.author === me().id;
-  const { html, jumbo, embeds } = formatText(m.text || '', { emojis: S.server?.emojis || [], myName: me().name });
-  const mentioned = !mine && /class="mention me"/.test(html);
+  const inServer = !m.thread && !inDmView() && !!S.server; // DMs keep the plain @name matching
+  const { html, jumbo, embeds } = formatText(m.text || '', { emojis: S.server?.emojis || [], myName: me().name, ...(inServer ? ((marks) => (marks ? { mentions: marks } : { mentionables: mentionables() }))(mentionMarks(m)) : {}) });
+  const mentioned = !mine && (inServer ? mentionsMe(m) : /class="mention me"/.test(html));
   const replied = m.replyTo && S.messages.get(S.channelId)?.find((x) => x.id === m.replyTo);
 
   const reactions = Object.entries(m.reactions || {});
+  const authorMenu = (e) => !m.note && !mine && contextMenu(e, [userMuteItem(m.author, author.name)]);
   return h(
     'div',
     {
@@ -2246,7 +2480,7 @@ function messageEl(m, prev) {
       { class: 'msg-row' },
       grouped
         ? h('span', { class: 'msg-hover-time' }, shortTime(m.ts))
-        : h('button', { class: 'msg-avatar', onclick: (e) => profilePopover(e.currentTarget, { ...author, id: m.author }) }, avatarEl(author, 40)),
+        : h('button', { class: 'msg-avatar', onclick: (e) => profilePopover(e.currentTarget, { ...author, id: m.author }), oncontextmenu: authorMenu }, avatarEl(author, 40)),
       h(
         'div',
         { class: 'msg-body' },
@@ -2255,7 +2489,7 @@ function messageEl(m, prev) {
           : h(
               'div',
               { class: 'msg-head' },
-              h('span', { class: 'msg-author', style: { color: author.color }, onclick: (e) => profilePopover(e.currentTarget, { ...author, id: m.author }) }, author.name),
+              h('span', { class: 'msg-author', style: { color: author.color }, onclick: (e) => profilePopover(e.currentTarget, { ...author, id: m.author }), oncontextmenu: authorMenu }, author.name),
               h('span', { class: 'msg-time' }, fmtTime(m.ts))
             ),
         m.text ? h('div', { class: 'msg-text' + (jumbo ? ' jumbo' : ''), html: m.edited ? html.replace(/(<\/p>)?$/, (end) => ' <span class="edited">(edited)</span>' + end) : html }) : null,
@@ -2419,9 +2653,10 @@ function editMessage(m) {
   const el = $(`.msg[data-id="${m.id}"] .msg-text`);
   if (!el) return;
   const ta = h('textarea', { class: 'edit-box', rows: 1 });
-  ta.value = m.text;
+  const start = inDmView() ? m.text : editableText(m); // mentions read with today's names
+  ta.value = start;
   const done = (save) => {
-    if (save && ta.value.trim() && ta.value !== m.text) {
+    if (save && ta.value.trim() && ta.value !== start) {
       if (inDmView()) DM.editMessage(peerOf(S.channelId), m.id, ta.value.trim());
       else S.socket.emit('msg:edit', { channelId: S.channelId, messageId: m.id, text: ta.value });
     }
@@ -2444,9 +2679,81 @@ function autosize(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+// @-autocomplete in a server's composer: @everyone, roles, then people (online first)
+let mentionMenu = null; // { el, items, index, at, ta }
+function closeMentionMenu() {
+  mentionMenu?.el.remove();
+  mentionMenu = null;
+}
+function updateMentionMenu(ta) {
+  if (inDmView() || !S.server) return closeMentionMenu();
+  const upto = ta.value.slice(0, ta.selectionStart);
+  const m = /(?:^|\s)@([^\n@]*)$/.exec(upto);
+  if (!m) return closeMentionMenu();
+  const q = m[1].toLowerCase();
+  const at = upto.length - m[1].length - 1;
+  const starts = (c) => c.name.toLowerCase().startsWith(q);
+  // With a space in the query only names it still prefix-matches count
+  const match = (c) => starts(c) || (!/\s/.test(q) && c.name.toLowerCase().includes(q));
+  const rank = (a, b) => starts(b) - starts(a);
+  const online = (c) => isOnline(c.id);
+  const dup = sharedNames();
+  // One entry per person; someone whose name is shared shows (and matches) their #tag
+  const all = mentionCandidates()
+    .filter((c) => !c.tagged)
+    .map((c) => (c.kind === 'user' && nameTag(c.id, c.name, dup) ? { ...c, tag: mentionTag(c.id), name: `${c.name}#${mentionTag(c.id)}` } : c));
+  const items = [
+    ...all.filter((c) => c.kind === 'everyone' && match(c)),
+    ...all.filter((c) => c.kind === 'role' && match(c)).sort(rank),
+    ...all.filter((c) => c.kind === 'user' && c.id !== me().id && !isBanned(c.id) && match(c)).sort((a, b) => rank(a, b) || online(b) - online(a) || a.name.localeCompare(b.name)),
+  ].slice(0, 60);
+  if (!items.length) return closeMentionMenu();
+  const keep = mentionMenu && mentionMenu.ta === ta;
+  const index = keep ? Math.min(mentionMenu.index, items.length - 1) : 0;
+  if (!keep) closeMentionMenu();
+  const el = keep ? mentionMenu.el : h('div', { class: 'mention-menu', role: 'listbox' });
+  if (!keep) ta.closest('.composer-wrap')?.append(el);
+  mentionMenu = { el, items, index, at, ta };
+  drawMentionMenu();
+}
+function drawMentionMenu() {
+  const mm = mentionMenu;
+  mm.el.replaceChildren(
+    ...mm.items.map((c, i) => {
+      const p = c.kind === 'user' ? profileOf(c.id) : null;
+      const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : 'var(--muted)';
+      return h(
+        'div',
+        {
+          class: 'mm-item' + (i === mm.index ? ' active' : '') + (p && !isOnline(c.id) ? ' offline' : ''),
+          role: 'option',
+          onmousedown: (e) => (e.preventDefault(), insertMention(i)), // keep the focus in the composer
+          onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()),
+        },
+        p ? avatarEl(p, 20) : h('span', { class: 'mm-dot', style: { background: c.kind === 'role' ? color : 'var(--accent)' } }),
+        h('span', { class: 'mm-name' }, '@' + (c.tag ? c.name.slice(0, -c.tag.length - 1) : c.name), c.tag ? h('span', { class: 'name-tag' }, '#' + c.tag) : null),
+        c.kind !== 'user' ? h('span', { class: 'mm-hint muted small' }, c.kind === 'role' ? 'Role' : 'Notify everyone') : null
+      );
+    })
+  );
+  mm.el.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
+}
+function insertMention(i) {
+  const { items, at, ta } = mentionMenu;
+  const c = items[i];
+  const end = ta.selectionStart;
+  const text = `@${c.name} `;
+  ta.value = ta.value.slice(0, at) + text + ta.value.slice(end);
+  ta.setSelectionRange(at + text.length, at + text.length);
+  closeMentionMenu();
+  autosize(ta);
+  ta.focus();
+}
+
 let lastTyping = 0;
 function onComposerInput(e) {
   autosize(e.target);
+  updateMentionMenu(e.target);
   if (Date.now() - lastTyping > 2500 && e.target.value) {
     lastTyping = Date.now();
     if (inDmView()) DM.typing(peerOf(S.channelId));
@@ -2456,11 +2763,22 @@ function onComposerInput(e) {
 
 function onComposerKey(e) {
   const ta = e.target;
+  if (mentionMenu && !e.isComposing) {
+    const n = mentionMenu.items.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionMenu.index = (mentionMenu.index + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+      return drawMentionMenu();
+    }
+    if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') return e.preventDefault(), insertMention(mentionMenu.index);
+    if (e.key === 'Escape') return e.preventDefault(), closeMentionMenu();
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     const text = ta.value;
     ta.value = '';
     autosize(ta);
+    closeMentionMenu();
     // A failed upload puts the text back so nothing is lost
     sendMessage(text).then((ok) => ok === false && !ta.value && ((ta.value = text), autosize(ta)));
   } else if (e.key === 'Escape' && S.replyTo) {
@@ -4421,6 +4739,7 @@ function openSettings(tab = 'profile') {
     profile: ['My profile', settingsProfile],
     appearance: ['Appearance', settingsAppearance],
     voice: ['Voice & video', settingsVoice],
+    notifications: ['Notifications', settingsNotifications],
     integrations: ['Integrations', settingsIntegrations],
     server: ['Server', settingsServer],
     about: ['About & updates', settingsAbout],
@@ -4781,7 +5100,6 @@ function settingsVoice(body) {
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
-    slider('cueVolume', 'Notification sounds', 1, (v) => audio.setCueVolume(v)),
     h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
     h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
@@ -4801,9 +5119,7 @@ function settingsVoice(body) {
     ),
     h('h3', {}, 'Soundboard'),
     slider('soundboardVolume', 'Soundboard volume', 1, (v) => audio.setSoundboardVolume(v)),
-    check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened)),
-    h('h3', {}, 'Notifications'),
-    check('cues', 'Play join/leave/mute sounds')
+    check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened))
   );
   return () => {
     closed = true;
@@ -4812,6 +5128,73 @@ function settingsVoice(body) {
     picker.dispose();
     if (testing) stopTest();
   };
+}
+
+function settingsNotifications(body) {
+  const draw = () => {
+    const st = settings.get();
+    const set = (patch) => (settings.set(patch), draw());
+    const check = (key, label, { disabled = false, note = '' } = {}) =>
+      h(
+        'label',
+        { class: 'check-row' + (disabled ? ' disabled' : '') },
+        h('input', { type: 'checkbox', checked: st[key], disabled, onchange: (e) => set({ [key]: e.target.checked }) }),
+        h('span', {}, label),
+        note ? h('span', { class: 'muted small' }, note) : null
+      );
+    const people = Object.entries(st.notifyMutedUsers);
+    const muted = Object.keys(st.notifyMutedServers);
+    const unmute = (key, id) => {
+      const { [id]: _, ...rest } = st[key];
+      set({ [key]: rest });
+      renderRail();
+      renderChannels();
+    };
+    const mutedRow = (label, onclick) => h('div', { class: 'row muted-row' }, h('span', { class: 'grow' }, label), h('button', { class: 'btn small ghost', onclick }, 'Unmute'));
+    const offFor = { dm: !st.notify || !st.notifyDms, mention: !st.notify || !st.notifyMentions };
+    // The slider keeps its place while you drag: it doesn't redraw the tab
+    const volume = h('span', {}, Math.round(st.cueVolume * 100) + '%');
+    body.replaceChildren(
+      h('h3', {}, 'Desktop notifications'),
+      check('notify', 'All notifications'),
+      check('notifyMentions', 'Mentions & replies', { disabled: !st.notify }),
+      check('notifyDms', 'Direct messages & calls', { disabled: !st.notify }),
+      h('p', { class: 'muted small' }, 'Regular messages in a server never notify you. They only mark the channel unread. Mentions and DMs always show an unread badge, even when muted.'),
+      h('h3', {}, 'Muted people'),
+      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”: they won’t notify you in DMs or on any server.')]),
+      h('h3', {}, 'Muted servers'),
+      ...(muted.length
+        ? muted.map((id) => {
+            const s = servers.get(id);
+            return mutedRow(s ? serverLabel(s) : 'A server you removed', () => unmute('notifyMutedServers', id));
+          })
+        : [h('p', { class: 'muted small' }, 'None. Right-click a server in the left bar and choose “Mute notifications”.')]),
+      h('h3', {}, 'Sounds'),
+      check('cues', 'Play sounds'),
+      h(
+        'label',
+        { class: 'field' },
+        h('span', {}, 'Sound volume ', volume),
+        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: st.cueVolume, oninput: (e) => (settings.set({ cueVolume: +e.target.value }), (volume.textContent = Math.round(e.target.value * 100) + '%'), audio.setCueVolume(+e.target.value)) })
+      ),
+      ...CUES.map(({ kind, label }) => {
+        const off = !!offFor[kind];
+        return h(
+          'div',
+          { class: 'row sound-row' },
+          h(
+            'label',
+            { class: 'check-row grow' + (off ? ' disabled' : '') },
+            h('input', { type: 'checkbox', checked: !off && st.sounds[kind] !== false, disabled: off, onchange: (e) => set({ sounds: { ...settings.get().sounds, [kind]: e.target.checked } }) }),
+            h('span', {}, label),
+            off ? h('span', { class: 'muted small' }, 'Off: notifications are off') : null
+          ),
+          h('button', { class: 'btn small ghost', title: 'Play this sound', onclick: () => audio.preview(kind) }, 'Play')
+        );
+      })
+    );
+  };
+  draw();
 }
 
 function settingsIntegrations(body) {
@@ -5074,6 +5457,11 @@ async function boot() {
   const last = servers.get(servers.last());
   if (last) connectTo(last);
 }
+
+// Back in the window: the channel in view counts as read
+window.addEventListener('focus', () => {
+  if (S.entry && S.channelId && !isDm(S.channelId) && mentionUnread.clear(S.entry.id, S.channelId)) (renderRail(), renderChannels());
+});
 
 // Browsers block audio until a user gesture; unlock on first interaction.
 window.addEventListener('pointerdown', () => audio.ensure(), { once: true });

@@ -419,6 +419,20 @@ ipcMain.handle('desktop:trust-server', (_e, address) => trustServer(String(addre
 ipcMain.handle('desktop:download', (_e, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) win?.webContents.downloadURL(url);
 });
+// Notification clicks bring the window back
+ipcMain.handle('desktop:focus', () => {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
+// Unread count on the dock/taskbar icon; Windows has no count, so flash the taskbar instead
+ipcMain.handle('desktop:badge', (_e, n) => {
+  n = Math.min(9999, Math.max(0, Math.trunc(Number(n)) || 0));
+  if (process.platform === 'win32') {
+    if (win && !win.isDestroyed()) win.flashFrame(n > 0 && !win.isFocused());
+  } else app.setBadgeCount(n);
+});
 ipcMain.handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
 
 // ---------------------------------------------------------------- lifecycle

@@ -107,7 +107,13 @@ const DEFAULT_SETTINGS = {
   hideOffline: false, // collapse the member list's Offline section
   railDmsHidden: false, // collapsed groups in the left rail
   railServersHidden: false,
-  cues: true,
+  cues: true, // master switch for the app's sounds
+  sounds: {}, // cue kind -> false when that sound is off (missing = on), see CUES in audio.js
+  notify: true, // master switch for notifications (DMs, mentions, calls)
+  notifyMentions: true,
+  notifyDms: true,
+  notifyMutedUsers: {}, // profileId -> name: no notifications from them, anywhere. Not userMutes (voice).
+  notifyMutedServers: {}, // serverId -> true: no notifications from this server
   dismissedBanners: {}, // update/maintenance banner key -> when it was closed
   // appearance (theme.js)
   theme: 'dark', // 'dark' | 'light' | 'contrast' | 'custom'
@@ -134,6 +140,32 @@ export const settings = {
     write('fs.settings', s);
     return s;
   },
+};
+
+// Unread mentions per server and channel, so the red badges survive a restart:
+// { [serverId]: { [channelId]: count } }
+export const mentionUnread = {
+  all: () => read('fs.mentionUnread', {}),
+  add(serverId, channelId) {
+    const all = this.all();
+    all[serverId] = { ...all[serverId], [channelId]: (all[serverId]?.[channelId] || 0) + 1 };
+    write('fs.mentionUnread', all);
+  },
+  // One channel, or the whole server when no channel is given
+  clear(serverId, channelId) {
+    const all = this.all();
+    if (!all[serverId]) return false;
+    if (channelId) {
+      if (!all[serverId][channelId]) return false;
+      delete all[serverId][channelId];
+      if (!Object.keys(all[serverId]).length) delete all[serverId];
+    } else delete all[serverId];
+    write('fs.mentionUnread', all);
+    return true;
+  },
+  channel: (serverId, channelId) => read('fs.mentionUnread', {})[serverId]?.[channelId] || 0,
+  server: (serverId) => Object.values(read('fs.mentionUnread', {})[serverId] || {}).reduce((n, c) => n + c, 0),
+  total: () => Object.values(read('fs.mentionUnread', {})).reduce((n, ch) => n + Object.values(ch).reduce((a, c) => a + c, 0), 0),
 };
 
 // ---------- IndexedDB: soundboard and direct messages ----------
