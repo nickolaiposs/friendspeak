@@ -39,7 +39,7 @@ export default {
       const boxes = data.roles.map((r) => ({ r, input: h('input', { type: 'checkbox', checked: (u.roles || []).includes(r.id) }) }));
       return showDialog({
         title: `Roles for ${u.name}`, confirmLabel: 'Save',
-        content: [h('p', { class: 'muted small' }, 'Roles are labels only. They grant nothing.'),
+        content: [h('p', { class: 'muted small' }, 'Roles with permissions can only go to people whose profile has a key.'),
           h('div', { class: 'checks' }, boxes.map(({ r, input }) => h('label', {}, input, roleTags([r.id], [r]))))],
         onConfirm: () => api.put(`users/${encodeURIComponent(u.id)}/roles`, { roles: boxes.filter((b) => b.input.checked).map((b) => b.r.id) }),
       });
