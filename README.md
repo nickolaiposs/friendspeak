@@ -177,7 +177,7 @@ your.domain {
 }
 ```
 
-- The proxy must pass the original `Host` header, or the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
+- The proxy must pass the original `Host` header, or the app can't sign in ("Could not verify your profile key") and the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
 - Leave `ADMIN_LOCAL` off here (it is off in the image). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`.
 - For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit `/admin` at the proxy if you want per-visitor limits.
 - Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of `/admin`), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000/admin`.
@@ -257,7 +257,7 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 - Press ↑ in an empty composer to edit your last message. Shift-click the trash icon to delete without confirming (messages and files).
 - File links are unguessable but not password-protected: anyone you give a file's URL to can download it, like Discord attachments.
 - To edit a sound, right-click it or use the pencil icon. Hotkeys and push-to-talk only work while the friendspeak window is focused (a browser limitation).
-- Your profiles, saved servers, settings and sounds live in your browser's storage. Use **Settings → My profile → Export** to move a profile to another computer.
+- Your profiles, saved servers, settings and sounds live in your browser's storage. Use **Settings → My profile → Export** to move a profile to another computer. The file holds the profile's keys: servers only let a profile in with the key they first saw for it, so keep the file private and don't lose it (a server admin can reset a lost key under **Users** in the admin dashboard).
 
 ## Documentation for contributors
 

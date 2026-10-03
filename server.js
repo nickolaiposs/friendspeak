@@ -84,12 +84,15 @@ async function startServer(opts = {}) {
       roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
+      pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
     };
   }
 
   let state;
+  let pinsMissing = false; // a state.json from before D42: pin the keys its profiles already have
   try {
     state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    pinsMissing = !state.pins;
     state = { ...defaultState(), ...state };
     delete state.dms; // DMs used to be stored here; they're peer to peer now (D28)
   } catch {
@@ -156,6 +159,45 @@ async function startServer(opts = {}) {
   // A profile's public keys for direct messages (D32). The server only passes
   // the card on; clients check its signature and pin it themselves.
   const cleanCard = (c, pid) => (c && typeof c === 'object' && c.id === pid && isKey(c.s, 43) && isKey(c.d, 43) && isKey(c.sig, 86) ? { id: pid, s: c.s, d: c.d, sig: c.sig } : undefined);
+
+  // Whether `sig` is an Ed25519 signature of `text` by the public key `s` (both base64url)
+  const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
+  function verifySig(s, sig, text) {
+    try {
+      const raw = Buffer.from(s, 'base64url');
+      if (raw.length !== 32 || typeof sig !== 'string') return false;
+      const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI, raw]), format: 'der', type: 'spki' });
+      return crypto.verify(null, Buffer.from(text), key, Buffer.from(sig, 'base64url'));
+    } catch {
+      return false;
+    }
+  }
+  // A card signed by its own key (identity.js makes them)
+  const cardValid = (c) => !!c && verifySig(c.s, c.sig, 'friendspeak-card-v1|' + c.id + '|' + c.d);
+
+  // ---------- profile keys (D42) ----------
+
+  // A profile id belongs to the first key that proves it holds it here: every
+  // later hello with that id must be signed by the same key. The key travels
+  // only inside an exported profile file, so copying an id is no longer enough.
+  // Null prototype: profile ids come from clients and could be "__proto__".
+  state.pins = Object.assign(
+    Object.create(null),
+    Object.fromEntries(Object.entries(state.pins && typeof state.pins === 'object' ? state.pins : {}).filter(([pid, s]) => pid && pid.length <= 64 && isKey(s, 43)))
+  );
+  // Profiles from before this already sent a self-signed card (D32): pin it once, now,
+  // rather than leave the id to whoever signs first after the update
+  if (pinsMissing) {
+    for (const [pid, p] of Object.entries(state.profiles || {})) {
+      const card = cleanCard(p?.card, pid);
+      if (card && cardValid(card)) state.pins[pid] = card.s;
+    }
+  }
+  const pinOf = (pid) => state.pins[pid] || null;
+  // What a client signs to say hello: the socket id is a fresh value the server
+  // chose, and the host it dialed stops another server from passing its hello on
+  const helloText = (sid, host) => 'friendspeak-hello-v1|' + sid + '|' + host;
+  const hostOf = (socket) => String(socket.handshake.headers.host || '').toLowerCase();
 
   function cleanProfile(p = {}) {
     const pid = str(p.id, 64) || id();
@@ -411,18 +453,8 @@ async function startServer(opts = {}) {
   mailSweepTimer.unref();
 
   // The address (mailbox name) of whoever signed `nonce` with the Ed25519 key `s`, or null
-  const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
-  function mailAddress(s, sig, nonce) {
-    try {
-      const raw = Buffer.from(s, 'base64url');
-      if (raw.length !== 32) return null;
-      const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI, raw]), format: 'der', type: 'spki' });
-      if (!crypto.verify(null, Buffer.from('friendspeak-dm-auth-v1|' + nonce), key, Buffer.from(sig, 'base64url'))) return null;
-      return crypto.createHash('sha256').update(raw).digest('base64url');
-    } catch {
-      return null;
-    }
-  }
+  const mailAddress = (s, sig, nonce) =>
+    verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce) ? crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url') : null;
 
   // ---------- realtime ----------
 
@@ -525,14 +557,14 @@ async function startServer(opts = {}) {
     // code. They can reach the people whose profile id or mailbox address
     // they already know, and nothing else: no member list, no mailbox.
     const dm = io.of('/dm');
-    const dmOnline = () => [...new Set([...dm.sockets.values()].map((s) => s.data.profileId))];
+    const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
     const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
       const { profileId, password, guest } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
       const wrong = !!PASSWORD && password !== PASSWORD;
       // A guest can't use the profile id of someone on this server
-      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid))) return next(new Error('Wrong server password'));
+      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Wrong server password'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
@@ -542,21 +574,29 @@ async function startServer(opts = {}) {
     dm.on('connection', (socket) => {
       const pid = socket.data.profileId;
       const guest = socket.data.guest;
-      // Newest wins, like chat sessions: a reconnect replaces the stale socket
-      for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
-      socket.join('p:' + pid);
-      if (!guest) {
-        socket.join('members');
-        socket.emit('online', dmOnline());
-      }
-      socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+      // A profile id with a key pinned here (D42) is only someone once they sign
+      // the challenge below with that key. Until then the socket can use
+      // mailboxes, but it isn't present, can't signal and replaces no one.
+      const arrive = () => {
+        socket.data.verified = true;
+        // Newest wins, like chat sessions: a reconnect replaces the stale socket
+        for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
+        socket.join('p:' + pid);
+        if (!guest) {
+          socket.join('members');
+          socket.emit('online', dmOnline());
+        }
+        socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+      };
+      if (!pinOf(pid)) arrive();
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
-        if (to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
+        if (socket.data.verified && to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
       });
       // Guests name the people they want presence for
       socket.on('watch', (ids, ack) => {
         if (typeof ack !== 'function') return;
+        if (!socket.data.verified) return ack({ online: [] });
         const list = [...new Set((Array.isArray(ids) ? ids : []).slice(0, 200).map((v) => str(v, 64)).filter(Boolean))];
         for (const room of socket.rooms) if (room.startsWith('w:')) socket.leave(room);
         for (const v of list) socket.join('w:' + v);
@@ -571,6 +611,7 @@ async function startServer(opts = {}) {
         if (typeof ack !== 'function') return;
         const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
         if (!addr) return ack({ error: 'Bad signature' });
+        if (!socket.data.verified && s === pinOf(pid)) arrive();
         if (socket.data.addr) socket.leave('a:' + socket.data.addr);
         socket.data.addr = addr;
         socket.join('a:' + addr);
@@ -614,7 +655,7 @@ async function startServer(opts = {}) {
       socket.on('disconnect', () => {
         // Shutting down disconnects everyone: that's not them leaving, and
         // their direct connections don't need this server (D39)
-        if (closing) return;
+        if (closing || !socket.data.verified) return;
         if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
       });
     });
@@ -721,6 +762,22 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
+      // Forget the key a profile id is pinned to (D42), for someone who lost it:
+      // the next hello that signs with any key claims the id. Dashboard only,
+      // or anyone could take over anyone's profile.
+      resetKey(profileId) {
+        profileId = str(profileId, 64);
+        if (!profileId || !pinOf(profileId)) return { error: 'That profile has no key here' };
+        delete state.pins[profileId];
+        // The old card would mislead DM contacts until the new key says hello
+        if (Object.hasOwn(state.profiles, profileId)) {
+          delete state.profiles[profileId].card;
+          io.emit('profile', { id: profileId, ...state.profiles[profileId] });
+        }
+        save();
+        return { ok: true };
+      },
+
       // --- roles: labels only, they grant nothing (D3, D34) ---
 
       createRole({ name, color }) {
@@ -798,11 +855,22 @@ async function startServer(opts = {}) {
           }
         });
 
-      socket.on('hello', ({ profile, password } = {}, ack) => {
+      socket.on('hello', ({ profile, password, proof } = {}, ack) => {
         if (typeof ack !== 'function') return;
         if (PASSWORD && password !== PASSWORD) return ack({ error: 'Wrong server password' });
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) return ack({ error: 'You are banned from this server', banned: true });
+        // Prove the profile's key (D42). Apps from before D42 send no proof: they
+        // can still use a profile id that no key has claimed yet, as before.
+        const pin = pinOf(p.id);
+        const card = p.card && cardValid(p.card) ? p.card : undefined;
+        const signed = !!card && verifySig(card.s, str(proof, 128), helloText(socket.id, hostOf(socket)));
+        // A proof that doesn't check out is a bug or a proxy that rewrites Host, never a reason to go on unprotected
+        if (proof && !signed) return ack({ error: 'Could not verify your profile key. If this server is behind a reverse proxy, it must pass the original Host header.', key: true });
+        if (pin && !signed) return ack({ error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
+        if (pin && card.s !== pin) return ack({ error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
+        if (signed && !pin) state.pins[p.id] = card.s;
+        p.card = card;
         lastIp.set(p.id, clientIp(socket));
         // One live session per profile. After a network drop the old socket
         // lingers until its ping times out (~45 s), so a reconnect would show
@@ -829,6 +897,7 @@ async function startServer(opts = {}) {
       on('profile:update', (profile) => {
         const u = users.get(socket.id);
         const p = cleanProfile({ ...profile, id: u.profile.id });
+        p.card = u.profile.card; // checked at hello; it can't change during a session
         u.profile = p;
         state.profiles[p.id] = storedProfile(p);
         save();
