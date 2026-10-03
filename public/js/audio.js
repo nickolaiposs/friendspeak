@@ -1,11 +1,11 @@
 // Audio graph:
 //
-//   mic ──> micMono ──> micGain ──> limiter ──┬──> gate(mute/PTT/mic test) ──┬──> outDest (MediaStream sent to peers)
-//                                             ├──> micAnalyser (Settings)    └──> selfAnalyser (speaking indicator)
-//                                             └──> loop (mic test) ──> master
-//   soundboard clips ──> sbBus ──────────┬──> outDest
-//                                        ├──> selfAnalyser
-//                                        └──> monitor ──> master (hear it yourself)
+//   mic ──> micMono ──> denoise ──> micGain ──> limiter ──┬──> gate(mute/PTT/mic test) ──┬──> outDest (MediaStream sent to peers)
+//                                                         ├──> micAnalyser (Settings)    └──> selfAnalyser (speaking indicator)
+//                                                         └──> loop (mic test) ──> master
+//   soundboard clips ──> sbBus ──────────────────────┬──> outDest
+//                                                    ├──> selfAnalyser
+//                                                    └──> monitor ──> master (hear it yourself)
 //
 //   friend's voice ──> user gain ──> voiceBus ──> limiter ──> master
 //                 └──> analyser (speaking indicator)
@@ -15,9 +15,10 @@
 // Voices play through the graph instead of <audio> elements because an
 // element's volume stops at 100%, and a gain node can boost a quiet friend.
 //
-// The mic gets the browser's noise suppression and automatic gain, each a
-// setting, and no echo cancellation or gate (D38, D44). It is made mono first:
-// many mics capture stereo with the voice on one side only.
+// The mic gets the browser's automatic gain and our noise suppression
+// (DeepFilterNet in a worklet, denoise-worklet.js), each a setting, and no echo
+// cancellation or gate (D38, D44, D47). It is made mono first: many mics
+// capture stereo with the voice on one side only.
 import { settings } from './store.js';
 
 export const MAX_USER_VOLUME = 3;
@@ -36,6 +37,15 @@ const LIMITER_TRIM = 10 ** ((0.6 * LIMITER.threshold * (1 - 1 / LIMITER.ratio)) 
 // out. The browser resamples for devices at other rates.
 const SAMPLE_RATE = 48000;
 
+// Noise suppression (D47): the worklet, and what it runs. See public/vendor/deepfilternet/README.md.
+const DENOISE = {
+  worklet: new URL('./denoise-worklet.js', import.meta.url),
+  wasm: new URL('../vendor/deepfilternet/df_bg.wasm', import.meta.url),
+  model: new URL('../vendor/deepfilternet/DeepFilterNet3_onnx.tar.gz', import.meta.url),
+};
+// settings.noiseSuppressionLimit: how far noise is turned down, in dB. The slider's top means no limit.
+export const DENOISE_LIMIT = { min: 6, max: 40, step: 2, none: 100 };
+
 class AudioEngine {
   constructor() {
     this.ctx = null;
@@ -48,6 +58,8 @@ class AudioEngine {
     this.micRun = 0; // bumped by every mic start and stop, so a slow start can tell it was overtaken
     this.micInfo = null; // what the running mic applies: { label, want, got }
     this.micTest = false; // Settings' mic test is running (setMicTest)
+    // Noise suppression: 'off' | 'on' | 'failed' (can't run here: error says why, and the mic is sent as it is)
+    this.denoise = { state: 'off', error: '', node: null, loaded: null };
     this.monitorOn = false;
   }
 
@@ -112,6 +124,58 @@ class AudioEngine {
     if (s.outputDevice) this.setOutputDevice(s.outputDevice);
   }
 
+  denoiseFailed(error) {
+    console.warn('noise suppression:', error);
+    Object.assign(this.denoise, { state: 'failed', error });
+  }
+
+  // Starts the noise suppression worklet with its wasm and model (22 MB, from
+  // the app's own files) and puts it between micMono and micGain, where it
+  // stays for good. Resolves to whether it runs.
+  async loadDenoise() {
+    const d = this.denoise;
+    const ctx = this.ctx;
+    try {
+      if (ctx.sampleRate !== SAMPLE_RATE) throw new Error(`the audio device runs at ${ctx.sampleRate} Hz and it needs 48000`);
+      const [wasm, model] = await Promise.all([
+        WebAssembly.compileStreaming(fetch(DENOISE.wasm)),
+        fetch(DENOISE.model).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('its model is missing')))),
+        ctx.audioWorklet.addModule(DENOISE.worklet),
+      ]);
+      // The compiled module can only travel as an option: a message carrying one never arrives
+      const node = new AudioWorkletNode(ctx, 'fs-denoise', { channelCount: 1, channelCountMode: 'explicit', outputChannelCount: [1], processorOptions: { wasm, model } });
+      const { error } = await new Promise((resolve) => {
+        node.port.onmessage = (e) => resolve(e.data);
+        node.onprocessorerror = () => resolve({ error: 'it stopped' });
+        setTimeout(() => resolve({ error: 'it took too long to start' }), 10000);
+      });
+      if (error) throw new Error(error);
+      node.port.onmessage = (e) => e.data.error && this.denoiseFailed(e.data.error); // a frame failed: it is a wire again
+      node.onprocessorerror = () => this.denoiseFailed('it stopped');
+      this.micMono.disconnect(this.micGain);
+      this.micMono.connect(node).connect(this.micGain);
+      d.node = node;
+      return true;
+    } catch (e) {
+      this.denoiseFailed(e.message);
+      return false;
+    }
+  }
+
+  // Makes noise suppression match settings.noiseSuppression and its limit.
+  // Works live: once the worklet is in the graph (the first time it's switched
+  // on) this is a message to it, and nothing is rewired. Never throws: when it
+  // can't run, the mic is sent as it is and Settings says so.
+  async applyDenoise() {
+    this.ensure();
+    const d = this.denoise;
+    if (settings.get().noiseSuppression) d.loaded ||= this.loadDenoise();
+    if (!d.loaded || !(await d.loaded) || d.state === 'failed') return;
+    const s = settings.get(); // as it is now: it may have changed while the model loaded
+    d.node.port.postMessage({ on: !!s.noiseSuppression, limit: s.noiseSuppressionLimit });
+    d.state = s.noiseSuppression ? 'on' : 'off';
+  }
+
   // node ──> limiter ──> trim; returns the trim to connect onward
   limiter(node) {
     const trim = new GainNode(this.ctx, { gain: LIMITER_TRIM });
@@ -130,7 +194,9 @@ class AudioEngine {
     const run = this.micRun;
     const s = settings.get();
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('microphone access needs https or localhost');
-    const want = { echoCancellation: false, autoGainControl: !!s.autoGain, noiseSuppression: !!s.noiseSuppression };
+    // Noise suppression is ours (applyDenoise), never the browser's
+    const want = { echoCancellation: false, autoGainControl: !!s.autoGain, noiseSuppression: false };
+    const denoise = this.applyDenoise();
     // Chromium ignores an `ideal` deviceId for mics (measured: Electron 44 gave
     // the default every time), so the chosen one is exact, and the default
     // stands in while it's unplugged.
@@ -142,6 +208,7 @@ class AudioEngine {
       if (!s.inputDevice || !['OverconstrainedError', 'NotFoundError'].includes(e.name)) throw e;
       stream = await open(undefined);
     }
+    await denoise; // so the mic doesn't start out unprocessed
     if (run !== this.micRun) return stream.getTracks().forEach((t) => t.stop()); // stopped or restarted meanwhile
     this.micStream = stream;
     this.micSource = this.ctx.createMediaStreamSource(stream);

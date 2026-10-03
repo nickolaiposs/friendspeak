@@ -446,7 +446,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** the same pipeline in a worker (keeps the UI thread free, but MediaPipe's loader uses `importScripts`, which module workers don't have, and a classic worker can't import the ES bundle without a build step); compositing in WebGL on MediaPipe's own context (no mask readback, but far more code for a 256 px mask); TensorFlow.js body-segmentation (wraps the same model with a bigger runtime); ONNX Runtime Web with MODNet or Robust Video Matting (cleaner edges, models of tens of MB and much more GPU); the operating system's effects (macOS Portrait, Windows Studio Effects: free where present, but hardware-dependent and missing on Linux); blurring on the viewer's side (the room would still leave the sender's machine); shipping stock photos as presets (licensing, and megabytes in every installer); a "don't show the preview again" switch (not asked for; the dialog is also where the background is chosen).
 
-## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active (mic processing amended by D44)
+## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active (mic processing amended by D44; noise suppression replaced by D47)
 **Context:** D35's processing (RNNoise, a noise gate, speaker mode, the browser's echo canceller and automatic gain) gave people many options and changed how they sounded in ways they didn't ask for (issue #44). Toggling noise reduction during a call was also reported to crash the app (#43). Voice used WebRTC's default Opus: mono, about 32 kbps, so soundboard clips and music sounded flat (#45). And the old "Test mic" only showed a level: you couldn't hear yourself, and not at all during a call (#48).
 **Decision:**
 - **One mic option:** the browser's (WebRTC's) noise suppression, on by default. Echo cancellation and automatic gain are explicitly off; there is no RNNoise, gate or speaker mode. `mic-worklet.js` is gone, and nothing in the app loads the vendored RNNoise files any more.
@@ -602,3 +602,41 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 - Off, 1440p60 is beyond what software encoding and drawing hold on most machines; the ladder (D45) settles lower.
 
 **Alternatives:** separate switches for drawing, decoding and encoding (more precise, more to explain, and nobody asked); storing it in the page's settings and relaunching to apply (the main process can't read `localStorage` before the window exists); always on with no switch (the issue's reading, but leaves no way out of a bad driver).
+
+## D47: Noise suppression is DeepFilterNet in a worklet, not the browser's · Active
+**Context:** after D38 the one mic option was the browser's (WebRTC's) noise suppression. It is on or off, and it leaves a lot behind: D35 measured noise-only stretches at −51 dB with it, against −68 to −71 dB with RNNoise, which D38 removed because it changed how people sounded (#44). Issue #72 asked for DeepFilterNet instead, a fullband (48 kHz) speech enhancer that D35 had passed over as too heavy without measuring it, and asked for it to be measured first, with "no" as a possible outcome.
+
+**Measured** (D35's method: speech at −20 dBFS over fan noise and key clicks at −38 dBFS, rendered offline through the worklet at 48 kHz and live with a fake mic; a recording of a person as well as D35's synthetic voice; Electron 44 on an Apple M4 Pro):
+
+| | Browser (D35) | RNNoise (D35) | DeepFilterNet 3 |
+|---|---|---|---|
+| Noise left in noise-only stretches | −51 dB | −68 to −71 dB | −66 to −69 dB at full strength, −59 dB limited to 24 dB, −49 dB limited to 12 dB |
+| Speech level | unchanged | unchanged | −0.3 dB, every band from 125 Hz to 12 kHz within 0.5 dB of the clean voice |
+| Added delay | | 21 ms | 39 ms |
+| CPU, offline render | | 0.7% of a core | 2.8% of a core |
+| Size | | 150 KB | 22 MB (14 MB wasm, 8 MB model) |
+
+Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loaded), at most 1 ms. On an idle machine the same work reads as 1.1 to 1.4 ms a frame and 15% of a core, because the core is clocked down; that is not a cost under load. Starting the model blocks the audio thread once for about 70 to 150 ms.
+
+**Decision:**
+- **The "Noise suppression" checkbox now switches DeepFilterNet.** `getUserMedia` always asks for `noiseSuppression: false`. It is still the only mic processing besides automatic gain (D44), on by default, and a saved on or off carries over.
+- **A strength slider** under it: the most the noise is turned down by, 6 to 40 dB, with "maximum" (no limit) at the top and as the default. It is libDF's attenuation limit, so it is exact: at 24 dB a noise is 24 dB quieter.
+- **A worklet of our own** (`denoise-worklet.js`, about 100 lines) around upstream's wasm, between `micMono` and `micGain`. It goes into the graph the first time the setting is on and stays; switching and the slider are messages, so nothing is rewired per toggle (the area #43 pointed at) and the mic doesn't restart. Off, it is a wire with no delay.
+- **Our own build of upstream, vendored** in `public/vendor/deepfilternet/` (`scripts/denoise/`, built in Docker from a pinned commit). No npm dependency and no bundler (D1); the server image gets nothing. It carries a patch, for two reasons found while measuring:
+  - The wasm binding uses the library's default thresholds, which skip the deep-filtering stage above 20 dB local SNR. With them the voice came out 5 dB down (10 dB in places, 9 dB at 1 to 2 kHz) over noise at −38 dBFS: the kind of change #44 complained about. Upstream's own `deep-filter` program uses −15/35/35 dB and keeps the voice level; the patch uses those.
+  - With the `tract` version upstream pins (0.21) the patched build cost 9.5% of a core. On 0.23 it costs 2.8% with the same output, so the patch also moves libDF to tract 0.23's API.
+- **If it can't run** (no 48 kHz context, a file missing, the wasm failing) the mic is sent unprocessed and Settings says why. There is no fallback to the browser's suppression: one behaviour to reason about.
+
+**Why this doesn't repeat D35/D38:** D35 added three kinds of processing with five options, and its RNNoise thinned voices. Here there is one switch and one slider, the speech level and spectrum were measured against the clean voice (−0.3 dB, 21.5 dB signal-to-distortion against 18 dB for the untouched noisy mic), and the one way found for it to change a voice was fixed in the build before shipping.
+
+**Consequences:**
+- The mic is 39 ms later with it on (30 ms in the model, 9 ms of queueing between 480-sample frames and 128-sample blocks), 18 ms more than RNNoise was.
+- It removes what isn't speech. At full strength a clap came out 67 dB down and music played into the mic 50 dB down; with a limit they are down by exactly the limit. Laughter was not measured (there is no way to synthesize it) and is the open risk from #44: the slider and the checkbox are the remedies. Soundboard clips don't pass through it.
+- Every installer grows by the 22 MB of wasm and model.
+- CPU and delay were measured on one fast machine. An older laptop will pay more than 2.8% of a core, on the audio thread that also plays friends' voices; if that crackles under load, this needs revisiting (a worker, or off by default).
+- The first switch-on in a session inserts the node and blocks the audio thread for about a tenth of a second, in a call if that is where it happens.
+- Friends on an older app still send with the browser's suppression.
+- The vendored wasm is ours to rebuild: upstream has had no release since 0.5.6 and its `main` doesn't compile against tract 0.23 without the patch.
+- `mic-worklet.js` (D35's gate, unused since D38) is deleted.
+
+**Alternatives:** the `deepfilternet3-noise-filter` npm package (its wasm is downloaded from the author's CDN at run time, is built from unpublished sources, and has the threshold problem: measured −24.6 dBFS speech from −19.5); upstream's wasm unpatched (same problem, and 2 to 3 times the CPU); upstream's low-latency model (10 ms instead of 30 ms in the model at about the same quality, but a 36 MB file); a limited default strength such as 24 dB (leaves key clicks audible, and what it would protect is equally gone at −24 dB); the model in a worker with shared buffers (keeps the audio thread free at the price of more delay and code; not needed at the measured cost); keeping the browser's suppression as a fallback or a second level (two behaviours, and D35's "levels" again); recording a "no" (the measured CPU and delay are four and two times RNNoise's, which is within what a call tolerates).
