@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, CUES } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { nativeMedia } from './native.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
@@ -5234,14 +5234,20 @@ function settingsVoice(body) {
     busy = false;
   };
   const micNote = h('p', { class: 'muted small', hidden: true });
+  let denoiseOn = st.noiseSuppression;
+  const applyDenoise = () => audio.micStream && audio.applyDenoise(); // live; a mic that starts later applies it itself
   const iv = setInterval(() => {
     const lvl = audio.micStream ? Level(audio.micAnalyser) : 0;
     meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
     if (testing && !busy && !audio.micStream) setTest(false); // the call it ran in ended, and took the mic with it
-    // A device or OS can refuse a constraint without an error
+    // A device or OS can refuse a constraint without an error, and noise suppression may not run here
     const info = audio.micInfo;
-    const refused = [info?.want.noiseSuppression && info.got.noiseSuppression === false && 'noise suppression', info?.want.autoGainControl && info.got.autoGainControl === false && 'automatic gain'].filter(Boolean);
-    const note = refused.length ? `This microphone or system didn’t apply ${refused.join(' or ')}.` : '';
+    const note = [
+      info?.want.autoGainControl && info.got.autoGainControl === false && 'This microphone or system didn’t apply automatic gain.',
+      denoiseOn && audio.denoise.state === 'failed' && `Noise suppression can’t run here (${audio.denoise.error}), so your mic is sent as it is.`,
+    ]
+      .filter(Boolean)
+      .join(' ');
     if (micNote.textContent !== note) micNote.textContent = note;
     micNote.hidden = !note;
   }, 60);
@@ -5297,6 +5303,27 @@ function settingsVoice(body) {
       h('input', { type: 'range', min: 0, max, step: 0.01, value: st[key], oninput: (e) => (settings.set({ [key]: +e.target.value }), (val.textContent = Math.round(e.target.value * 100) + '%'), after(+e.target.value)) })
     );
   };
+  // Noise suppression strength: the most the noise is turned down by. The top of the slider is no limit.
+  const limitText = (v) => (v > DENOISE_LIMIT.max ? 'maximum' : `up to ${v} dB quieter`);
+  const limitVal = h('span', {}, limitText(st.noiseSuppressionLimit));
+  const denoiseLimit = h(
+    'label',
+    { class: 'field' },
+    h('span', {}, 'Strength: ', limitVal),
+    h('input', {
+      type: 'range',
+      min: DENOISE_LIMIT.min,
+      max: DENOISE_LIMIT.max + DENOISE_LIMIT.step,
+      step: DENOISE_LIMIT.step,
+      value: Math.min(st.noiseSuppressionLimit, DENOISE_LIMIT.max + DENOISE_LIMIT.step),
+      oninput: (e) => {
+        const v = +e.target.value > DENOISE_LIMIT.max ? DENOISE_LIMIT.none : +e.target.value;
+        settings.set({ noiseSuppressionLimit: v });
+        limitVal.textContent = limitText(v);
+        applyDenoise();
+      },
+    })
+  );
 
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
@@ -5321,8 +5348,13 @@ function settingsVoice(body) {
     slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
     check('autoGain', 'Automatic gain', restartMic),
     h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
-    check('noiseSuppression', 'Noise suppression', restartMic),
-    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
+    check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
+    denoiseLimit,
+    h(
+      'p',
+      { class: 'muted small' },
+      'Takes keyboards, fans and other background noise out of your mic, on this device. Turn the strength down if it cuts sounds you want heard. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'
+    ),
     micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
