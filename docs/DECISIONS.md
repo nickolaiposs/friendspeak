@@ -18,7 +18,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** port-forwarding one TCP port is enough. The game crashing the process takes chat down too (acceptable at this scale).
 **Alternatives:** Yukon's default of separate ports under pm2 behind a reverse proxy.
 
-## D3: No accounts, client-owned identity · Active
+## D3: No accounts, client-owned identity · Active (spoofable ids superseded by D42)
 **Context:** the core requirement is "saved profiles with no signup anywhere".
 **Decision:**
 - A profile (uuid, name, color, avatar, status) is created and stored in the client, and it can be exported/imported.
@@ -27,7 +27,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 - Anyone connected can manage channels and emojis. Only the author can edit or delete a message.
 
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
-**Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D30); servers still trust the profile id.
+**Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D32), and servers followed (D42): a server now pins the key that first says hello as a profile id. Still no accounts.
 
 ## D4: JSON file for server state · Active
 **Decision:** `data/state.json`, rewritten with a debounced (500 ms) atomic write. History is capped at 500 messages per channel.
@@ -310,8 +310,8 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:**
 - The host of a relay sees who leaves mail for whom, when, and how big it is (the sender's card is on the blob), but never the content. It can drop or delay mail.
 - The keys are long-lived and there is no ratchet: someone who steals a profile's keys (or an exported profile file, which contains them) can read mail they recorded earlier. No forward secrecy.
-- The first card seen is trusted. A server could hand out a wrong card for a member you have never talked to; a friend code swapped out of band avoids that. Chat on servers is unchanged: profile ids there are still spoofable (D3), and `card` in a server profile is only as trustworthy as that server.
-- Presence and signaling are still by profile id, so someone can still *appear* as a friend or knock their `/dm` socket off (newest wins). They can't read or write that friend's DMs.
+- The first card seen is trusted. A server could hand out a wrong card for a member you have never talked to; a friend code swapped out of band avoids that. Chat on servers was unchanged at first: profile ids there were still spoofable (D3). D42 fixed that: a server profile's `card` is now one whose key proved itself to that server, though still only as trustworthy as the server.
+- Presence and signaling are still by profile id, so someone can still *appear* as a friend or knock their `/dm` socket off (newest wins). They can't read or write that friend's DMs. (D42 closes this for profile ids with a key pinned on that server.)
 - A friend code tells its holder which servers you use, and makes the app open a socket to each of a contact's relays (at most 8 guest relays in total). A server with a self-signed certificate that isn't pinned yet fails silently there (D20), as for bookmarked servers.
 - By default a password-protected server accepts sealed DM traffic from people without the password. They can't see or join anything; the caps above bound what they can store.
 - **One device at a time.** An exported profile carries its keys, so the same identity works on a second device, but the two don't sync: mail goes to whichever device collects it first, history stays where it was received, and `/dm` still lets only the newest socket per profile stay connected. Real multi-device needs per-device mailbox cursors and a way to send your own messages to your other devices.
@@ -369,7 +369,7 @@ Without a mic, users join **listen-only** instead of failing.
 - The log buffer is memory only (2000 lines) and starts empty after a restart.
 - Once the mode or window is set in the dashboard, changing `AUTO_UPDATE` or `MAINTENANCE_CRON` in the compose file has no effect until it is reset there. The Updates page shows both the environment value and the active one, so this is visible.
 - The in-app management actions (ban, remove, channels, emojis, files) are unchanged and still open to everyone (D3, D27), including the ban and remove the dashboard also offers. The dashboard adds a gated view of the server. It is not a permission system.
-- Roles are labels only and enforce nothing. They attach to profile ids, which are spoofable (D3), so anyone who copies a profile id shows its roles. Before roles ever grant anything, servers need identities that can't be spoofed (the D3 upgrade path; DMs already have keypairs, D32). Don't present them as a security feature.
+- Roles are labels only and enforce nothing. They attach to profile ids. Since D42 a profile id with a pinned key can't be copied, so a role is held by whoever holds that key; profile ids without a key (apps from before D42) can still be copied. Granting permissions through roles is now possible, but it is a separate decision.
 - Assignments live in `memberRoles` and are dropped when a member is removed. Only the dashboard can change roles and assignments. It is the one management action that is not open to everyone in the app.
 
 **Alternatives:** an admin panel inside the desktop app (it already has the pinned certificate and the socket, and no browser attack surface, but it isn't a web UI and needs the app installed); signed stateless session cookies (they survive restarts, but revoking a key couldn't end them at once); admin rights on a profile id (spoofable, D3) or on a DM keypair identity (D32; possible later, but servers still trust profile ids today); a Socket.IO namespace for the dashboard (a second auth path, and the client library to serve); reading container logs from the Docker socket (root on the host; `updater.js` leaves that to the Watchtower sidecar, D29); trusting `X-Forwarded-For`.
@@ -484,3 +484,24 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** the zoom covers the whole window, including the game iframe and video. At large sizes the window is narrower in CSS pixels, so the member list hides below 900px (the existing breakpoint) and at 200% the narrowest window is 470 CSS px wide. The client has no UI size outside the desktop app (it ships only there, D26).
 **Alternatives:** CSS `zoom` on `<html>` (works in a browser too, but Chromium's CSS zoom still has edge cases with coordinates, canvases and iframes, and it would fight the menu's native zoom); a `--ui-scale` variable on every fixed size in the stylesheet (hundreds of rules to convert, and every new rule must remember it); keeping Electron's zoom roles and reading the level back (it's per origin, not persisted, and the roles have no event when they change it).
+
+## D42: Servers pin a key per profile id, and `hello` is signed · Active
+**Context:** profile ids are made by the client and were trusted as sent (D3), so anyone who learned an id (it's in every message and member list) could post, edit and delete as that person, hold their roles, appear as them in DMs and knock them off. Since D32 every profile already has an Ed25519 key, and an exported profile file carries it. The ask: make a profile impossible to use without its exact profile file, which still has to work for switching devices or using several.
+**Decision:**
+- **Pinning:** a server keeps `pins` in `state.json`, profile id → Ed25519 public key, never sent to clients. The first `hello` that proves a key for an id pins it (trust on first use, like D20 and D32). Every later `hello` for that id must prove the same key, or it's refused. A state.json from before this pins, once, the key in each stored profile's self-signed card, so an update doesn't open a window for someone to claim existing profiles first.
+- **Proof:** `hello` carries `proof`, a signature over `friendspeak-hello-v1|<socket id>|<host>`. The socket id is chosen by the server for this connection, so it's a fresh challenge with no extra round trip, and a proof can't be replayed on another connection. The host is the server as the app dialed it (`new URL(address).host`), checked against the `Host` header, so a malicious server can't pass on a hello its visitors signed to another server. The card in the hello must be signed by its own key. A proof that's sent and doesn't verify is refused, not treated as an old app.
+- **Old apps** send no proof. They can still use a profile id that has no key pinned yet, and their card is only kept if it's validly signed. A pinned id refuses them with "Update friendspeak".
+- **The card can't change during a session.** `profile:update` keeps the card checked at `hello`.
+- **`/dm` (D28, D32):** a socket for a pinned id is nobody until it answers the existing `challenge` with `identify` using the pinned key. Until then it can use its mailbox, but it isn't present, its signals are dropped, it doesn't count as online, and it replaces no one (newest wins only among verified sockets). Guests can't use a pinned id without the password, as for stored profiles.
+- **Several devices** use the same identity by importing the same profile file. Newest wins still applies: one chat session per profile at a time (unchanged).
+- **Lost keys:** removing a member keeps the pin, because removal is open to everyone in the app (D27) and would otherwise let anyone free up someone's id and take it. The admin dashboard (D34) can **Reset key**, which drops the pin and the stored card. The next signed `hello` with that id claims it. The Users view shows the start of each pinned key.
+
+**Consequences:**
+- Copying a profile id is no longer enough. The profile file is the identity: whoever has it can be you on every server, and losing it (or deleting the profile without exporting it) loses the profile on every server that pinned it, unless an admin there resets it. The app says so in Settings → Profiles and when deleting a profile, and warns when an imported file has no keys (exports from before D32).
+- Trust on first use: whoever first says hello with an id on a server owns it there. Ids are random, so in practice that's the person who made the profile. A profile that only ever connected with a pre-D32 app has no card to migrate, and the first new app to sign for it claims it. An admin can reset that.
+- A reverse proxy must pass the original `Host` header (D34 already needed it for the dashboard), or every new app is refused with a message that says so. nginx's default `proxy_set_header Host $proxy_host` breaks it. Caddy and Traefik pass it by default.
+- Each server pins on its own; there's no global registry, so a server you've never joined learns your key the first time you join it.
+- Profile ids that only old apps use stay spoofable until their owner updates.
+- No new keys: friend codes, mailboxes and DM sealing (D32) keep using the same key pairs, so nothing already stored changes.
+
+**Alternatives:** the profile id becoming the key hash (rejected in D32 for the same reasons: it renames every profile and breaks history, bans and roles); a server-issued nonce event before `hello` (an extra round trip and a new event old servers don't send, where the socket id already is a fresh server-chosen value); keys on the server (accounts, against D3); refusing every unsigned `hello` (locks out old apps on profiles nobody can take from them anyway); trusting `X-Forwarded-Host` (a relaying server would set it to its own name); letting a removal drop the pin (anyone in the app could then take over a member's profile).
