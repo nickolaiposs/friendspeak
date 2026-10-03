@@ -1,5 +1,5 @@
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -189,7 +189,73 @@ function toggleServerMute(id) {
 function mentionCandidates(server = S.server) {
   const roles = (Array.isArray(server?.roles) ? server.roles : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && r.name);
   const people = Object.entries(server?.profiles || {}).filter(([, p]) => p && typeof p.name === 'string' && p.name);
-  return [{ kind: 'everyone', id: '', name: 'everyone' }, ...roles.map((r) => ({ kind: 'role', id: r.id, name: r.name, color: r.color })), ...people.map(([id, p]) => ({ kind: 'user', id, name: p.name }))];
+  return [{ kind: 'everyone', id: '', name: 'everyone' }, ...roles.map((r) => ({ kind: 'role', id: r.id, name: r.name, color: r.color })), ...people.flatMap(([id, p]) => [
+      { kind: 'user', id, name: p.name },
+      { kind: 'user', id, name: `${p.name}#${mentionTag(id)}`, tagged: true }, // tells apart people with the same name
+    ]),
+  ];
+}
+// Names more than one person here has (lowercased): those show their #tag
+function sharedNames(server = S.server) {
+  const seen = new Set();
+  const dup = new Set();
+  for (const p of Object.values(server?.profiles || {})) {
+    const n = typeof p?.name === 'string' && p.name.toLowerCase();
+    if (n) (seen.has(n) ? dup : seen).add(n);
+  }
+  return dup;
+}
+const nameTag = (id, name, dup = sharedNames()) => (typeof name === 'string' && dup.has(name.toLowerCase()) ? mentionTag(id) : '');
+// How a mention of someone or a role reads today: what autocomplete inserts and edits start from
+function mentionText(kind, id, server = S.server, dup = sharedNames(server)) {
+  if (kind === 'everyone') return '@everyone';
+  if (kind === 'role') {
+    const r = server?.roles?.find((r) => r.id === id);
+    return r ? '@' + r.name : null;
+  }
+  const n = server?.profiles?.[id]?.name;
+  return n ? '@' + n + (nameTag(id, n, dup) ? '#' + mentionTag(id) : '') : null;
+}
+// The server's mention positions in m.text ([at, length, kind, id]), grouped by position:
+// a group of several is an untagged name more than one person has
+function spanGroups(m) {
+  const spans = Array.isArray(m?.mentions?.spans) ? m.mentions.spans : null;
+  if (!spans) return null;
+  const byAt = new Map();
+  for (const sp of spans) if (Array.isArray(sp) && Number.isInteger(sp[0]) && Number.isInteger(sp[1]) && sp[1] > 0) byAt.set(sp[0], [...(byAt.get(sp[0]) || []), sp]);
+  return [...byAt.values()].sort((a, b) => a[0][0] - b[0][0]);
+}
+// formatText's `mentions`: drawn with today's names, so a rename carries over to old messages
+function mentionMarks(m, server = S.server) {
+  const groups = spanGroups(m);
+  if (!groups) return null;
+  const dup = sharedNames(server);
+  const mine = new Set(myRoleIds(server));
+  const my = me().id;
+  return groups.map((group) => {
+    const [at, len, kind, id] = group[0];
+    const written = String(m.text || '').slice(at + 1, at + len);
+    const isMe = group.some(([, , k, i]) => k === 'everyone' || (k === 'user' && i === my) || (k === 'role' && mine.has(i)));
+    if (group.length > 1) return { at, len, kind: 'user', id: '', name: written, me: isMe };
+    if (kind === 'everyone') return { at, len, kind, id: '', name: 'everyone', me: isMe };
+    if (kind === 'role') {
+      const r = server?.roles?.find((r) => r.id === id);
+      return { at, len, kind, id, name: r?.name || written, color: r?.color, me: isMe };
+    }
+    const n = server?.profiles?.[id]?.name;
+    return { at, len, kind: 'user', id, name: n || written, tag: n ? nameTag(id, n, dup) : '', me: isMe };
+  });
+}
+// A message's text for editing, with its mentions written the way they read today
+function editableText(m, server = S.server) {
+  let t = String(m.text || '');
+  const dup = sharedNames(server);
+  for (const group of (spanGroups(m) || []).reverse()) {
+    const [at, len, kind, id] = group[0];
+    const now = group.length === 1 && t[at] === '@' && mentionText(kind, id, server, dup);
+    if (now) t = t.slice(0, at) + now + t.slice(at + len);
+  }
+  return t;
 }
 const myRoleIds = (server = S.server) => (Array.isArray(server?.memberRoles?.[me().id]) ? server.memberRoles[me().id] : []);
 // For formatText: the same list, flagged with the ones that concern us
@@ -1406,7 +1472,9 @@ function openSocket(entry, rejoinVoice = null) {
     const { roles, memberRoles } = msg && typeof msg === 'object' ? msg : {};
     c.server.roles = Array.isArray(roles) ? roles : [];
     c.server.memberRoles = memberRoles && typeof memberRoles === 'object' && !Array.isArray(memberRoles) ? memberRoles : {};
-    if (viewed()) renderMembers();
+    if (!viewed()) return;
+    renderMembers();
+    if (S.channelId && !inDmView()) renderMessages(true); // role mentions read with the new names
   });
 
   socket.on('server', ({ name, icon, game, audioQuality }) => {
@@ -2152,7 +2220,7 @@ function renderMembers() {
       h(
         'div',
         { class: 'member-names' },
-        h('div', { class: 'member-name', style: { color: u.color } }, u.name),
+        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
         h(
           'div',
           { class: 'member-status' },
@@ -2384,7 +2452,7 @@ function messageEl(m, prev) {
   const author = profileOf(m.author, m.name);
   const mine = m.author === me().id;
   const inServer = !m.thread && !inDmView() && !!S.server; // DMs keep the plain @name matching
-  const { html, jumbo, embeds } = formatText(m.text || '', { emojis: S.server?.emojis || [], myName: me().name, ...(inServer ? { mentionables: mentionables() } : {}) });
+  const { html, jumbo, embeds } = formatText(m.text || '', { emojis: S.server?.emojis || [], myName: me().name, ...(inServer ? ((marks) => (marks ? { mentions: marks } : { mentionables: mentionables() }))(mentionMarks(m)) : {}) });
   const mentioned = !mine && (inServer ? mentionsMe(m) : /class="mention me"/.test(html));
   const replied = m.replyTo && S.messages.get(S.channelId)?.find((x) => x.id === m.replyTo);
 
@@ -2585,9 +2653,10 @@ function editMessage(m) {
   const el = $(`.msg[data-id="${m.id}"] .msg-text`);
   if (!el) return;
   const ta = h('textarea', { class: 'edit-box', rows: 1 });
-  ta.value = m.text;
+  const start = inDmView() ? m.text : editableText(m); // mentions read with today's names
+  ta.value = start;
   const done = (save) => {
-    if (save && ta.value.trim() && ta.value !== m.text) {
+    if (save && ta.value.trim() && ta.value !== start) {
       if (inDmView()) DM.editMessage(peerOf(S.channelId), m.id, ta.value.trim());
       else S.socket.emit('msg:edit', { channelId: S.channelId, messageId: m.id, text: ta.value });
     }
@@ -2628,7 +2697,11 @@ function updateMentionMenu(ta) {
   const match = (c) => starts(c) || (!/\s/.test(q) && c.name.toLowerCase().includes(q));
   const rank = (a, b) => starts(b) - starts(a);
   const online = (c) => isOnline(c.id);
-  const all = mentionCandidates();
+  const dup = sharedNames();
+  // One entry per person; someone whose name is shared shows (and matches) their #tag
+  const all = mentionCandidates()
+    .filter((c) => !c.tagged)
+    .map((c) => (c.kind === 'user' && nameTag(c.id, c.name, dup) ? { ...c, tag: mentionTag(c.id), name: `${c.name}#${mentionTag(c.id)}` } : c));
   const items = [
     ...all.filter((c) => c.kind === 'everyone' && match(c)),
     ...all.filter((c) => c.kind === 'role' && match(c)).sort(rank),
@@ -2658,7 +2731,7 @@ function drawMentionMenu() {
           onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()),
         },
         p ? avatarEl(p, 20) : h('span', { class: 'mm-dot', style: { background: c.kind === 'role' ? color : 'var(--accent)' } }),
-        h('span', { class: 'mm-name' }, '@' + c.name),
+        h('span', { class: 'mm-name' }, '@' + (c.tag ? c.name.slice(0, -c.tag.length - 1) : c.name), c.tag ? h('span', { class: 'name-tag' }, '#' + c.tag) : null),
         c.kind !== 'user' ? h('span', { class: 'mm-hint muted small' }, c.kind === 'role' ? 'Role' : 'Notify everyone') : null
       );
     })
