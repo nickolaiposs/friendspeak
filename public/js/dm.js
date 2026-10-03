@@ -21,6 +21,7 @@
 //   { t: 'msg', op, m: { id, text, gif, replyTo, ts, files? } }
 //   { t: 'edit', op, id, text, edited }  { t: 'del', op, id }  { t: 'react', op, id, emoji, on }
 //   { t: 'ack', op }   { t: 'typing' }
+//   { t: 'ping', op }  "are you still there?", answered with an ack; never queued or mailed
 //   { t: 'call', d }   call signaling, handed to call.js (D33); sealed only, never queued or mailed
 //   { t: 'want', id }  { t: 'file', id, x, size, n }  { t: 'gone', id }   image transfer
 // Every op with an `op` id is queued until acked, so it survives restarts.
@@ -38,6 +39,7 @@ const MAX_BLOB = 160 * 1024; // what a mailbox accepts (MAX_MAIL_BLOB in server.
 const MAX_GUEST_RELAYS = 8;
 const OPEN_AFTER = 12e3; // a connection that hasn't opened by now is dropped, so the next attempt starts fresh
 const MAIL_AFTER = 8e3; // online but no connection yet (strict NATs): use the mailbox after this long
+const PROBE_WAIT = 4e3; // a connection that doesn't answer a ping by now is dropped
 const MAIL_AGAIN = 14 * 864e5; // mailed and never acked: leave it again
 const CHUNK = 16 * 1024;
 const BUFFER_HIGH = 1024 * 1024;
@@ -147,11 +149,24 @@ export class DirectMessages {
       else s.online.delete(id);
       this.on.presence();
       if (online) this.flush(id);
-      // Gone from every server: they closed the app. Don't wait for the
-      // connection to time out before using their mailbox.
-      else if (!this.online(id) && this.peers.has(id)) this.lost(id, this.peers.get(id).pc);
+      // Gone from every server: they probably closed the app. Don't wait for
+      // the connection to time out before using their mailbox. A server that
+      // shuts down says this about everyone, though, so ask the connection first.
+      else if (!this.via(id) && this.peers.has(id)) this.probe(id);
     });
-    socket.on('disconnect', () => (s.online.clear(), (s.mail = false), this.on.presence()));
+    socket.on('disconnect', () => {
+      s.online.clear();
+      s.mail = false;
+      // A connection still being set up through this server won't finish:
+      // start it over through another server we share, if there is one.
+      // Open ones don't need the server any more and carry on.
+      for (const [id, peer] of [...this.peers]) {
+        if (peer.via !== socket) continue;
+        if (peer.open) peer.via = this.via(id) || socket;
+        else (this.drop(id, peer.pc), this.connect(id), this.flush(id));
+      }
+      this.on.presence();
+    });
     // Banned, wrong password, or a server that takes no guests: don't keep knocking
     socket.on('connect_error', (err) => /banned|password/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
@@ -184,9 +199,9 @@ export class DirectMessages {
     this.flushAll();
   }
 
-  // Reachable through at least one server we share
+  // Reachable: connected directly, or through at least one server we share
   online(peerId) {
-    return !!this.via(peerId);
+    return this.connected(peerId) || !!this.via(peerId);
   }
 
   via(peerId) {
@@ -247,7 +262,7 @@ export class DirectMessages {
       this.enqueueRx(peerId, () => this.greet(peerId, peer));
     };
     dc.onclose = () => this.lost(peerId, pc);
-    dc.onmessage = (e) => this.enqueueRx(peerId, () => this.frame(peerId, peer, e.data));
+    dc.onmessage = (e) => ((peer.heard = Date.now()), this.enqueueRx(peerId, () => this.frame(peerId, peer, e.data)));
     pc.onicecandidate = (e) => e.candidate && peer.via.emit('signal', { to: peerId, data: { candidate: e.candidate } });
     // Only the first offer: a DM connection never renegotiates. (The answering
     // side also fires this for its data channel; it already has a description.)
@@ -283,6 +298,21 @@ export class DirectMessages {
     this.drop(peerId, pc);
     const c = this.contacts.get(peerId);
     if (c?.outbox.length) this.mailOut(c);
+  }
+
+  // A server said they left. Keep the connection if they still answer on it:
+  // any frame back within PROBE_WAIT will do. Apps without `ping` treat it as
+  // an op they've never seen, and ack it.
+  probe(peerId) {
+    const peer = this.peers.get(peerId);
+    if (!peer || peer.probing) return;
+    const since = Date.now();
+    if (!this.send(peerId, { t: 'ping', op: uid() })) return this.lost(peerId, peer.pc);
+    peer.probing = true;
+    setTimeout(() => {
+      peer.probing = false;
+      if (!(peer.heard >= since)) this.lost(peerId, peer.pc);
+    }, PROBE_WAIT);
   }
 
   enqueue(peer, fn) {
@@ -797,6 +827,7 @@ export class DirectMessages {
     if (op.t === 'file') return peer?.key && this.startFile(peerId, peer, op);
     if (op.t === 'gone') return peer?.key && this.fileGone(peerId, str(op.id, 64));
     if (op.t === 'call') return peer?.key && this.on.call?.(peerId, op.d); // only from a friend whose key we know
+    if (op.t === 'ping') return peer && this.send(peerId, { t: 'ack', op: str(op.op, 64) });
     let c = this.contacts.get(peerId);
     if (op.t === 'ack') {
       if (!c) return;
