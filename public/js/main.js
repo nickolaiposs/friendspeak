@@ -7,7 +7,7 @@ import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
 import { BACKGROUNDS, CAPTURE, PRESETS, presetCss, pictures, backgroundOf, loadBackground, activeBackground, setBackground, withBackground } from './background.js';
-import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES } from './theme.js';
+import { applyAppearance, paletteOf, samePalette, setColors, THEMES, SCHEMES, COLOR_GROUPS, FONTS, FONT_SIZE, DENSITIES, UI_SCALES, uiScaleOf, stepUiScale } from './theme.js';
 
 applyAppearance(); // before the first render
 
@@ -3056,6 +3056,13 @@ function voiceHotkey(combo) {
   return true;
 }
 
+// View → Zoom In/Out/Actual Size step the UI size setting (desktop/main.js)
+let showUiScale = null; // updates Settings → Appearance while it's open
+desktop?.onZoom((step) => {
+  applyAppearance(settings.set({ uiScale: step ? stepUiScale(settings.get(), step) : 100 }));
+  showUiScale?.();
+});
+
 desktop?.onHotkey((combo) => {
   if (voiceHotkey(combo)) return;
   const s = S.sounds.find((x) => x.hotkey === combo);
@@ -4517,6 +4524,9 @@ function settingsAppearance(body) {
       p.hex.textContent = colors[p.key];
     }
     customBadge.hidden = now.theme !== 'custom';
+    const scale = uiScaleOf(now);
+    scaleIn.value = UI_SCALES.indexOf(scale);
+    scaleVal.textContent = scale + '%';
   };
 
   // A small mock of the app, drawn with the palette's own colors
@@ -4561,6 +4571,9 @@ function settingsAppearance(body) {
   fontSel.addEventListener('change', () => (fontCustom.hidden = fontSel.value !== 'custom'));
   const sizeVal = h('span', {}, st.fontSize + 'px');
   const sizeIn = h('input', { type: 'range', min: FONT_SIZE.min, max: FONT_SIZE.max, step: FONT_SIZE.step, value: st.fontSize, oninput: (e) => (update({ fontSize: +e.target.value }), (sizeVal.textContent = e.target.value + 'px')) });
+  const scaleVal = h('span');
+  const scaleIn = h('input', { type: 'range', min: 0, max: UI_SCALES.length - 1, step: 1, oninput: (e) => update({ uiScale: UI_SCALES[e.target.value] }) });
+  const mod = desktop?.platform === 'darwin' ? '⌘' : 'Ctrl';
 
   body.append(
     h('h3', {}, 'Theme'),
@@ -4571,6 +4584,14 @@ function settingsAppearance(body) {
     h('h3', {}, 'Colors', customBadge),
     h('p', { class: 'muted small' }, 'Changing a color makes a custom theme from the one in use.'),
     ...COLOR_GROUPS.flatMap(([title, colors]) => [h('div', { class: 'color-group' }, title), h('div', { class: 'color-grid' }, colors.map(picker))]),
+    h('h3', {}, 'Size'),
+    h('p', { class: 'muted small' }, `UI size scales the whole window: text, icons and spacing. ${mod} + and ${mod} − change it too.`),
+    h(
+      'div',
+      { class: 'field' },
+      h('span', {}, 'UI size ', scaleVal),
+      h('div', { class: 'row' }, h('div', { class: 'grow' }, scaleIn), h('button', { class: 'btn small ghost', onclick: () => update({ uiScale: 100 }) }, 'Reset'))
+    ),
     h('h3', {}, 'Font and spacing'),
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Font'), fontSel), h('label', { class: 'field grow' }, h('span', {}, 'Density'), select('density', DENSITIES))),
     fontCustom,
@@ -4582,6 +4603,8 @@ function settingsAppearance(body) {
     )
   );
   sync();
+  showUiScale = sync;
+  return () => (showUiScale = null);
 }
 
 function settingsVoice(body) {
