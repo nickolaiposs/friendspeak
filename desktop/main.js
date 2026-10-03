@@ -56,6 +56,11 @@ if (process.platform === 'darwin') app.commandLine.appendSwitch('enable-features
 // FRIENDSPEAK_LEGACY_CAPTURE=1 turns this off if a share comes out black or frozen.
 if (process.platform === 'win32' && process.env.FRIENDSPEAK_LEGACY_CAPTURE !== '1') app.commandLine.appendSwitch('enable-features', 'WebRtcAllowWgcUsingTexture,ZeroCopyDesktopCapture');
 
+// Automatic gain (D44) levels the voice digitally. Without this, Chromium's
+// gain control also turns the system's microphone volume up and down. Added to
+// any --disable-features given on the command line, which this would replace.
+app.commandLine.appendSwitch('disable-features', [app.commandLine.getSwitchValue('disable-features'), 'WebRtcAllowInputVolumeAdjustment'].filter(Boolean).join(','));
+
 // Single instance: a second launch focuses the existing window
 if (!app.requestSingleInstanceLock()) app.quit();
 

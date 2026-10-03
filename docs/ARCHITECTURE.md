@@ -333,9 +333,9 @@ Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`
 
 ```mermaid
 flowchart LR
-  Mic["getUserMedia<br/>(noise suppression or nothing)"] --> MicGain["micGain<br/>(mic volume)"] --> Gate["gate<br/>(mute / PTT / mic test)"]
-  MicGain --> MicA["micAnalyser<br/>(Settings level meter)"]
-  MicGain --> Loop["loop<br/>(mic test only)"] --> Master
+  Mic["getUserMedia<br/>(automatic gain, noise suppression)"] --> Mono["micMono<br/>(L + R)"] --> MicGain["micGain<br/>(mic volume, 0–400%)"] --> MicLim["limiter"] --> Gate["gate<br/>(mute / PTT / mic test)"]
+  MicLim --> MicA["micAnalyser<br/>(Settings level meter)"]
+  MicLim --> Loop["loop<br/>(mic test only)"] --> Master
   Gate --> Out["MediaStreamDestination<br/>= outgoing track"]
   Gate --> SelfA["analyser<br/>(own speaking ring)"]
   SB["soundboard clips<br/>(per-sound gain)"] --> Bus["sbBus<br/>(soundboard volume)"]
@@ -345,11 +345,11 @@ flowchart LR
   Out --> PCs["one RTCPeerConnection per peer"]
   Remote["a friend's voice<br/>(remote track)"] --> UserGain["user gain<br/>(0–300%, local mute, deafen)"]
   Remote --> PeerA["analyser<br/>(their speaking ring)"]
-  UserGain -- "above 100%: limiter" --> VoiceBus["voiceBus<br/>(voices volume)"] --> Master
+  UserGain --> VoiceBus["voiceBus<br/>(voices volume, 0–200%)"] --> VoiceLim["limiter"] --> Master
   Cues["cues"] --> CueBus["cueBus<br/>(notification volume)"] --> Master
 ```
 
-- **Mic (D38):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`, the rate Opus sends; the browser resamples for other devices). `audio.startMic()` asks for the mic with `echoCancellation` and `autoGainControl` off and `noiseSuppression` from the one setting (`settings.noiseSuppression`, on by default). Nothing else processes it. `audio.micInfo` records what the track really applied (`track.getSettings()`), and Settings → Voice says when a device or OS refused noise suppression. Changing the setting restarts the mic; the outgoing track stays the same, so nothing renegotiates. A saved `noiseReduction: 'off'` from before D38 reads as noise suppression off.
+- **Mic (D38, D44):** the graph runs at 48 kHz (`new AudioContext({ sampleRate: 48000 })`, the rate Opus sends; the browser resamples for other devices). `audio.startMic()` asks for the mic with `echoCancellation` off, and `autoGainControl` and `noiseSuppression` from their settings (`settings.autoGain`, `settings.noiseSuppression`, both on by default). The chosen device is asked for with `deviceId: { exact }` (Chromium ignores `ideal` for mics), falling back to the default when it's gone; a track that ends (unplugged) restarts the mic. `micMono` sums the track's two channels into one (a splitter into a one-channel node), so a mic that captures on one side only is sent centred at full level; a mono track passes unchanged. After the mic volume a limiter (`audio.limiter()`, also on `voiceBus`) keeps boosted peaks under full scale. `audio.micInfo` records what the track really applied (`track.getSettings()`), and Settings → Voice says when a device or OS refused a setting. Changing a setting or the device (`audio.setInputDevice`, also on a right-click of a mute button) restarts the mic; the outgoing track stays the same, so nothing renegotiates. A saved `noiseReduction: 'off'` from before D38 reads as noise suppression off. The desktop app disables `WebRtcAllowInputVolumeAdjustment`, so automatic gain doesn't move the system's mic volume.
 - **Mic test (Settings → Voice):** `audio.setMicTest(true)` opens `loop` (the mic after its volume, straight to `master`), sets `voiceBus` and the soundboard `monitor` to 0 and closes `gate`, so you hear only yourself and friends hear nothing. `main.js` also mutes screen share `<video>` elements and reports you as muted (`micOff()` in `voice:state` and DM call state) while it runs. It works in or out of a call (out of one it starts the mic and stops it after). It ends when you press Stop, leave the Voice tab or close Settings, or when the call it ran in ends. Volume changes during the test don't undo it (`setVoiceVolume`, `setMonitor` respect `audio.micTest`).
 - **Opus (D38):** `tuneOpus()` in `voice.js` writes `stereo=1; sprop-stereo=1; maxaveragebitrate=510000; maxplaybackrate=48000; useinbandfec=1; usedtx=0; cbr=0` into the fmtp line of every Opus payload type. It runs on our local description (`setLocal`: `createOffer`/`createAnswer`, edited, then `setLocalDescription`; the plain SDP is the fallback if a browser refuses the edit) and on every remote description before `setRemoteDescription`. The receiver's fmtp is what a sender encodes to, so a friend on an older app sends us this, and we send it to them. Screen share audio gets stereo from it too, under its own 192 kbps cap.
 - **Voice quality (per server):** `VoiceClient.setAudioQuality(key)` caps the voice sender's `maxBitrate` (`AUDIO_QUALITY`: `low` 32, `standard` 64, `high` 128, `max` 510 kbps) on every peer, live, with no renegotiation (`capVoice`, also run after each negotiation). The key comes from the server's `audioQuality` (hello state and the `server` event); a server without the field means `max`. DM calls always use `max`. Each sender caps itself, so a friend on an older app keeps sending at `max`.
