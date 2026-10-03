@@ -266,7 +266,17 @@ class AudioEngine {
 
   // Little UI cues (join / leave / mute), synthesized so there are no asset files.
   cue(kind) {
-    if (!settings.get().cues) return;
+    const st = settings.get();
+    if (!st.cues || st.sounds[kind] === false) return;
+    this.play(kind);
+  }
+
+  // Settings preview: plays even when that sound is turned off (the volume still applies)
+  preview(kind) {
+    this.play(kind);
+  }
+
+  play(kind) {
     this.ensure();
     const tones = {
       join: [523, 784],
@@ -275,7 +285,8 @@ class AudioEngine {
       peerLeave: [880, 660],
       mute: [440],
       unmute: [660],
-      message: [988],
+      dm: [988, 1175],
+      mention: [880, 1319, 880],
       ring: [659, 880, 659, 880],
       calling: [494, 494],
     }[kind];
@@ -296,6 +307,20 @@ class AudioEngine {
     });
   }
 }
+
+// Every cue the settings list, in display order
+export const CUES = [
+  { kind: 'join', label: 'You join voice' },
+  { kind: 'leave', label: 'You leave voice' },
+  { kind: 'peerJoin', label: 'Someone joins your channel' },
+  { kind: 'peerLeave', label: 'Someone leaves your channel' },
+  { kind: 'mute', label: 'Mute' },
+  { kind: 'unmute', label: 'Unmute' },
+  { kind: 'dm', label: 'Direct message' },
+  { kind: 'mention', label: 'Mention or reply' },
+  { kind: 'ring', label: 'Incoming call' },
+  { kind: 'calling', label: 'Outgoing call (ringing)' },
+];
 
 export const Level = AudioEngine.level;
 export const audio = new AudioEngine();

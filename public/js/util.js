@@ -52,10 +52,37 @@ export function linkEmbed(url) {
 
 const MAX_EMBEDS = 5;
 
+// Mentions: '@' at the start or after whitespace, then a candidate name (case-insensitive,
+// may contain spaces), then the end or a char that isn't [\w-]. Longest candidate wins.
+// server.js repeats these rules (it is CommonJS), keep the two in step.
+// candidates: [{ kind: 'everyone' | 'role' | 'user', id, name }]
+function scanMentions(text, candidates, onMatch) {
+  const lower = text.toLowerCase();
+  const list = candidates
+    .filter((c) => c && typeof c.name === 'string' && c.name)
+    .map((c) => ({ c, key: c.name.toLowerCase() }))
+    .sort((a, b) => b.key.length - a.key.length);
+  for (let i = lower.indexOf('@'); i >= 0; i = lower.indexOf('@', i + 1)) {
+    if (i > 0 && !/\s/.test(text[i - 1])) continue;
+    const hit = list.find(({ key }) => lower.startsWith(key, i + 1) && !/[\w-]/.test(text[i + 1 + key.length] || ''));
+    if (hit) onMatch(hit.c, i, i + 1 + hit.key.length);
+  }
+}
+
+// Candidates mentioned in text (deduped by kind+id), code spans ignored
+export function findMentions(text, candidates) {
+  const plain = String(text || '').replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]+`/g, ' ');
+  const found = new Map();
+  scanMentions(plain, candidates || [], (c) => found.set(c.kind + ':' + c.id, { kind: c.kind, id: c.id, name: c.name }));
+  return [...found.values()];
+}
+
 // Markdown-lite renderer. Input is raw user text; output is safe HTML plus
 // the embeds its links produce (rendered by the caller). Wrapping a link in
 // <angle brackets> keeps it a plain link without an embed.
-export function formatText(text, { emojis = [], myName = '' } = {}) {
+// mentionables ([{ kind, id, name, me, color? }]) turn known @names (with spaces) into highlighted spans;
+// without them only @word is marked, and `me` goes by myName.
+export function formatText(text, { emojis = [], myName = '', mentionables = null } = {}) {
   const emojiMap = new Map(emojis.map((e) => [e.name, e.url]));
   const jumbo = EMOJI_ONLY.test(text) && [...text.replace(/:[a-z0-9_]+:/g, 'x')].length <= 27;
   const blocks = [];
@@ -80,7 +107,7 @@ export function formatText(text, { emojis = [], myName = '' } = {}) {
     return link(url.slice(0, url.length - tail.length), true) + tail;
   });
 
-  const inline = (t) =>
+  const inlineBase = (t) =>
     t
       .replace(/\|\|(.+?)\|\|/g, '<span class="spoiler" tabindex="0">$1</span>')
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -94,8 +121,27 @@ export function formatText(text, { emojis = [], myName = '' } = {}) {
           : m
       )
       .replace(/(^|\s)@([\w-]+)/g, (m, pre, name) =>
-        `${pre}<span class="mention${myName && name.toLowerCase() === myName.toLowerCase() ? ' me' : ''}">@${name}</span>`
+        mentionables
+          ? m
+          : `${pre}<span class="mention${myName && name.toLowerCase() === myName.toLowerCase() ? ' me' : ''}">@${name}</span>`
       );
+  // Known mentions: matched on the escaped text, so names with spaces or & work
+  const mentionHtml = (t) => {
+    if (!mentionables?.length) return t;
+    const cands = mentionables.map((m) => ({ ...m, name: escapeHtml(m.name) }));
+    const hits = [];
+    scanMentions(t, cands, (c, from, to) => hits.push([c, from, to]));
+    let o = '';
+    let at = 0;
+    for (const [c, from, to] of hits) {
+      if (from < at) continue;
+      const color = c.kind === 'role' && /^#[0-9a-f]{6}$/i.test(c.color || '') ? ` style="color:${c.color}"` : '';
+      o += `${t.slice(at, from)}<span class="mention${c.me ? ' me' : ''}${c.kind === 'role' ? ' role' : ''}${c.kind === 'everyone' ? ' everyone' : ''}" data-kind="${c.kind}" data-id="${escapeHtml(String(c.id))}"${color}>${t.slice(from, to)}</span>`;
+      at = to;
+    }
+    return o + t.slice(at);
+  };
+  const inline = (t) => mentionHtml(inlineBase(t));
 
   // Line-level blocks: headings, -# subtext, > quotes, - and 1. lists.
   // Plain lines are joined with <br>; block elements bring their own spacing.
