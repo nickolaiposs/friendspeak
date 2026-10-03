@@ -50,7 +50,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
   js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, mic test loopback, soundboard mixing (D38)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
-  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
+  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30); UI size → window zoom (D40)
   js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys

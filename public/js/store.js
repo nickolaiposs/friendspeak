@@ -116,6 +116,7 @@ const DEFAULT_SETTINGS = {
   fontCustom: '', // name of a font installed on this device
   fontSize: 14.5, // px
   density: 'cozy', // 'compact' | 'cozy' | 'roomy'
+  uiScale: 100, // percent: one of UI_SCALES, the desktop window's zoom
 };
 
 export const settings = {

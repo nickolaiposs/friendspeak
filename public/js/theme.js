@@ -1,6 +1,7 @@
-// Appearance: color themes, font, text size and density. Stored per device in
-// settings (store.js) and applied as CSS custom properties on <html>, which
-// override the defaults at the top of style.css.
+// Appearance: color themes, font, text size, density and UI size. Stored per
+// device in settings (store.js) and applied as CSS custom properties on <html>,
+// which override the defaults at the top of style.css. UI size is the desktop
+// window's zoom factor instead (preload.js).
 import { settings } from './store.js';
 import { GOGH } from './gogh.js';
 
@@ -58,6 +59,14 @@ export const FONTS = {
 export const DENSITIES = { compact: ['Compact', 0.5], cozy: ['Cozy', 1], roomy: ['Roomy', 1.5] };
 
 export const FONT_SIZE = { min: 12, max: 20, step: 0.5, base: 14.5 }; // px; base is what style.css is written for
+
+// UI size in percent: the zoom levels a browser steps through, so the slider and
+// the View menu's zoom (Ctrl/Cmd + and -) land on the same values
+export const UI_SCALES = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
+// The level nearest to a stored value (anything bad is 100%)
+export const uiScaleOf = (st) => UI_SCALES.reduce((a, b) => (Math.abs(b - st.uiScale) < Math.abs(a - st.uiScale) ? b : a), 100);
+// One level up (+1) or down (-1) from the current one
+export const stepUiScale = (st, dir) => UI_SCALES[Math.min(UI_SCALES.length - 1, Math.max(0, UI_SCALES.indexOf(uiScaleOf(st)) + dir))];
 
 // ---------- color math ----------
 
@@ -157,4 +166,5 @@ export function applyAppearance(st = settings.get()) {
   root.style.setProperty('--font-scale', size / FONT_SIZE.base);
   root.style.setProperty('--font', fontStack(st));
   root.style.setProperty('--density', (DENSITIES[st.density] || DENSITIES.cozy)[1]);
+  window.friendspeakDesktop?.setZoom(uiScaleOf(st) / 100);
 }
