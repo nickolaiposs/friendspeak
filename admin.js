@@ -438,6 +438,8 @@ function createAdmin(ctx) {
   const actions = ctx.actions;
   const rolesOf = (st, pid) => (Object.hasOwn(st.memberRoles, pid) ? st.memberRoles[pid] : []);
   const roleNames = (st, ids) => (ids.length ? ids.map((x) => st.roles.find((r) => r.id === x)?.name || '?').join(', ') : 'none');
+  // A short fingerprint of the key a profile id is pinned to (D42), or null
+  const keyOf = (st, pid) => (st.pins[pid] ? st.pins[pid].slice(0, 8) : null);
   const urlId = (v) => (typeof v === 'string' && v.length > 0 && v.length <= 64 ? v : '');
   // 400 with the action's own message, or run `done` and answer ok
   const answer = (res, r, done) => {
@@ -475,12 +477,13 @@ function createAdmin(ctx) {
         camera: !!u.camera,
         playing: !!u.playing,
         roles: rolesOf(st, p.id),
+        key: keyOf(st, p.id),
       });
     }
     const banned = new Set(st.bans.map((b) => b.profileId));
     const offline = Object.entries(st.profiles)
       .filter(([pid]) => !onlineIds.has(pid) && !banned.has(pid))
-      .map(([pid, p]) => ({ id: pid, name: p.name, color: p.color, avatar: p.avatar, status: p.status, seen: p.seen || null, lastIp: ctx.lastIp.get(pid) || null, roles: rolesOf(st, pid) }));
+      .map(([pid, p]) => ({ id: pid, name: p.name, color: p.color, avatar: p.avatar, status: p.status, seen: p.seen || null, lastIp: ctx.lastIp.get(pid) || null, roles: rolesOf(st, pid), key: keyOf(st, pid) }));
     res.json({ online, offline, bans: st.bans.map((b) => ({ id: b.id, profileId: b.profileId, name: b.name, ip: b.ip || '', by: b.by, ts: b.ts })), roles: st.roles });
   });
 
@@ -488,6 +491,12 @@ function createAdmin(ctx) {
     const pid = urlId(req.params.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
     answer(res, actions.removeMember({ profileId: pid }), () => logAction(req, 'user.remove', name));
+  });
+
+  api.post('/users/:profileId/reset-key', (req, res) => {
+    const pid = urlId(req.params.profileId);
+    const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : pid;
+    answer(res, actions.resetKey(pid), () => logAction(req, 'user.key.reset', name));
   });
 
   api.post('/bans', (req, res) => {
