@@ -276,6 +276,7 @@ body.no-members #app { grid-template-columns: 68px 248px 1fr 0; }
 .mm-item.active { background: var(--accent-soft); color: var(--text-strong); }
 .mm-item.offline .avatar { opacity: .55; }
 .mm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-tag, .mention-tag { opacity: .6; font-weight: 400; margin-left: 1px; }
 .mm-dot { width: 12px; height: 12px; border-radius: 50%; margin: 4px; flex: none; }
 .sound-row { gap: 8px; flex-wrap: nowrap; }
 .sound-row .check-row { margin: 4px 0; }

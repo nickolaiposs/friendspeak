@@ -229,30 +229,47 @@ async function startServer(opts = {}) {
   // name (case-insensitive, may have spaces), then the end or a char outside [\w-]; longest name
   // wins; code spans are ignored. Replying to someone mentions them.
   function mentionsOf(text, replied, senderId) {
-    const plain = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]+`/g, ' ');
-    const lower = plain.toLowerCase();
-    const names = [{ key: 'everyone', kind: 'everyone' }];
-    for (const r of state.roles) names.push({ key: r.name.toLowerCase(), kind: 'role', id: r.id });
-    for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ key: p.name.toLowerCase(), kind: 'user', id: pid });
-    names.sort((a, b) => b.key.length - a.key.length);
+    // Code is blanked to the same length, so positions still point into the stored text
+    const plain = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => ' '.repeat(m.length));
+    const names = [{ name: 'everyone', kind: 'everyone', id: '' }];
+    for (const r of state.roles) names.push({ name: r.name, kind: 'role', id: r.id });
+    // People also answer to name#tag, which tells apart people with the same name
+    for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ name: p.name, kind: 'user', id: pid }, { name: `${p.name}#${mentionTag(pid)}`, kind: 'user', id: pid });
+    names.sort((a, b) => b.name.length - a.name.length);
     const users = new Set();
     const roles = new Set();
+    const spans = []; // [at, length, kind, id]: lets clients draw a mention with the current name
     let everyone = false;
-    for (let i = lower.indexOf('@'); i >= 0; i = lower.indexOf('@', i + 1)) {
+    for (let i = plain.indexOf('@'); i >= 0; i = plain.indexOf('@', i + 1)) {
       if (i > 0 && !/\s/.test(plain[i - 1])) continue;
-      const hit = names.find((n) => lower.startsWith(n.key, i + 1) && !/[\w-]/.test(plain[i + 1 + n.key.length] || ''));
+      const fits = (n) => plain.slice(i + 1, i + 1 + n.name.length).toLowerCase() === n.name.toLowerCase() && !/[\w-]/.test(plain[i + 1 + n.name.length] || '');
+      const hit = names.find(fits);
       if (!hit) continue;
-      if (hit.kind === 'everyone') everyone = true;
-      else (hit.kind === 'role' ? roles : users).add(hit.id);
+      // An untagged name more than one person has mentions all of them
+      for (const n of names.filter((n) => n.name.length === hit.name.length && fits(n))) {
+        if (n.kind === 'everyone') everyone = true;
+        else (n.kind === 'role' ? roles : users).add(n.id);
+        spans.push([i, 1 + n.name.length, n.kind, n.id]);
+      }
     }
     if (replied && replied.author !== senderId) users.add(replied.author);
     users.delete(senderId);
-    if (!users.size && !roles.size && !everyone) return null;
+    if (!users.size && !roles.size && !everyone && !spans.length) return null;
     const out = {};
     if (users.size) out.users = [...users];
     if (roles.size) out.roles = [...roles];
     if (everyone) out.everyone = true;
+    if (spans.length) out.spans = spans;
     return out;
+  }
+
+  // Same as mentionTag() in public/js/util.js: a short tag from a profile id
+  function mentionTag(id) {
+    let h = 0;
+    for (const ch of String(id)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; // spread it, so similar ids get unlike tags
+    h = (h ^ (h >>> 16)) >>> 0;
+    return (h % 1679616).toString(36).padStart(4, '0');
   }
 
   // ---------- bans ----------

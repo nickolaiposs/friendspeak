@@ -52,21 +52,36 @@ export function linkEmbed(url) {
 
 const MAX_EMBEDS = 5;
 
+// A mention's span around inner HTML that is already safe
+function mentionSpan(c, inner) {
+  const color = c.kind === 'role' && /^#[0-9a-f]{6}$/i.test(c.color || '') ? ` style="color:${c.color}"` : '';
+  const kind = ['user', 'role', 'everyone'].includes(c.kind) ? c.kind : 'user';
+  return `<span class="mention${c.me ? ' me' : ''}${kind === 'role' ? ' role' : ''}${kind === 'everyone' ? ' everyone' : ''}" data-kind="${kind}" data-id="${escapeHtml(String(c.id ?? ''))}"${color}>${inner}</span>`;
+}
+
 // Mentions: '@' at the start or after whitespace, then a candidate name (case-insensitive,
 // may contain spaces), then the end or a char that isn't [\w-]. Longest candidate wins.
 // server.js repeats these rules (it is CommonJS), keep the two in step.
 // candidates: [{ kind: 'everyone' | 'role' | 'user', id, name }]
 function scanMentions(text, candidates, onMatch) {
-  const lower = text.toLowerCase();
   const list = candidates
     .filter((c) => c && typeof c.name === 'string' && c.name)
     .map((c) => ({ c, key: c.name.toLowerCase() }))
     .sort((a, b) => b.key.length - a.key.length);
-  for (let i = lower.indexOf('@'); i >= 0; i = lower.indexOf('@', i + 1)) {
+  for (let i = text.indexOf('@'); i >= 0; i = text.indexOf('@', i + 1)) {
     if (i > 0 && !/\s/.test(text[i - 1])) continue;
-    const hit = list.find(({ key }) => lower.startsWith(key, i + 1) && !/[\w-]/.test(text[i + 1 + key.length] || ''));
+    const hit = list.find(({ key }) => text.slice(i + 1, i + 1 + key.length).toLowerCase() === key && !/[\w-]/.test(text[i + 1 + key.length] || ''));
     if (hit) onMatch(hit.c, i, i + 1 + hit.key.length);
   }
+}
+
+// Tells apart people with the same name: @Bob#k3f9. server.js repeats it.
+export function mentionTag(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; // spread it, so similar ids get unlike tags
+  h = (h ^ (h >>> 16)) >>> 0;
+  return (h % 1679616).toString(36).padStart(4, '0');
 }
 
 // Candidates mentioned in text (deduped by kind+id), code spans ignored
@@ -80,14 +95,28 @@ export function findMentions(text, candidates) {
 // Markdown-lite renderer. Input is raw user text; output is safe HTML plus
 // the embeds its links produce (rendered by the caller). Wrapping a link in
 // <angle brackets> keeps it a plain link without an embed.
-// mentionables ([{ kind, id, name, me, color? }]) turn known @names (with spaces) into highlighted spans;
-// without them only @word is marked, and `me` goes by myName.
-export function formatText(text, { emojis = [], myName = '', mentionables = null } = {}) {
+// mentions ([{ at, len, kind, id, name, me, color?, tag? }]) are where the server found mentions in
+// the raw text: each is drawn with the name given (the current one), so renames carry over.
+// Otherwise mentionables ([{ kind, id, name, me, color? }]) turn known @names (with spaces) into
+// highlighted spans; without either only @word is marked, and `me` goes by myName.
+export function formatText(text, { emojis = [], myName = '', mentionables = null, mentions = null } = {}) {
   const emojiMap = new Map(emojis.map((e) => [e.name, e.url]));
   const jumbo = EMOJI_ONLY.test(text) && [...text.replace(/:[a-z0-9_]+:/g, 'x')].length <= 27;
   const blocks = [];
   const stash = (html) => `\u0000${blocks.push(html) - 1}\u0000`;
-  let s = escapeHtml(text);
+  // Swap each known mention for a marker (\u0002n\u0002) before anything else, so its
+  // position still holds; the marker becomes the mention at the end
+  const marks = [];
+  let raw = String(text).replace(/\u0002/g, '\ufffd'); // same length, so positions hold
+  if (Array.isArray(mentions)) {
+    let end = Infinity;
+    for (const m of mentions.filter((m) => m && Number.isInteger(m.at) && Number.isInteger(m.len) && m.len > 0).sort((a, b) => b.at - a.at)) {
+      if (m.at + m.len > end || raw[m.at] !== '@') continue;
+      raw = raw.slice(0, m.at) + `\u0002${marks.push(m) - 1}\u0002` + raw.slice(m.at + m.len);
+      end = m.at;
+    }
+  }
+  let s = escapeHtml(raw);
 
   // stash code so nothing inside it gets formatted
   s = s.replace(/```(?:[a-z0-9]*\n)?([\s\S]*?)```/g, (_, code) => stash(`<pre><code>${code.replace(/^\n|\n$/g, '')}</code></pre>`));
@@ -121,7 +150,7 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
           : m
       )
       .replace(/(^|\s)@([\w-]+)/g, (m, pre, name) =>
-        mentionables
+        mentionables || mentions
           ? m
           : `${pre}<span class="mention${myName && name.toLowerCase() === myName.toLowerCase() ? ' me' : ''}">@${name}</span>`
       );
@@ -135,13 +164,12 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
     let at = 0;
     for (const [c, from, to] of hits) {
       if (from < at) continue;
-      const color = c.kind === 'role' && /^#[0-9a-f]{6}$/i.test(c.color || '') ? ` style="color:${c.color}"` : '';
-      o += `${t.slice(at, from)}<span class="mention${c.me ? ' me' : ''}${c.kind === 'role' ? ' role' : ''}${c.kind === 'everyone' ? ' everyone' : ''}" data-kind="${c.kind}" data-id="${escapeHtml(String(c.id))}"${color}>${t.slice(from, to)}</span>`;
+      o += t.slice(at, from) + mentionSpan(c, t.slice(from, to));
       at = to;
     }
     return o + t.slice(at);
   };
-  const inline = (t) => mentionHtml(inlineBase(t));
+  const inline = (t) => (mentions ? inlineBase(t) : mentionHtml(inlineBase(t)));
 
   // Line-level blocks: headings, -# subtext, > quotes, - and 1. lists.
   // Plain lines are joined with <br>; block elements bring their own spacing.
@@ -180,6 +208,10 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
   }
   flush();
   s = out.join('').replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[i]);
+  s = s.replace(/\u0002(\d+)\u0002/g, (_, i) => {
+    const c = marks[i];
+    return mentionSpan(c, '@' + escapeHtml(String(c.name)) + (c.tag ? `<span class="mention-tag">#${escapeHtml(String(c.tag))}</span>` : ''));
+  });
   return { html: s, jumbo, embeds };
 }
 
