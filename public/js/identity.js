@@ -1,8 +1,8 @@
-// Keypair identities for direct messages (D32).
+// Keypair identities for direct messages (D32) and for servers (D42).
 //
 // Every local profile owns two key pairs, generated on this device and kept
 // out of the profile object so they are never sent to a server:
-//   sign (Ed25519)  proves who you are: it signs your card and mailbox logins
+//   sign (Ed25519)  proves who you are: it signs your card, mailbox logins and server hellos
 //   dh   (X25519)   agrees on a shared key with one friend
 //
 // A card is what you hand out: { id, s, d, sig }, where `s` and `d` are the
@@ -18,6 +18,7 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 const CARD = 'friendspeak-card-v1|';
 const AUTH = 'friendspeak-dm-auth-v1|';
+const HELLO = 'friendspeak-hello-v1|';
 const B64 = /^[A-Za-z0-9_-]+$/;
 
 export const b64 = (buf) => {
@@ -60,7 +61,16 @@ export function identityFor(profile) {
     const dhKey = await crypto.subtle.importKey('pkcs8', unb64(keys.dh.priv), { name: 'X25519' }, false, ['deriveBits']);
     const sign = async (text) => b64(await crypto.subtle.sign({ name: 'Ed25519' }, signKey, te.encode(text)));
     const card = { id: profile.id, s: keys.sign.pub, d: keys.dh.pub, sig: await sign(CARD + profile.id + '|' + keys.dh.pub) };
-    return { id: profile.id, card, address: await addressOf(keys.sign.pub), dhKey, login: (nonce) => sign(AUTH + nonce) };
+    return {
+      id: profile.id,
+      card,
+      address: await addressOf(keys.sign.pub),
+      dhKey,
+      login: (nonce) => sign(AUTH + nonce),
+      // A server pins the key that first says hello as this profile, and wants it every time after (D42).
+      // `sid` is the socket id the server just chose; `host` is the server as dialed, so it can't be passed on.
+      hello: (sid, host) => sign(HELLO + sid + '|' + host.toLowerCase()),
+    };
   })();
   entry.promise.catch(() => loaded.get(profile.id) === entry && loaded.delete(profile.id));
   loaded.set(profile.id, entry);

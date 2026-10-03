@@ -48,11 +48,9 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/background.js     camera backgrounds (blur, pictures): MediaPipe person segmentation, composited per frame into the track that is sent (D37)
   models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
-  js/audio.js          Web Audio graph: mic → noise reduction → noise gate → mute/PTT gate → outgoing track, soundboard mixing
-  js/mic-worklet.js    AudioWorklet (audio thread): the mic's noise gate and speaker-mode ducking (D35)
-  vendor/              prebuilt third-party files loaded as-is: the RNNoise worklet and wasm (see its README)
+  js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, mic test loopback, soundboard mixing (D38)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
-  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30)
+  js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30); UI size → window zoom (D40)
   js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
@@ -80,7 +78,7 @@ Dockerfile, docker-compose.yaml, docker/   production server image and stack (D2
 5. **The client has no build step.** `public/` is plain ES modules loaded by the browser. Don't introduce a bundler, TypeScript or a framework without an explicit decision (D1).
 6. **Treat user content as hostile HTML.** All message text goes through `formatText()` (`public/js/util.js`), which escapes first. Build DOM with `h()`. Only use `innerHTML` with strings you built from escaped input.
 7. **The server validates every payload.** Use the `str()`, `cleanProfile()` and `isDataImage()` helpers in `server.js`. Socket handlers registered with `on()` in `attach()` already reject unauthenticated sockets.
-8. **The trust model is "friends".** Anyone who knows the server address (and password, if set) can create or delete channels and emojis. Profile IDs are client-generated and spoofable. That is intentional (D3). Don't add half-measures that imply more security than exists.
+8. **The trust model is "friends".** Anyone who knows the server address (and password, if set) can create or delete channels and emojis. Profile IDs are client-generated, but a server pins the key that first signs `hello` for an id, and only that key can use it after (D42; the profile file carries the key). Ids that only pre-D42 apps use are still spoofable. Don't add half-measures that imply more security than exists.
 
 ## Common tasks
 

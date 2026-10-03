@@ -1,7 +1,8 @@
 // Audio graph:
 //
-//   mic ──> [RNNoise] ──> [noise gate, speaker mode] ──> micGain ──> gate(mute/PTT) ──┬──> outDest (MediaStream sent to peers)
-//                              ^ sidechain: master                                    └──> selfAnalyser (speaking indicator)
+//   mic ──> micGain ──┬──> gate(mute/PTT/mic test) ──┬──> outDest (MediaStream sent to peers)
+//                     ├──> micAnalyser (Settings)    └──> selfAnalyser (speaking indicator)
+//                     └──> loop (mic test) ──> master
 //   soundboard clips ──> sbBus ──────────┬──> outDest
 //                                        ├──> selfAnalyser
 //                                        └──> monitor ──> master (hear it yourself)
@@ -14,9 +15,8 @@
 // Voices play through the graph instead of <audio> elements because an
 // element's volume stops at 100%, and a gain node can boost a quiet friend.
 //
-// The two bracketed mic stages are AudioWorklets (D35): RNNoise only for the
-// "High" noise reduction level, and mic-worklet.js for the noise gate and
-// speaker mode. Only the mic passes through them, never the soundboard.
+// The mic is sent as it is captured (D38): no echo cancellation, automatic
+// gain or gate. The one option is the browser's noise suppression.
 import { settings } from './store.js';
 
 export const MAX_USER_VOLUME = 3;
@@ -28,18 +28,9 @@ const LIMITER = { threshold: -2, knee: 0, ratio: 20, attack: 0.001, release: 0.2
 // takes off a full-scale signal. This takes it back out.
 const LIMITER_TRIM = 10 ** ((0.6 * LIMITER.threshold * (1 - 1 / LIMITER.ratio)) / 20);
 
-// RNNoise only works on 48 kHz audio, so the whole graph runs at that rate (it
-// is also what WebRTC sends). The browser resamples for devices at other rates.
+// The graph runs at the rate Opus sends, so nothing is resampled on the way
+// out. The browser resamples for devices at other rates.
 const SAMPLE_RATE = 48000;
-const RNNOISE = new URL('../vendor/web-noise-suppressor/', import.meta.url);
-export const GATE_RANGE = { min: -80, max: -10 }; // dB, the manual noise gate threshold
-
-async function fetchWasm(name) {
-  const res = await fetch(new URL(name, RNNOISE));
-  if (!res.ok) throw new Error(`${name}: ${res.status}`);
-  const bytes = await res.arrayBuffer();
-  return WebAssembly.validate(bytes) ? bytes : null;
-}
 
 class AudioEngine {
   constructor() {
@@ -51,8 +42,9 @@ class AudioEngine {
     this.muted = false;
     this.pttHeld = false;
     this.micRun = 0; // bumped by every mic start and stop, so a slow start can tell it was overtaken
-    this.micInfo = null; // what the running mic applies: { label, want, got, denoise, fallback }
-    this.micLevel = null; // latest report from the noise gate: { level, threshold, open, ducked } in dB
+    this.micInfo = null; // what the running mic applies: { label, want, got }
+    this.micTest = false; // Settings' mic test is running (setMicTest)
+    this.monitorOn = false;
   }
 
   ensure() {
@@ -75,7 +67,8 @@ class AudioEngine {
     this.sbBus = ctx.createGain();
     this.sbBus.gain.value = s.soundboardVolume;
     this.monitor = ctx.createGain();
-    this.monitor.gain.value = s.soundboardMonitor ? 1 : 0;
+    this.loop = ctx.createGain();
+    this.loop.gain.value = 0;
     this.voiceBus = ctx.createGain();
     this.voiceBus.gain.value = s.voiceVolume;
     this.cueBus = ctx.createGain();
@@ -85,8 +78,13 @@ class AudioEngine {
     this.outDest = ctx.createMediaStreamDestination();
     this.selfAnalyser = ctx.createAnalyser();
     this.selfAnalyser.fftSize = 512;
+    this.micAnalyser = ctx.createAnalyser();
+    this.micAnalyser.fftSize = 512;
 
     this.micGain.connect(this.gate);
+    this.micGain.connect(this.micAnalyser);
+    this.micGain.connect(this.loop);
+    this.loop.connect(this.master);
     this.gate.connect(this.outDest);
     this.gate.connect(this.selfAnalyser);
     this.sbBus.connect(this.outDest);
@@ -97,6 +95,7 @@ class AudioEngine {
     this.cueBus.connect(this.master);
     this.master.connect(ctx.destination);
     this.updateGate();
+    this.setMonitor(s.soundboardMonitor);
     if (s.outputDevice) this.setOutputDevice(s.outputDevice);
   }
 
@@ -105,54 +104,13 @@ class AudioEngine {
     return this.outDest.stream;
   }
 
-  // The mic's worklet nodes, made once on the first mic start. Either is null
-  // if it can't run here, and the mic then simply skips that stage.
-  processors() {
-    return (this.procs ||= (async () => {
-      const ctx = this.ctx;
-      let gateNode = null;
-      let denoise = null;
-      try {
-        await ctx.audioWorklet.addModule(new URL('./mic-worklet.js', import.meta.url));
-        const mono = { channelCount: 1, channelCountMode: 'explicit' };
-        gateNode = new AudioWorkletNode(ctx, 'fs-mic-gate', { numberOfInputs: 2, outputChannelCount: [1], ...mono });
-        gateNode.port.onmessage = (e) => (this.micLevel = e.data);
-        this.master.connect(gateNode, 0, 1); // what the speakers play, for speaker mode
-      } catch (e) {
-        console.warn('noise gate unavailable', e);
-      }
-      try {
-        if (ctx.sampleRate !== SAMPLE_RATE) throw new Error(`audio runs at ${ctx.sampleRate} Hz`);
-        const wasmBinary = (await fetchWasm('rnnoise_simd.wasm')) || (await fetchWasm('rnnoise.wasm')); // not valid = no SIMD here
-        if (!wasmBinary) throw new Error('no usable wasm');
-        await ctx.audioWorklet.addModule(new URL('rnnoise/workletProcessor.js', RNNOISE));
-        denoise = new AudioWorkletNode(ctx, '@sapphi-red/web-noise-suppressor/rnnoise', {
-          channelCount: 1,
-          channelCountMode: 'explicit',
-          processorOptions: { wasmBinary, maxChannels: 1 },
-        });
-      } catch (e) {
-        console.warn('RNNoise unavailable', e);
-      }
-      return (this.micNodes = { gateNode, denoise });
-    })());
-  }
-
   async startMic() {
     this.ensure();
     this.stopMic();
     const run = this.micRun;
     const s = settings.get();
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('microphone access needs https or localhost');
-    const { denoise } = await this.processors();
-    // With RNNoise in the graph the browser's own suppression is turned off, so
-    // the two don't fight. If RNNoise can't run, "high" falls back to the browser's.
-    const high = s.noiseReduction === 'high';
-    const want = {
-      echoCancellation: s.echoCancellation,
-      noiseSuppression: s.noiseReduction === 'standard' || (high && !denoise),
-      autoGainControl: s.autoGainControl,
-    };
+    const want = { echoCancellation: false, autoGainControl: false, noiseSuppression: !!s.noiseSuppression };
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: { deviceId: s.inputDevice ? { ideal: s.inputDevice } : undefined, ...want },
     });
@@ -161,34 +119,15 @@ class AudioEngine {
     this.micSource = this.ctx.createMediaStreamSource(stream);
     const track = stream.getAudioTracks()[0];
     // A device or OS may refuse a constraint without failing; Settings shows what was applied
-    this.micInfo = { label: track.label, want, got: track.getSettings(), denoise: high && !!denoise, fallback: high && !denoise };
-    this.wireMic();
-  }
-
-  // mic ──> [RNNoise] ──> [noise gate, speaker mode] ──> micGain
-  wireMic() {
-    if (!this.micSource) return;
-    const { gateNode, denoise } = this.micNodes;
-    this.applyMicProcessing();
-    let node = this.micSource;
-    if (this.micInfo.denoise) node = node.connect(denoise);
-    if (gateNode) node = node.connect(gateNode);
-    node.connect(this.micGain);
-  }
-
-  // Noise gate and speaker mode settings; they apply without restarting the mic
-  applyMicProcessing() {
-    const s = settings.get();
-    this.micNodes?.gateNode?.port.postMessage({ gate: s.noiseGate, threshold: s.noiseGateThreshold, duck: s.speakerMode });
+    this.micInfo = { label: track.label, want, got: track.getSettings() };
+    this.micSource.connect(this.micGain);
   }
 
   stopMic() {
     this.micRun++;
     this.micSource?.disconnect();
-    this.micNodes?.denoise?.disconnect();
-    this.micNodes?.gateNode?.disconnect();
     this.micStream?.getTracks().forEach((t) => t.stop());
-    this.micSource = this.micStream = this.micInfo = this.micLevel = null;
+    this.micSource = this.micStream = this.micInfo = null;
   }
 
   setMicVolume(v) {
@@ -201,7 +140,7 @@ class AudioEngine {
     if (this.master) this.master.gain.value = v;
   }
   setVoiceVolume(v) {
-    if (this.voiceBus) this.voiceBus.gain.value = v;
+    if (this.voiceBus) this.voiceBus.gain.value = this.micTest ? 0 : v;
   }
   setCueVolume(v) {
     if (this.cueBus) this.cueBus.gain.value = v;
@@ -211,7 +150,20 @@ class AudioEngine {
     this.ctx?.setSinkId?.(deviceId || '').catch(() => {});
   }
   setMonitor(on) {
-    if (this.monitor) this.monitor.gain.value = on ? 1 : 0;
+    this.monitorOn = on;
+    if (this.monitor) this.monitor.gain.value = on && !this.micTest ? 1 : 0;
+  }
+  // Mic test (Settings): you hear your own mic and nothing else. Friends'
+  // voices and your soundboard go quiet here, and the mic is kept from friends
+  // as if muted. Screen share audio plays in <video> elements, which main.js
+  // mutes for the test.
+  setMicTest(on) {
+    this.ensure();
+    this.micTest = on;
+    this.loop.gain.value = on ? 1 : 0;
+    this.setVoiceVolume(settings.get().voiceVolume);
+    this.setMonitor(this.monitorOn);
+    this.updateGate();
   }
   setMuted(m) {
     this.muted = m;
@@ -223,7 +175,7 @@ class AudioEngine {
   }
   updateGate() {
     if (!this.gate) return;
-    const open = !this.muted && (!settings.get().ptt || this.pttHeld);
+    const open = !this.muted && !this.micTest && (!settings.get().ptt || this.pttHeld);
     this.gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx.currentTime, 0.01);
   }
 
@@ -314,7 +266,17 @@ class AudioEngine {
 
   // Little UI cues (join / leave / mute), synthesized so there are no asset files.
   cue(kind) {
-    if (!settings.get().cues) return;
+    const st = settings.get();
+    if (!st.cues || st.sounds[kind] === false) return;
+    this.play(kind);
+  }
+
+  // Settings preview: plays even when that sound is turned off (the volume still applies)
+  preview(kind) {
+    this.play(kind);
+  }
+
+  play(kind) {
     this.ensure();
     const tones = {
       join: [523, 784],
@@ -323,7 +285,8 @@ class AudioEngine {
       peerLeave: [880, 660],
       mute: [440],
       unmute: [660],
-      message: [988],
+      dm: [988, 1175],
+      mention: [880, 1319, 880],
       ring: [659, 880, 659, 880],
       calling: [494, 494],
     }[kind];
@@ -344,6 +307,20 @@ class AudioEngine {
     });
   }
 }
+
+// Every cue the settings list, in display order
+export const CUES = [
+  { kind: 'join', label: 'You join voice' },
+  { kind: 'leave', label: 'You leave voice' },
+  { kind: 'peerJoin', label: 'Someone joins your channel' },
+  { kind: 'peerLeave', label: 'Someone leaves your channel' },
+  { kind: 'mute', label: 'Mute' },
+  { kind: 'unmute', label: 'Unmute' },
+  { kind: 'dm', label: 'Direct message' },
+  { kind: 'mention', label: 'Mention or reply' },
+  { kind: 'ring', label: 'Incoming call' },
+  { kind: 'calling', label: 'Outgoing call (ringing)' },
+];
 
 export const Level = AudioEngine.level;
 export const audio = new AudioEngine();
