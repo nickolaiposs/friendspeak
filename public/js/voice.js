@@ -8,7 +8,21 @@
 // id ({ media: kind, id }) so the receiver can tell them apart. Tracks come
 // and go mid-call, so signaling uses the "perfect negotiation" pattern: either
 // side may offer, and on a collision the polite peer (lower socket id) yields.
+//
+// Native streams (D45): in the desktop app a share can be captured, encoded and
+// sent by the media sidecar instead of the browser engine. The watch/media/view
+// messages stay the same; the video (and a share's audio) then travels on a
+// connection of its own per viewer, which the sharer's side offers:
+//   viewer → sharer   { watch: kind, on: true, stream: 1 }    "I can take a stream connection"
+//   sharer → viewer   { media: kind, id, stream: 1 }          announce, as before
+//   sharer → viewer   { stream: kind, sdp | candidate }       the offer (sendonly H.264 + Opus) and its ICE
+//   viewer → sharer   { viewing: kind, sdp | candidate }      the answer and its ICE
+// The viewer's end is a plain RTCPeerConnection, so any standard WebRTC client
+// (a phone, say) can watch; and anything that can offer such a connection can
+// be the sharer. A viewer that doesn't say `stream: 1` (an older app) gets the
+// share the old way, from a capture of the browser engine's.
 import { audio, Level, MAX_USER_VOLUME } from './audio.js';
+import { nativeMedia } from './native.js';
 import { settings } from './store.js';
 
 export const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
@@ -22,6 +36,8 @@ export const MEDIA = {
   camera: { width: 3840, height: 2160, fps: 120, ideal: { width: 1920, height: 1080, fps: 60 } },
 };
 export const KINDS = ['screen', 'camera'];
+// What the sidecar may capture a camera at: the camera's own best mode up to this
+export const NATIVE_CAMERA = { width: 2560, height: 1440, fps: 60 };
 
 // Screen share quality tiers: the ceiling for capture and for what any viewer
 // gets. "auto" is what the bandwidth ladder (below) climbs to by default, and
@@ -304,7 +320,13 @@ export class VoiceClient {
     this.statPrev = new Map(); // videoStats() previous samples: "out|in|<sid>|<kind>" -> counters
     this.deafened = false;
     this.audioQuality = 'max'; // a key of AUDIO_QUALITY (setAudioQuality)
-    this.local = { screen: null, camera: null }; // our own captures (MediaStream)
+    this.local = { screen: null, camera: null }; // our own captures (MediaStream); for a native share, its preview
+    // A share the sidecar carries: { source, viewers (sids on a stream connection), stats, pc (our own preview),
+    // legacy (the browser engine's capture, for viewers that can't take a stream connection), onEvent }
+    this.native = { screen: null, camera: null };
+    // The app sets two hooks on the class (they need its pickers and toasts):
+    //   VoiceClient.legacyCapture(kind, source) => Promise<MediaStream | null>
+    //   VoiceClient.onNativeLost(voice, kind, source, reason, viewers): the sidecar's share ended by itself
     this.quality = { screen: { tier: 'auto', mode: 'smooth' }, camera: { tier: 'camera', mode: 'smooth' } };
     this.latest = { screen: [], camera: [] }; // latest per-viewer samples from the sampler
     this.sampler = null; // 1 s interval while any media is being sent
@@ -362,6 +384,10 @@ export class VoiceClient {
       ignoreOffer: false,
       out: { screen: [], camera: [] },
       in: { screen: null, camera: null },
+      streams: false, // they can take a native stream connection (said so when they asked to watch)
+      nativeOut: { screen: false, camera: false }, // the sidecar sends them this kind
+      nin: { screen: null, camera: null }, // their native stream to us: { pc }
+      noStream: { screen: false, camera: false }, // a stream connection to them failed: ask for the old way
       view: { screen: null, camera: null }, // how big they display our media: { w, h, hidden }
       viewed: { screen: null, camera: null }, // the same, for their media as we last reported it to them
       ladder: { screen: null, camera: null }, // our encoder's rung for them (see ladderStep)
@@ -465,6 +491,7 @@ export class VoiceClient {
     // with the SDP they announce.
     if (KINDS.includes(data.watch)) {
       return this.enqueue(from, () => {
+        peer.streams = !!data.stream;
         peer.view[data.watch] = null;
         return data.on ? this.sendMediaTo(from, data.watch) : this.unsendMediaTo(from, data.watch);
       });
@@ -472,14 +499,22 @@ export class VoiceClient {
     if (KINDS.includes(data.view)) {
       return this.enqueue(from, () => {
         peer.view[data.view] = { w: Math.max(0, +data.w || 0), h: Math.max(0, +data.h || 0), hidden: !!data.hidden };
+        if (peer.nativeOut[data.view]) return nativeMedia.send({ op: 'view', kind: data.view, viewer: from, ...peer.view[data.view] });
         return this.applyView(from, data.view);
       });
     }
     if (KINDS.includes(data.media)) {
       return this.enqueue(from, () => {
         peer.in[data.media] = typeof data.id === 'string' ? { id: data.id, stream: null } : null;
+        if (!peer.in[data.media]) this.closeStream(peer, data.media);
         this.onMediaChange(from, data.media);
       });
+    }
+    // A native stream: their offer and ICE (we watch), or a viewer's answer and ICE (we share)
+    if (KINDS.includes(data.stream)) return this.enqueue(from, () => this.streamSignal(from, peer, data.stream, data));
+    if (KINDS.includes(data.viewing)) {
+      if (peer.nativeOut[data.viewing]) nativeMedia.send({ op: 'signal', kind: data.viewing, viewer: from, data: { sdp: data.sdp, candidate: data.candidate } });
+      return;
     }
     this.enqueue(from, async () => {
       const pc = peer.pc;
@@ -504,6 +539,136 @@ export class VoiceClient {
   }
 
   // ----- screen sharing & camera -----
+
+  // ----- native streams (D45) -----
+
+  // Share through the sidecar: it captures `source` ({ type: 'screen' | 'window' | 'camera', id, name, audio })
+  // itself and sends every viewer the video (and a share's audio) on a
+  // connection of its own. Our own tile shows it as one more viewer. Rejects
+  // when the sidecar can't start it; the caller then shares the old way.
+  async setNativeMedia(kind, source, quality) {
+    this.stopMedia(kind, true);
+    this.useQuality(kind, quality);
+    const n = { source, viewers: new Set(), stats: [], legacy: null, pc: null, chain: Promise.resolve() };
+    const started = new Promise((resolve, reject) => (n.settle = { resolve, reject }));
+    n.onEvent = (ev) => this.nativeEvent(kind, n, ev);
+    nativeMedia.claim(kind, n.onEvent);
+    nativeMedia.send({ op: 'start', kind, source, ...this.nativeQuality(kind), stun: ICE.flatMap((s) => s.urls).map((u) => u.replace(/^stuns?:/, '')) });
+    const timer = setTimeout(() => n.settle.reject(new Error('the capture did not start')), 20_000);
+    try {
+      await started;
+      if (!this.channelId) throw new Error('left the call');
+    } catch (e) {
+      nativeMedia.release(kind, n.onEvent);
+      nativeMedia.send({ op: 'stop', kind });
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+    this.native[kind] = n;
+    this.local[kind] = new MediaStream();
+    this.previewNative(kind, n, this.local[kind]);
+    this.emitMedia();
+    this.onMediaChange(this.socket.id, kind);
+  }
+
+  nativeQuality(kind) {
+    const { tier, mode } = this.quality[kind];
+    const cap = kind === 'camera' ? NATIVE_CAMERA : TIERS[tier] || TIERS.auto;
+    return { tier: { width: cap.width, height: cap.height, fps: cap.fps }, mode };
+  }
+
+  nativeEvent(kind, n, ev) {
+    if (ev.ev === 'started') return n.settle.resolve();
+    if (ev.ev === 'error') return n.settle.reject(new Error(ev.message || 'the capture failed'));
+    if (this.native[kind] !== n) return;
+    if (ev.ev === 'signal') {
+      if (ev.viewer === 'self') n.chain = n.chain.then(() => n.previewSignal(ev.data)).catch((e) => console.warn('native preview', e));
+      else if (this.peers.get(ev.viewer)?.nativeOut[kind]) this.send(ev.viewer, { stream: kind, ...ev.data });
+    } else if (ev.ev === 'stats') {
+      const { tier } = this.quality[kind];
+      n.stats = ev.viewers.filter((v) => !v.own).map((v) => ({ ...v, tier: kind === 'screen' ? tier : undefined }));
+    } else if (ev.ev === 'stopped') {
+      // The window closed, the device went away, or the sidecar died: the app decides how to carry on
+      const viewers = this.sendingTo(kind);
+      this.stopMedia(kind, true);
+      if (VoiceClient.onNativeLost) VoiceClient.onNativeLost(this, kind, n.source, ev.reason, viewers);
+      else this.emitMedia();
+    }
+  }
+
+  // Our own view of a native share: a loopback connection to the sidecar
+  previewNative(kind, n, stream) {
+    const pc = (n.pc = new RTCPeerConnection());
+    pc.ontrack = (e) => {
+      stream.addTrack(e.track);
+      this.onMediaChange(this.socket.id, kind);
+    };
+    pc.onicecandidate = (e) => e.candidate && nativeMedia.send({ op: 'signal', kind, viewer: 'self', data: { candidate: e.candidate.toJSON() } });
+    n.previewSignal = async (data) => {
+      if (data.sdp) {
+        await pc.setRemoteDescription(data.sdp);
+        await pc.setLocalDescription();
+        nativeMedia.send({ op: 'signal', kind, viewer: 'self', data: { sdp: pc.localDescription.toJSON() } });
+      } else if (data.candidate) await pc.addIceCandidate(data.candidate).catch(() => {});
+    };
+    nativeMedia.send({ op: 'viewer', kind, viewer: 'self', self: true });
+    nativeMedia.send({ op: 'view', kind, viewer: 'self', w: 640, h: 360 }); // a tile, never the reason for a bigger encode
+  }
+
+  // Their sidecar (or any WebRTC sender) offers us their stream on a connection of its own
+  async streamSignal(sid, peer, kind, data) {
+    if (data.sdp) {
+      if (data.sdp.type !== 'offer' || !peer.in[kind]) return;
+      this.closeStream(peer, kind);
+      const pc = new RTCPeerConnection({ iceServers: ICE });
+      peer.nin[kind] = { pc };
+      const stream = new MediaStream();
+      pc.ontrack = (e) => {
+        if (peer.nin[kind]?.pc !== pc || !peer.in[kind]) return;
+        stream.addTrack(e.track);
+        peer.in[kind].stream = stream;
+        this.onMediaChange(sid, kind);
+      };
+      pc.onicecandidate = (e) => e.candidate && this.send(sid, { viewing: kind, candidate: e.candidate.toJSON() });
+      pc.onconnectionstatechange = () => {
+        // No route for a connection of its own (a strict NAT): ask for the share the old way instead
+        if (pc.connectionState !== 'failed' || peer.nin[kind]?.pc !== pc) return;
+        peer.noStream[kind] = true;
+        this.watch(sid, kind, false);
+        this.watch(sid, kind, true);
+      };
+      await pc.setRemoteDescription({ type: 'offer', sdp: String(data.sdp.sdp) });
+      await pc.setLocalDescription();
+      this.send(sid, { viewing: kind, sdp: pc.localDescription.toJSON() });
+    } else if (data.candidate && peer.nin[kind]) {
+      await peer.nin[kind].pc.addIceCandidate(data.candidate).catch(() => {});
+    }
+  }
+
+  closeStream(peer, kind) {
+    peer.nin[kind]?.pc.close();
+    peer.nin[kind] = null;
+  }
+
+  // Who receives our `kind` right now, either way
+  sendingTo(kind) {
+    return [...this.peers].filter(([, p]) => p.out[kind].length || p.nativeOut[kind]).map(([sid]) => sid);
+  }
+
+  // Replace a live share by a new one (`start` begins it: setMedia or setNativeMedia)
+  // where swapping tracks isn't possible. Everyone who was receiving it gets the new one.
+  async restart(kind, start, viewers = this.sendingTo(kind)) {
+    this.stopMedia(kind, true);
+    try {
+      await start();
+    } finally {
+      if (!this.local[kind]) this.emitMedia();
+    }
+    for (const sid of viewers) if (this.peers.has(sid)) this.enqueue(sid, () => this.sendMediaTo(sid, kind));
+  }
+
+  // ----- the browser engine's captures -----
 
   // `stream` comes from getDisplayMedia (screen) or getUserMedia (camera).
   // Nobody receives it until they watch. `quality` is { tier, mode } (screens).
@@ -534,10 +699,11 @@ export class VoiceClient {
   // encoder is re-planned for the new ceiling (see plan).
   async setQuality(kind, q) {
     this.useQuality(kind, q);
+    if (this.native[kind]) nativeMedia.send({ op: 'quality', kind, ...this.nativeQuality(kind) });
     this.probeFor(kind);
     const { mode, tier } = this.quality[kind];
     const cap = ceilingOf(kind, tier);
-    for (const t of this.local[kind]?.getVideoTracks() || []) {
+    for (const t of (this.native[kind] ? (await this.native[kind].legacy) : this.local[kind])?.getVideoTracks() || []) {
       t.contentHint = MODES[mode].hint;
       // The encoder ceiling enforces the tier either way, so a refusal is harmless
       const fps = Math.min(cap.fps, MODES[mode].maxFps);
@@ -564,6 +730,7 @@ export class VoiceClient {
   async replaceMedia(kind, next, quality) {
     const stream = this.local[kind];
     if (!stream) return this.setMedia(kind, next, quality);
+    if (this.native[kind]) return this.restart(kind, () => this.setMedia(kind, next, quality)); // native → browser engine
     this.useQuality(kind, quality);
     const old = stream.getTracks();
     for (const t of old) stream.removeTrack(t);
@@ -599,6 +766,14 @@ export class VoiceClient {
     this.local[kind] = null;
     for (const sid of this.peers.keys()) this.unsendMediaTo(sid, kind);
     stream.getTracks().forEach((t) => t.stop());
+    const n = this.native[kind];
+    if (n) {
+      this.native[kind] = null;
+      nativeMedia.release(kind, n.onEvent);
+      nativeMedia.send({ op: 'stop', kind });
+      n.pc?.close();
+      n.legacy?.then((s) => s?.getTracks().forEach((t) => t.stop()));
+    }
     if (!silent) this.emitMedia();
     this.onMediaChange(this.socket.id, kind);
   }
@@ -607,10 +782,26 @@ export class VoiceClient {
     this.socket.emit('voice:media', { screen: !!this.local.screen, camera: !!this.local.camera });
   }
 
-  sendMediaTo(sid, kind) {
+  async sendMediaTo(sid, kind) {
     const peer = this.peers.get(sid);
-    const stream = this.local[kind];
-    if (!peer || !stream || peer.out[kind].length) return;
+    let stream = this.local[kind];
+    if (!peer || !stream || peer.out[kind].length || peer.nativeOut[kind]) return;
+    const n = this.native[kind];
+    if (n && peer.streams) {
+      peer.nativeOut[kind] = true;
+      n.viewers.add(sid);
+      this.send(sid, { media: kind, id: stream.id, stream: 1 });
+      nativeMedia.send({ op: 'viewer', kind, viewer: sid });
+      if (peer.view[kind]) nativeMedia.send({ op: 'view', kind, viewer: sid, ...peer.view[kind] });
+      return;
+    }
+    if (n) {
+      // An app from before native streams: it gets the browser engine's capture of the same source
+      n.legacy ||= Promise.resolve(VoiceClient.legacyCapture?.(kind, n.source)).catch(() => null);
+      stream = await n.legacy;
+      if (!stream || this.native[kind] !== n || !this.peers.has(sid) || peer.out[kind].length) return;
+      for (const t of stream.getVideoTracks()) t.contentHint = MODES[this.quality[kind].mode].hint;
+    }
     this.send(sid, { media: kind, id: stream.id });
     for (const track of stream.getTracks()) this.addMediaTransceiver(peer, kind, stream, track);
   }
@@ -720,6 +911,13 @@ export class VoiceClient {
 
   unsendMediaTo(sid, kind) {
     const peer = this.peers.get(sid);
+    if (peer?.nativeOut[kind]) {
+      peer.nativeOut[kind] = false;
+      this.native[kind]?.viewers.delete(sid);
+      nativeMedia.send({ op: 'unviewer', kind, viewer: sid });
+      this.send(sid, { media: kind, id: null });
+      return;
+    }
     if (!peer?.out[kind].length) return;
     this.statPrev.delete(`out|${sid}|${kind}`);
     for (const tr of peer.out[kind]) tr.stop();
@@ -732,8 +930,9 @@ export class VoiceClient {
   watch(sid, kind, on = true) {
     const peer = this.peers.get(sid);
     if (!peer) return;
-    if (!on) (peer.in[kind] = null), this.statPrev.delete(`in|${sid}|${kind}`);
-    this.send(sid, { watch: kind, on });
+    if (!on) (peer.in[kind] = null), this.closeStream(peer, kind), this.statPrev.delete(`in|${sid}|${kind}`);
+    // stream: we can receive a native stream on a connection of its own (D45)
+    this.send(sid, on && !peer.noStream[kind] ? { watch: kind, on, stream: 1 } : { watch: kind, on });
   }
 
   // What the encoders/decoder are doing, for the stage header and the stats
@@ -760,14 +959,15 @@ export class VoiceClient {
   //   estimate is for what we send, and Chromium reports none for what we receive.
   async videoStats(sid, kind) {
     const codecName = (stats, id) => stats.get(id)?.mimeType?.replace('video/', '') || '?';
-    if (sid === this.socket.id) return this.latest[kind] || [];
+    if (sid === this.socket.id) return [...(this.native[kind]?.stats || []), ...(this.latest[kind] || [])];
     const peer = this.peers.get(sid);
-    const tr = peer?.pc.getTransceivers().find((t) => t.receiver.track?.kind === 'video' && this.mediaOf(sid, kind)?.getTracks().includes(t.receiver.track));
+    const pc = peer?.nin[kind]?.pc || peer?.pc; // a native stream has a connection of its own
+    const tr = pc?.getTransceivers().find((t) => t.receiver.track?.kind === 'video' && this.mediaOf(sid, kind)?.getTracks().includes(t.receiver.track));
     if (!tr) return null;
     const stats = await tr.receiver.getStats().catch(() => null);
     const r = stats && [...stats.values()].find((x) => x.type === 'inbound-rtp');
     if (!r) return null;
-    const { availMbps, ...path } = await this.pathStats(stats, peer.pc);
+    const { availMbps, ...path } = await this.pathStats(stats, pc);
     const prev = this.statPrev.get(`in|${sid}|${kind}`);
     const cur = { t: r.timestamp, bytes: r.bytesReceived, jb: r.jitterBufferDelay, jbn: r.jitterBufferEmittedCount, frames: r.framesDecoded, dec: r.totalDecodeTime, qp: r.qpSum };
     this.statPrev.set(`in|${sid}|${kind}`, cur);
@@ -970,6 +1170,10 @@ export class VoiceClient {
     const peer = this.peers.get(sid);
     if (!peer) return;
     peer.pc.close();
+    for (const kind of KINDS) {
+      this.closeStream(peer, kind);
+      if (peer.nativeOut[kind]) (this.native[kind]?.viewers.delete(sid), nativeMedia.send({ op: 'unviewer', kind, viewer: sid }));
+    }
     peer.dispose?.();
     for (const k of KINDS) this.statPrev.delete(`out|${sid}|${k}`), this.statPrev.delete(`in|${sid}|${k}`);
     if (peer.audioEl) {
