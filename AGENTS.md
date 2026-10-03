@@ -25,8 +25,9 @@ The Node version must be **≥ 22.13**, because the game uses the built-in `node
 | `npm install` | Installs dependencies and builds the game (postinstall runs `scripts/build-game.js --if-possible`) |
 | `npm start` | Runs the server on `:3000` (env vars: see ARCHITECTURE.md → Configuration) |
 | `npm run desktop` | Runs the Electron app from source |
+| `npm run build:media` | Builds the native media sidecar (`native/`, Rust) for this OS into `native/dist/`. Needs Rust (`rustup`). `cargo build --release` in `native/` is enough for `npm run desktop`. **Required after any edit under `native/src`.** |
 | `npm run build:game` | Rebuilds `game/server/dist` (Babel) and `game/client/dist` (webpack). **Required after any edit under `game/*/src`.** |
-| `npm run dist[:mac\|:win\|:linux\|:all]` | Builds desktop installers into `release/` (`:all` cross-builds every OS from a Mac). The installers are client-only and don't include the server or game. |
+| `npm run dist[:mac\|:win\|:linux\|:all]` | Builds desktop installers into `release/` (`:all` cross-builds every OS from a Mac). The installers are client-only and don't include the server or game. Each first builds the media sidecar for the machine's own OS if Rust is installed; installers for other OSes are built without it (D45). |
 | `docker build -t friendspeak .` | Builds the server image; `docker-compose.yaml` runs it (README → Docker) |
 | `node --check server.js` | Quick syntax check (client modules: `node --check --input-type=module < file`) |
 
@@ -45,6 +46,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/voice.js          WebRTC mesh (VoiceClient)
   js/dm.js             peer-to-peer direct messages (DirectMessages): sealed ops and images over a data channel, signaled and mailboxed via /dm
   js/identity.js       per-profile key pairs, cards, end-to-end sealing, friend codes (D32)
+  js/native.js         client for the media sidecar (D45): what it can do, commands, events
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/background.js     camera backgrounds (blur, pictures): MediaPipe person segmentation, composited per frame into the track that is sent (D37)
   models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
@@ -55,14 +57,20 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)
+native/                the media sidecar (Rust, D45): captures a screen, window or camera, encodes H.264 and sends it to viewers over standard WebRTC; see ARCHITECTURE.md → Native streaming
+  src/engine.rs        streams, layers (one encoder per rung of the ladder), viewers (str0m), the run loop
+  src/source/          captures per OS, and a test pattern
+  src/encode/          encoders: VideoToolbox, Media Foundation, OpenH264
+  dist/, target/       (gitignored) build output
 game/index.js          glue: serves the game, starts Yukon worlds, creates penguins for profiles
 game/client/           VENDORED Yukon client (patched); built to game/client/dist
 game/server/           VENDORED Yukon server (patched); built to game/server/dist
 game/assets-pack/      (gitignored) Yukon-compatible asset pack; ~3.4 GB
 game/assets-extra/     (gitignored) art for the extra rooms
 scripts/build-game.js  builds both vendored projects
+scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, server boot, game build); release.yml (push to prod → release, D29)
+.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29)
 data/                  (gitignored) server state when run via `npm start` (state.json, mail.json, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
@@ -73,7 +81,7 @@ Dockerfile, docker-compose.yaml, docker/   production server image and stack (D2
 
 1. **Vendored Yukon code is patched, not pristine.** Mark every change in `game/client` or `game/server` with a `friendspeak:` comment, and add it to the patch inventory in `docs/GAME.md`. Keep patches small and local, so upstream Yukon updates stay mergeable. Don't reformat vendored files.
 2. **Never commit game assets.** The game's art and audio are third-party copyrighted material. `game/assets-pack`, `game/assets-extra`, `game/client/assets/{media,fonts}` and the build outputs are gitignored. Keep it that way. Code from the Yukon repos (MIT) is fine to vendor. In docs, comments, server messages and logs, call it the penguin game or virtual penguin world, as Yukon does. The brand name appears only in client UI strings (`public/`, the desktop pop-out title, the game page title).
-3. **No native Node modules.** The server must run under plain Node on any machine and in the Docker image without rebuilds. That is why the game uses `node:sqlite` through a custom Sequelize driver and `bcryptjs` instead of `bcrypt` (see DECISIONS.md D13). Check before adding a dependency.
+3. **No native Node modules.** The desktop app ships one native program, the media sidecar (D45), as a separate process; nothing native is loaded into Node or the server. The server must run under plain Node on any machine and in the Docker image without rebuilds. That is why the game uses `node:sqlite` through a custom Sequelize driver and `bcryptjs` instead of `bcrypt` (see DECISIONS.md D13). Check before adding a dependency.
 4. **One port.** Chat, voice signaling, the game client and the game worlds all share the friendspeak HTTP server. Don't add listeners on other ports. Add socket.io paths or Express routes instead (and keep `destroyUpgrade: false` on every socket.io server attached to it).
 5. **The client has no build step.** `public/` is plain ES modules loaded by the browser. Don't introduce a bundler, TypeScript or a framework without an explicit decision (D1).
 6. **Treat user content as hostile HTML.** All message text goes through `formatText()` (`public/js/util.js`), which escapes first. Build DOM with `h()`. Only use `innerHTML` with strings you built from escaped input.
@@ -109,9 +117,10 @@ There are no unit tests. Verification so far has been scripted with **puppeteer-
 - **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll. To feed a recording instead, add `--use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox` (without the second flag the sandboxed audio service can't read the file and the mic is silent). Mic processing can also be rendered offline: an `OfflineAudioContext` at 48 kHz with the same worklets.
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
 - **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
+- **Media sidecar (D45):** two layers. (1) The sidecar alone: a Node script that spawns `native/target/release/friendspeak-media`, sends `start` with `source: { type: 'test' }` (a moving pattern; `audio: true` adds a tone) and `viewer`, and relays `signal` events to a page in the system Chrome (puppeteer-core) that answers on a plain `RTCPeerConnection`; assert on the page's `inbound-rtp` stats (frames decoded, size, `audioLevel` with an unmuted element) and on the sidecar's `stats` events. `type: 'camera'` uses the real camera. (2) In the app: run the Electron instances with `FRIENDSPEAK_FAKE_CAPTURE=1` so every native source is the test pattern; get the `VoiceClient` by wrapping `VoiceClient.prototype.join` from `import('friendspeak://app/js/voice.js')` (modules are singletons), call `setNativeMedia` on one and `watch` on the other, and check `mediaOf`, `videoStats` and `peers.get(sid).nin`. Set `peer.noStream.screen = true` on the viewer to act as an older app. Real screen capture needs the Screen Recording permission, which macOS refuses to a process started from a terminal. Windows code can be type-checked from a Mac in a container (`rust` image, `mingw-w64`, `nasm`, target `x86_64-pc-windows-gnu`); it can only be run on Windows.
 - **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`.
 
-Always syntax-check after edits, and rebuild the game after touching `game/*/src`.
+Always syntax-check after edits, rebuild the game after touching `game/*/src`, and rebuild the sidecar (`cargo build --release` in `native/`) after touching `native/src`.
 
 ## Branches and releases (D29)
 
@@ -124,7 +133,7 @@ Always syntax-check after edits, and rebuild the game after touching `game/*/src
 
 When a feature is fully implemented and verified (not after every small edit), rebuild the shipped artifacts so they match the source. CI does the real release builds. These local builds catch packaging breakage early:
 
-1. `npm run dist:all`: desktop installers for macOS, Windows and Linux into `release/`. (Run `npm run build:game` separately if you touched the game; the Docker build rebuilds it itself.)
+1. `npm run dist:all`: desktop installers for macOS, Windows and Linux into `release/`. (Run `npm run build:game` separately if you touched the game; the Docker build rebuilds it itself.) It builds the media sidecar for this machine's OS first; check that `release/mac*/friendspeak.app/Contents/Resources/native/friendspeak-media` exists.
 2. `docker build -t friendspeak:latest -t friendspeak:<version> .`: the server image, where `<version>` is `version` from `package.json`.
 
 Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 and list the new files in `release/`. Report any failure with its log. Don't bump the version, push the image or publish a release unless asked.
@@ -140,4 +149,7 @@ Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 
 - `socket.emitWithAck` never resolves if the socket disconnects mid-call. UI code assumes a connected socket.
 - **Electron global shortcuts have no key-up event,** so push-to-talk can't be global. Soundboard hotkeys can.
 - **Regenerate `package-lock.json` with the Node 24 npm** (the version Docker and CI use) after changing dependencies, e.g. `docker run --rm -v "$PWD:/w" -w /w node:24-bookworm-slim npm install --package-lock-only --ignore-scripts`. Older npm versions drop optional entries, and then `npm ci` fails in the image and in CI.
+- **The media sidecar needs only the Command Line Tools on macOS, not Xcode.** Its Apple bindings are the `objc2` crates for that reason; `cidre` (and `scap`, which uses it) run `xcodebuild` in their build scripts.
+- **str0m's rule:** every change to an `Rtc` (input, write, SDP, candidate) is followed by polling it until it returns a timeout (`drain` in `native/src/engine.rs`). Two changes in a row without that leave it inconsistent.
+- **Chromium's `audioLevel` stats stay 0 for a muted `<video>`.** Unmute the element when a test checks that a share's audio has sound.
 - **The sandbox/classifier in some agent environments blocks cloning third-party code** or bundling assets into installers. Surface that to the user rather than working around it.

@@ -3,6 +3,7 @@ import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl,
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
+import { nativeMedia } from './native.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
@@ -3859,25 +3860,80 @@ async function captureScreen({ surface, sourceId, withAudio, quality }) {
   return stream;
 }
 
+// What the media sidecar should capture for a picker choice (D45), or null when this share
+// has to go through the browser engine: no sidecar, the setting is off, or audio it can't capture.
+function nativeShareSource(opts) {
+  const type = opts.sourceId?.startsWith('window:') ? 'window' : 'screen';
+  if (!opts.sourceId || !nativeMedia.can(type)) return null;
+  if (opts.withAudio && !nativeMedia.caps.audio) return null;
+  return { type, id: opts.sourceId, audio: !!opts.withAudio };
+}
+
+// Start the share natively. False (after a console note) when it didn't work, so the caller shares the old way.
+async function shareNative(v, opts) {
+  const source = nativeShareSource(opts);
+  if (!source) return false;
+  try {
+    await v.setNativeMedia('screen', source, opts.quality);
+    return true;
+  } catch (e) {
+    console.warn('native share', e);
+    return false;
+  }
+}
+
 async function startShare(opts) {
-  const stream = await captureScreen(opts);
-  if (!stream) return;
+  await nativeMedia.load();
+  const v = liveVoice();
+  if (!v) return;
+  if (!(await shareNative(v, opts))) {
+    const stream = await captureScreen(opts);
+    if (!stream) return;
+    liveVoice().setMedia('screen', stream, opts.quality);
+  }
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
-  liveVoice().setMedia('screen', stream, opts.quality);
   audio.cue('join');
   renderVoicePanel();
 }
 
 async function switchShare(opts) {
-  const stream = await captureScreen(opts);
-  if (!stream) return;
+  await nativeMedia.load();
   const v = liveVoice();
+  if (!v) return;
+  if (nativeShareSource(opts)) {
+    // The sidecar opens the new source; everyone watching is moved over to it
+    let ok = false;
+    await v.restart('screen', async () => (ok = await shareNative(v, opts)));
+    if (!ok) return startShare({ ...opts, sourceId: opts.sourceId });
+  } else {
+    const stream = await captureScreen(opts);
+    if (!stream) return;
+    await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
+    reattachOwn(v, 'screen');
+  }
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
-  await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
-  reattachOwn(v, 'screen');
   renderVoicePanel();
   toast('Switched what you’re sharing', 'info', 3000);
 }
+
+// A native share's fallbacks (voice.js). A viewer on an app from before native
+// streams gets the browser engine's capture of the same source…
+VoiceClient.legacyCapture = (kind, source) => (kind === 'screen' ? captureScreen({ sourceId: source.id, withAudio: source.audio, quality: shareQuality() }) : openCamera());
+// …and if the sidecar's share ends by itself, the browser engine takes it over for everyone watching
+VoiceClient.onNativeLost = (v, kind, source, reason, viewers) => {
+  console.warn('native', kind, 'ended:', reason);
+  if (liveVoice() !== v) return v.emitMedia();
+  toast(kind === 'screen' ? 'Your share moved to the standard pipeline' : 'Your camera moved to the standard pipeline', 'info', 5000);
+  v.restart(
+    kind,
+    async () => {
+      const stream = await VoiceClient.legacyCapture(kind, source);
+      if (stream && liveVoice() === v) v.setMedia(kind, stream, kind === 'screen' ? shareQuality() : undefined);
+      else stream?.getTracks().forEach((t) => t.stop());
+    },
+    viewers
+  ).then(renderVoicePanel);
+};
 
 // After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
 function reattachOwn(v, kind) {
@@ -3928,6 +3984,25 @@ async function openCamera() {
 
 // Put the camera on the call: `stream` from the preview, or a new capture
 async function startCamera(stream) {
+  // A plain camera goes through the media sidecar where it can (D45): the camera's own best mode up to 1440p60.
+  // With a background the browser engine keeps it, since that is where the background is made (D37).
+  await nativeMedia.load();
+  const v = liveVoice();
+  if (v && nativeMedia.can('camera')) {
+    if (!stream) setBackground(await loadBackground());
+    if (!BACKGROUNDS[activeBackground().type]) {
+      const id = settings.get().videoDevice;
+      const name = stream?.getVideoTracks()[0]?.label || (id && (await navigator.mediaDevices.enumerateDevices().catch(() => [])).find((d) => d.deviceId === id)?.label) || '';
+      stream?.getTracks().forEach((t) => t.stop()); // the sidecar opens the camera itself
+      stream = null;
+      try {
+        await v.setNativeMedia('camera', { type: 'camera', name });
+        return renderVoicePanel();
+      } catch (e) {
+        console.warn('native camera', e);
+      }
+    }
+  }
   stream ||= liveVoice() && (await openCamera());
   if (!stream) return;
   if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
@@ -3959,6 +4034,8 @@ function setCameraBackground(patch) {
       if (was === !!BACKGROUNDS[bg.type]) return false;
       const v = liveVoice();
       if (!v?.local.camera) return true;
+      // Back to no background: the camera may go (back) to the media sidecar
+      if (!BACKGROUNDS[bg.type] && nativeMedia.can('camera')) return await v.restart('camera', () => startCamera()), true;
       const stream = await openCamera();
       if (!stream) return true;
       if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop()), true;
@@ -5235,6 +5312,7 @@ function settingsVoice(body) {
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
     h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
+    ...streamingSettings(check),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
@@ -5268,6 +5346,39 @@ function settingsVoice(body) {
     picker.dispose();
     if (testing) stopTest();
   };
+}
+
+// Settings → Voice & Video → Streaming (desktop app): the native media sidecar
+// (D45) and hardware acceleration (D46). `check` is settingsVoice's checkbox row.
+function streamingSettings(check) {
+  if (!desktop?.media) return [];
+  const status = h('p', { class: 'muted small' }, 'Checking what this computer can do…');
+  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak for the change to reach the app’s own drawing and video playback. Your next share already uses it.');
+  const hwBox = h('input', { type: 'checkbox', checked: true });
+  const describe = (caps, prefs) => {
+    const hw = prefs.hardwareAcceleration;
+    const enc = caps ? (hw && caps.hardware.length ? `${caps.hardware.join(', ')} (hardware H.264)` : 'OpenH264 (software H.264)') : null;
+    const gpu = prefs.gpu || {};
+    const on = (x) => /^enabled/.test(x || '');
+    status.textContent =
+      (caps ? `Native streaming is available: shares are encoded with ${enc}.` : 'Native streaming isn’t available on this computer, so shares use the standard pipeline.') +
+      ` This run: video decoding on the ${on(gpu.video_decode) ? 'GPU' : 'CPU'}, drawing on the ${on(gpu.gpu_compositing) ? 'GPU' : 'CPU'}.`;
+    restart.hidden = hw === prefs.atStart;
+  };
+  Promise.all([nativeMedia.load(), desktop.prefs()]).then(([caps, prefs]) => {
+    hwBox.checked = prefs.hardwareAcceleration;
+    describe(caps, prefs);
+    hwBox.onchange = async () => describe(caps, await desktop.prefs({ hardwareAcceleration: hwBox.checked }));
+  });
+  return [
+    h('h3', {}, 'Streaming'),
+    check('nativeStreaming', 'Native streaming'),
+    h('p', { class: 'muted small' }, 'Screen shares and the camera are captured and encoded outside the browser engine: more frames, sharper, and encoded once however many friends watch. A camera with a background, and anything this can’t capture, uses the standard pipeline.'),
+    h('label', { class: 'check-row' }, hwBox, h('span', {}, 'Hardware acceleration')),
+    h('p', { class: 'muted small' }, 'Use the graphics card to encode your streams, play video and draw the app. Turn it off if streams or the window show glitches; everything then runs on the processor.'),
+    status,
+    restart,
+  ];
 }
 
 function settingsNotifications(body) {

@@ -105,6 +105,7 @@ const DEFAULT_SETTINGS = {
   showMembers: true,
   shareTier: 'auto', // screen share quality ceiling: a key of TIERS (voice.js)
   shareMode: 'smooth', // 'smooth' (games, video) | 'sharp' (text, code)
+  nativeStreaming: true, // desktop app: shares go through the native media sidecar when it can carry them (D45)
   hideOffline: false, // collapse the member list's Offline section
   railDmsHidden: false, // collapsed groups in the left rail
   railServersHidden: false,

@@ -7,11 +7,13 @@
 //   Docker) and connect to it like any other server.
 // - Registers soundboard hotkeys as global shortcuts that work in other apps.
 // - Checks GitHub Releases for new versions and installs them where it can (D29).
-const { app, BrowserWindow, protocol, ipcMain, globalShortcut, shell, session, systemPreferences, Menu, dialog, desktopCapturer } = require('electron');
+const { app, BrowserWindow, protocol, ipcMain, globalShortcut, shell, session, systemPreferences, Menu, dialog, desktopCapturer, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const tls = require('tls');
+const { spawn } = require('child_process');
+const readline = require('readline');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -43,6 +45,26 @@ protocol.registerSchemesAsPrivileged([
 
 // Separate profile/data folder, e.g. to run two copies side by side
 if (process.env.FRIENDSPEAK_USER_DATA) app.setPath('userData', path.resolve(process.env.FRIENDSPEAK_USER_DATA));
+
+// Settings the main process needs before there is a window to ask (the page's
+// own settings live in its localStorage): { hardwareAcceleration }
+const PREFS_FILE = () => path.join(app.getPath('userData'), 'desktop-prefs.json');
+const PREF_DEFAULTS = { hardwareAcceleration: true };
+function readPrefs() {
+  try {
+    return { ...PREF_DEFAULTS, ...JSON.parse(fs.readFileSync(PREFS_FILE(), 'utf8')) };
+  } catch {
+    return { ...PREF_DEFAULTS };
+  }
+}
+let prefs = readPrefs();
+
+// Hardware acceleration (D46), on unless turned off in Settings → Voice & Video:
+// the GPU draws the app and decodes video, and the media sidecar encodes
+// streams on it. Off, everything runs on the CPU. It has to be decided before
+// the app is ready, so the switch takes effect at the next start.
+const HW_AT_START = prefs.hardwareAcceleration;
+if (!HW_AT_START) app.disableHardwareAcceleration();
 
 // Soundboard hotkeys can fire while the window is in the background
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -276,6 +298,113 @@ function allowScreenShare() {
   });
 }
 
+// ---------------------------------------------------------------- native media sidecar (D45)
+
+// friendspeak-media: a process of its own that captures a screen, window or
+// camera, encodes it and sends it to each viewer over standard WebRTC. The app
+// starts it on first use, talks to it in JSON lines (commands on stdin, events
+// on stdout) and relays the events to the UI. If it is missing or keeps dying,
+// shares go through the browser engine as before.
+const MEDIA_EXE = 'friendspeak-media' + (process.platform === 'win32' ? '.exe' : '');
+const MEDIA_CRASHES = 3; // after this many unexpected exits, no more native media until the app restarts
+const media = { proc: null, caps: null, ready: null, crashes: 0 };
+
+function mediaBinary() {
+  if (process.env.FRIENDSPEAK_MEDIA === 'off') return null;
+  const candidates = app.isPackaged
+    ? [path.join(process.resourcesPath, 'native', MEDIA_EXE)]
+    : [process.env.FRIENDSPEAK_MEDIA_BIN, path.join(ROOT, 'native', 'target', 'release', MEDIA_EXE), path.join(ROOT, 'native', 'target', 'debug', MEDIA_EXE)];
+  return candidates.find((f) => f && fs.existsSync(f)) || null;
+}
+
+// Starts the sidecar if needed. Resolves to what it can do ({ sources, hardware, audio }), or null.
+function startMedia() {
+  if (media.ready) return media.ready;
+  const bin = media.crashes < MEDIA_CRASHES && mediaBinary();
+  if (!bin) return Promise.resolve(null);
+  media.ready = new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(bin, [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    } catch (e) {
+      console.warn('[media]', e.message);
+      media.ready = null;
+      return resolve(null);
+    }
+    media.proc = proc;
+    proc.stdin.on('error', () => {}); // a dead sidecar is handled by 'exit'
+    proc.stderr.on('data', (d) => process.stderr.write(d));
+    readline.createInterface({ input: proc.stdout }).on('line', (line) => {
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (ev.ev === 'ready') {
+        media.caps = { version: ev.version, sources: ev.sources || [], hardware: ev.hardware || [], audio: !!ev.audio };
+        return resolve(media.caps);
+      }
+      if (win && !win.isDestroyed()) win.webContents.send('desktop:media', ev);
+    });
+    const gone = (why) => {
+      if (media.proc !== proc) return;
+      media.proc = null;
+      media.ready = null;
+      media.caps = null;
+      resolve(null);
+      if (quitting) return;
+      media.crashes++;
+      console.warn('[media] sidecar stopped:', why);
+      if (win && !win.isDestroyed()) win.webContents.send('desktop:media', { ev: 'exit', gone: media.crashes >= MEDIA_CRASHES });
+    };
+    proc.on('error', (e) => gone(e.message));
+    proc.on('exit', (code, signal) => gone(signal || `exit code ${code}`));
+  });
+  return media.ready;
+}
+
+const MEDIA_OPS = ['start', 'quality', 'stop', 'viewer', 'unviewer', 'signal', 'view'];
+const MEDIA_KINDS = ['screen', 'camera'];
+
+async function sendMedia(cmd) {
+  if (!cmd || !MEDIA_OPS.includes(cmd.op) || !MEDIA_KINDS.includes(cmd.kind)) return;
+  if (!(await startMedia()) || !media.proc) {
+    // Nothing to carry the share: tell the page as the sidecar would
+    if (cmd.op === 'start' && win && !win.isDestroyed()) win.webContents.send('desktop:media', { ev: 'error', kind: cmd.kind, message: 'native media is not available' });
+    return;
+  }
+  if (cmd.op === 'start') cmd = await describeSource(cmd);
+  media.proc.stdin.write(JSON.stringify(cmd) + '\n');
+}
+
+// What only the main process knows about a share: where the screen is, whose
+// sound to leave out of its audio, and whether encoders may use the GPU.
+async function describeSource(cmd) {
+  const source = { ...cmd.source, exclude_pid: process.pid };
+  if (process.env.FRIENDSPEAK_FAKE_CAPTURE === '1') source.type = 'test'; // a test pattern, for automated runs
+  if (source.type === 'screen') {
+    const all = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 0, height: 0 } }).catch(() => []);
+    const displayId = all.find((s) => s.id === source.id)?.display_id;
+    const display = screen.getAllDisplays().find((d) => String(d.id) === String(displayId));
+    if (display) {
+      // In physical pixels, as the OS capture APIs count them
+      const b = process.platform === 'win32' ? screen.dipToScreenRect(null, display.bounds) : display.bounds;
+      Object.assign(source, { x: b.x, y: b.y, width: b.width, height: b.height });
+    }
+  }
+  return { ...cmd, source, hw: prefs.hardwareAcceleration };
+}
+
+function stopMedia() {
+  const proc = media.proc;
+  if (!proc) return;
+  try {
+    proc.stdin.end(); // it exits when its stdin closes
+  } catch {}
+  setTimeout(() => proc.exitCode == null && proc.kill(), 1500).unref();
+}
+
 // In the app window, zoom is the UI size setting (theme.js): the page steps it
 // (+1, -1, or 0 to reset) and applies it. Other windows (the game's pop-out) zoom
 // like a browser.
@@ -438,6 +567,17 @@ ipcMain.handle('desktop:badge', (_e, n) => {
     if (win && !win.isDestroyed()) win.flashFrame(n > 0 && !win.isFocused());
   } else app.setBadgeCount(n);
 });
+ipcMain.handle('desktop:media-caps', () => startMedia());
+ipcMain.on('desktop:media-send', (_e, cmd) => sendMedia(cmd).catch((e) => console.warn('[media]', e.message)));
+// Hardware acceleration: what is set (applies to the sidecar's encoders at the next share, and to the app's
+// own drawing at the next start), what this run started with, and what Chromium does with the GPU
+ipcMain.handle('desktop:prefs', async (_e, patch) => {
+  if (patch && typeof patch.hardwareAcceleration === 'boolean') {
+    prefs = { ...prefs, hardwareAcceleration: patch.hardwareAcceleration };
+    fs.writeFileSync(PREFS_FILE(), JSON.stringify(prefs, null, 2));
+  }
+  return { ...prefs, atStart: HW_AT_START, gpu: app.getGPUFeatureStatus() };
+});
 ipcMain.handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
 
 // ---------------------------------------------------------------- lifecycle
@@ -460,5 +600,7 @@ app.whenReady().then(() => {
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 
+let quitting = false;
+app.on('before-quit', () => ((quitting = true), stopMedia()));
 app.on('will-quit', () => globalShortcut.unregisterAll());
 app.on('window-all-closed', () => app.quit());
