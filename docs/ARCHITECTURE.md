@@ -154,7 +154,7 @@ Every event except `hello` requires a successful `hello` first. `on()` inside `a
 | `voice:kick` | `{ profileId }` | `{ ok }` / `{ error }` | needs `voiceKick`; not on admins or yourself. Target gets `voice:kicked { reason: 'kicked', by }`; `users` |
 | `voice:forcemute` | `{ profileId, muted }` | `{ ok }` / `{ error }` | needs `forceMute`; not on admins. Sets or clears the flag in `state.forceMuted` (never touches the person's own mute); you can only lift your own. Target gets `voice:forcemuted { muted, by }`; `users` |
 | `voice:media` | `{ screen, camera }` (booleans) | none | `users` (each user has `sharing` and `camera`; both cleared on leaving voice) |
-| `rtc:signal` | `{ to, data }` | none | relayed only if both are in the same voice channel. `data` is `{ sdp }`, `{ candidate }`, or media control: `{ watch: 'screen'\|'camera', on }` and `{ view: kind, w, h, hidden }` (viewer → sender: displayed size in device pixels, or window hidden) and `{ media: 'screen'\|'camera', id: streamId \| null }` (sender → viewer) |
+| `rtc:signal` | `{ to, data }` | none | relayed only if both are in the same voice channel. `data` is `{ sdp }`, `{ candidate }`, or media control: `{ watch: 'screen'\|'camera', on }` and `{ view: kind, w, h, hidden }` (viewer → sender: displayed size in device pixels, or window hidden) and `{ media: 'screen'\|'camera', id: streamId \| null }` (sender → viewer). Native streams (D45) add `stream: 1` to `watch` and `media`, and `{ stream: kind, sdp \| candidate }` (sharer → viewer) and `{ viewing: kind, sdp \| candidate }` (viewer → sharer); see Native streaming |
 | `game:login` | none | `{ ok, username, token, path }` / `{ error }` | creates the penguin on first use and renames it when the profile name has changed (GAME.md). Refused while the game is unavailable or switched off. |
 | `game:state` | `{ playing }` | none | `users` |
 | `member:remove` | `{ profileId }` | `{ ok }` / `{ error }` | needs `kick`; not on admins or yourself (D27, D43). Their chat and DM-signaling sockets get `removed` and are disconnected, and their stored profile is deleted: `profile:removed {id}`, `users`. They can reconnect. |
@@ -374,6 +374,12 @@ flowchart LR
   - **Watching:** cameras are watched while the stage is open. Screen shares stay opt-in: an unwatched one is a "Watch stream" card, and several can be watched at once. Each has its own volume slider and "Stop watching" on hover, and honours deafen.
   - **Closing:** closing the stage, or the last source going away, unwatches everything. Your own camera tile is mirrored.
 - **Changing source:** while sharing, the screen button in the voice panel (or "Change source" in the stage header) opens the picker again. `VoiceClient.replaceMedia` swaps the tracks inside the same `MediaStream` and calls `replaceTrack` on each viewer's senders. No renegotiation is needed (unless the new source adds audio) and the stream id stays the same, so viewers keep watching without a gap.
+- **Native streaming (`native.js`, `native/`, D45):** in the desktop app a share can be captured, encoded and sent by the media sidecar instead of the browser engine. See [Native streaming](#native-streaming-native-d45) below for the sidecar itself. In `voice.js`:
+  - `VoiceClient.setNativeMedia(kind, source, quality)` starts it (`source` is `{ type: 'screen' | 'window' | 'camera', id, name, audio }`); `main.js` tries it first (`shareNative`, `startCamera`) when `nativeMedia.can(type)` and falls back to `setMedia`. `local[kind]` is then the *preview*: a `MediaStream` fed by a loopback connection from the sidecar, so every `local.screen` / `local.camera` check in the UI keeps working.
+  - A viewer's `{ watch }` carries `stream: 1`. For such a viewer `sendMediaTo` announces `{ media, id, stream: 1 }` and asks the sidecar for a viewer; the sidecar's offer and ICE go out as `{ stream: kind, … }`, and the viewer's `{ viewing: kind, … }` go back to it. The viewer builds a receive-only `RTCPeerConnection` per sharer and kind (`streamSignal`, kept in `peer.nin[kind]`), and its tracks become `peer.in[kind].stream`, so the stage and DM calls show it like any other share. `{ view }` reports are forwarded to the sidecar.
+  - Fallbacks: a viewer without `stream: 1` gets the browser engine's capture of the same source (`VoiceClient.legacyCapture`, opened once, lazily) over the mesh connection; a viewer whose stream connection fails re-asks without `stream: 1`; if the sidecar's share ends by itself, `VoiceClient.onNativeLost` restarts it on the browser engine for the same viewers (`restart`).
+  - `restart(kind, start)` replaces a live share where tracks can't be swapped (anything involving the sidecar): it stops the old one quietly, starts the new one, and re-sends to everyone who was receiving.
+  - Stats: the sidecar reports one entry per viewer each second in the shape `senderStats` produces (plus `layers`, `sharing`, `native`); `videoStats` for your own share returns them ahead of any browser-engine entries. Receiver stats read the stream connection.
 - **One outgoing track for all peers:** it's the Web Audio destination, so the soundboard reaches everyone even while muted, and changing the mic device (`audio.startMic()`) doesn't renegotiate.
 - **Listen-only fallback:** if the mic fails (denied, missing, insecure origin), the user still joins listen-only (`voice.micError`).
 - **Remote audio:** each friend's voice goes through the audio graph (`audio.voiceInput`), not an `<audio>` element, because an element's volume stops at 100%. Per-user volume (`settings.userVolumes`, by profile id, 0–3) and local mute (`settings.userMutes`) set the user gain; deafen sets it to 0. Above 100% a `DynamicsCompressorNode` set up as a limiter follows the gain (with its automatic makeup gain trimmed back out), so a boosted voice doesn't clip; at or below 100% it is not in the path. A muted `<audio>` element still holds each remote stream, because Chromium only feeds a remote stream to the graph while a media element plays it. The output device is set on the `AudioContext` (`setSinkId`), and Chromium's echo canceller takes the graph's output as its reference like any other playback. Each remote stream also gets an analyser; a 90 ms interval toggles `.voice-user.speaking`.
@@ -390,14 +396,55 @@ flowchart LR
   - `trustServer`
   - `setHotkeys` / `hasGlobalHotkey` / `onHotkey`
   - `screenSources` / `pickScreenSource` (screen sharing)
+  - `media.caps` / `media.send` / `media.on` (the native media sidecar, D45)
+  - `prefs` (hardware acceleration, D46)
   - `updateState` / `onUpdate` / `checkForUpdates` / `downloadUpdate` / `installUpdate` / `openReleases` (app updates)
 
   The client still guards bridge calls with `desktop?.`, but it only runs in the app now (D26).
 - **Screen sharing:** Electron has no `getDisplayMedia` picker. `screenSources()` lists screens and windows (`desktopCapturer`, with thumbnails and the macOS Screen Recording permission status), and the UI shows its own picker. `pickScreenSource({ id, audio })` arms a one-shot choice that the next `setDisplayMediaRequestHandler` call consumes (it expires after 30 s, and a request without a pick is denied). System audio uses `audio: 'loopback'`: Windows supports it natively, and on macOS it is enabled with the `MacLoopbackAudioForScreenShare` feature flags. If audio capture fails, the client retries with video only. On Windows the app enables Chromium's `WebRtcAllowWgcUsingTexture` and `ZeroCopyDesktopCapture` features so captured frames stay on the GPU (D36); `FRIENDSPEAK_LEGACY_CAPTURE=1` turns them off.
+- **Media sidecar (D45):** `startMedia()` spawns `friendspeak-media` on first use (`resources/native/` in an installed app, `native/target/release/` from source, or `FRIENDSPEAK_MEDIA_BIN`; `FRIENDSPEAK_MEDIA=off` disables it), relays its events to the page (`desktop:media`) and the page's commands to it (`desktop:media-send`, checked against a list of operations). For `start` it adds what only the main process knows: the display's position and size, the app's process id (whose sound stays out of share audio) and `hw` from the hardware acceleration setting. An unexpected exit is reported as `{ ev: 'exit' }`; after three, it stays off until the app restarts. `FRIENDSPEAK_FAKE_CAPTURE=1` makes every native source a test pattern (and a tone), for automated runs.
+- **Hardware acceleration (D46):** `userData/desktop-prefs.json` holds `{ hardwareAcceleration }` (default true). Off, `app.disableHardwareAcceleration()` runs before the app is ready. `desktop:prefs` reads and writes it and returns `atStart` and `app.getGPUFeatureStatus()`.
 - **Global hotkeys:** soundboard combos with a modifier, an F-key or the numpad are registered with `globalShortcut`, and presses are forwarded to the renderer. There's no key-up event, so push-to-talk stays window-local.
 - **Other behaviour:** single-instance lock, `FRIENDSPEAK_USER_DATA` overrides the data folder, the autoplay policy is relaxed so global hotkeys can play sounds in the background, links open in the system browser, and `/game/` pop-outs open as child windows.
 - **Updates (D29):** `electron-updater` reads the `latest*.yml` files on the GitHub Release. It checks 10 s after launch and every 4 h, and never downloads without being asked. The renderer shows a banner and Settings → About & updates. The Windows installer and the Linux AppImage download and install in-app (or on quit). Unsigned macOS builds and the Windows portable exe can't self-update, so **Download** opens the release page. From source, updates are checked only with `FRIENDSPEAK_UPDATE_DEV=1`. While the repo is private, set `GH_TOKEN` to test; installed apps simply see no releases.
-- **Packaging:** electron-builder config lives in `package.json → build`. Installers contain only `desktop/` and `public/` (plus runtime npm deps); `server.js` and the game are not bundled.
+- **Packaging:** electron-builder config lives in `package.json → build`. Installers contain only `desktop/` and `public/` (plus runtime npm deps); `server.js` and the game are not bundled. `extraResources` copies `native/dist/<os>-<arch>/` (from `npm run build:media`) to `resources/native/` when it exists.
+
+## Native streaming (`native/`, D45)
+
+`friendspeak-media` is a Rust binary. It has no UI and no network role beyond the peer connections it makes; the desktop app starts it and relays its signaling.
+
+```mermaid
+flowchart LR
+  App["desktop app<br/>(main process)"] -- "JSON lines<br/>stdin / stdout" --> Engine
+  Cap["capture<br/>(ScreenCaptureKit, AVFoundation,<br/>Windows Graphics Capture, Media Foundation)"] -- frames --> Engine["engine<br/>(one thread)"]
+  Engine -- "newest frame" --> L1["layer 1440p60<br/>(scale, hardware H.264)"]
+  Engine --> L2["layer 720p60"]
+  L1 -- "encoded unit" --> Engine
+  L2 --> Engine
+  Cap -- "share audio" --> Opus --> Engine
+  Engine --> V1["viewer A<br/>(str0m: ICE, DTLS-SRTP, RTP, BWE)"]
+  Engine --> V2["viewer B"]
+  Engine --> Self["your own tile"]
+```
+
+| File | What it holds |
+|---|---|
+| `main.rs`, `proto.rs` | stdin reader, the command and event types |
+| `engine.rs` | streams, layers, viewers; the run loop; layer planning; stats |
+| `ladder.rs` | rungs, what a rung needs and may spend, the per-viewer step |
+| `net.rs` | one UDP socket per local IPv4 address per viewer, and the STUN request for the public address |
+| `frame.rs` | captured frames, scaling and conversion to NV12 |
+| `encode/` | the `Encoder` trait; `videotoolbox.rs`, `mediafoundation.rs`, `software.rs` (OpenH264) |
+| `source/` | captures: `screen_mac.rs`, `camera_mac.rs`, `screen_win.rs`, `audio_win.rs`, `camera_win.rs`, `test.rs` (a moving pattern and a tone) |
+| `audio.rs` | Opus for a share's sound (libopus translated to Rust) |
+
+- **Commands (app → sidecar),** one JSON object per line, all with `kind: 'screen' | 'camera'`: `start { source, tier: { width, height, fps }, mode, hw, stun }`, `quality { tier, mode }`, `stop`, `viewer { viewer, self? }`, `unviewer { viewer }`, `signal { viewer, data }` (the viewer's answer or ICE candidate), `view { viewer, w, h, hidden }`.
+- **Events (sidecar → app):** `ready { version, sources, hardware, audio }` once; then per kind `started`, `error { message }` (the start failed), `stopped { reason }` (it ended by itself), `signal { viewer, data }` (the offer, then server-reflexive candidates), `viewer { viewer, state }`, and `stats { viewers: [...] }` every second. stderr is its log.
+- **Threads:** the engine thread owns everything and drives each viewer's `Rtc` between messages. Captures run on the OS's queues or a thread of their own and leave the newest frame in a slot (a frame the engine didn't get to is replaced, never queued). Each layer has a thread that scales and encodes; a busy encoder drops frames instead of queueing them. One reader thread per UDP socket.
+- **A still screen** produces no frames on macOS. The engine repeats the last one twice a second, and at once when a viewer needs a keyframe.
+- **Keyframes** are made only when a viewer joins a layer or asks (PLI), at most every 0.7 s per layer.
+- **Building:** `npm run build:media` (needs Rust; on macOS both `aarch64-apple-darwin` and `x86_64-apple-darwin` targets for a full `dist`). `cargo build --release` in `native/` is enough to run from source. It is built for the machine's own OS only.
+- **To watch a native stream from another client** (a phone, a test page), implement the viewer's side from `voice.js`: `{ watch: kind, on: true, stream: 1 }`, then for the `{ stream: kind, sdp }` offer create an `RTCPeerConnection`, `setRemoteDescription`, `setLocalDescription()` and return `{ viewing: kind, sdp }`; exchange candidates the same way; send `{ view }` with the displayed size. The scratch script used to verify the sidecar did exactly this from a page in Chrome.
 
 ## Game integration (summary)
 

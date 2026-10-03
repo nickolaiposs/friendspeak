@@ -1,0 +1,71 @@
+[package]
+name = "friendspeak-media"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "friendspeak's native media sidecar: capture, encode and send streams over standard WebRTC (D45)"
+
+[dependencies]
+# WebRTC: ICE, DTLS-SRTP, RTP packetizing and bandwidth estimation. Pure Rust crypto, so no C toolchain per target.
+str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Software H.264 (Cisco's OpenH264, built from source): the fallback when there is no hardware encoder
+openh264 = { version = "0.9", optional = true }
+openh264-sys2 = { version = "0.9", optional = true }
+yuv = "0.8"
+fast_image_resize = "6"
+if-addrs = "0.15"
+# libopus translated to Rust: the share audio's encoder, with no C toolchain
+unsafe-libopus = "0.2"
+
+[features]
+default = ["software"]
+# Off only to type-check for another OS without its C++ toolchain (cargo check --target … --no-default-features)
+software = ["dep:openh264", "dep:openh264-sys2"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Apple frameworks: VideoToolbox (hardware H.264), ScreenCaptureKit, AVFoundation. These bindings build with the
+# Command Line Tools alone (no Xcode).
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-media = { version = "0.3", features = ["objc2-core-audio-types"] }
+objc2-core-audio-types = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-video = "0.3"
+objc2-video-toolbox = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media"] }
+dispatch2 = "0.3"
+block2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows Graphics Capture (screens, windows). It brings windows 0.62; the sidecar's own Win32 calls use the same version.
+windows-capture = "2"
+# WASAPI process loopback (share audio), Media Foundation (hardware H.264 encoders, cameras)
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The implement macro (a COM callback in audio_win) expands to paths in `windows_core`, so it must be a direct dependency;
+# the same version `windows` already uses
+windows-core = "0.62"
