@@ -184,6 +184,8 @@ export class DirectMessages {
       this.flushAll();
     });
     socket.on('mail', (items) => this.receiveMail(s, items));
+    // A message on this server mentions us (the server only sends it to the people concerned)
+    socket.on('mention', (p) => p && typeof p === 'object' && this.on.mention?.(address, p));
   }
 
   // A guest isn't told who is on the server, only about the people it asks for
