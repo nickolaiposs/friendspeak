@@ -5,6 +5,25 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.4 - 2026-10-03
+
+- Notifications: only DMs, incoming DM calls and mentions notify. Mentions
+  cover `@name`, `@role`, `@everyone` and replies, with `@` autocomplete, red
+  badges on channels and servers, a dock badge, and a tag to tell apart people
+  who share a name. Mentions follow renames in old messages
+- Settings → Notifications: master switches, muted people and servers, and a
+  switch, volume and preview for every sound
+- Voice: one noise suppression toggle (RNNoise, the noise gate and speaker mode
+  are gone), highest-quality Opus by default with a per-server voice quality
+  setting, and a mic test that silences everything else while it runs
+- UI size: whole-window zoom in Settings → Appearance, also driven by the View
+  menu and shortcuts, and kept across restarts
+- Servers pin one key per profile id and `hello` is signed, so a copied profile
+  id can't be used without its keys. The admin dashboard can reset a key.
+  Reverse proxies must pass the original `Host` header. Your profile file is
+  your identity: keep it safe
+- DMs keep an open connection when a shared server goes down or restarts
+
 ## 1.1.3 - 2026-10-02
 
 - Admin dashboard at `/admin`: access, overview, server log, users, bans and
