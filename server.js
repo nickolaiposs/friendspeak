@@ -40,6 +40,12 @@ async function startServer(opts = {}) {
   const MAX_ROLES_PER_MEMBER = 10;
   const MAX_ROLE_NAME = 32;
   const MAX_CHANNEL_NAME = 48; // room for emojis, incl. :custom: ones
+  // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). Until someone holds
+  // an Administrator role the server is in "open mode" and everyone can do everything.
+  const PERM_KEYS = ['admin', 'view', 'send', 'mentionRoles', 'mentionEveryone', 'kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages'];
+  const CHANNEL_PERM_KEYS = ['view', 'send', 'manage'];
+  const DEFAULT_PERMS = Object.fromEntries(PERM_KEYS.map((k) => [k, ['view', 'send', 'mentionRoles', 'mentionEveryone'].includes(k)]));
+  const OPEN_ROLES_ERROR = 'Roles are set up in the admin dashboard until someone on this server is an admin';
   const MAX_STORAGE = parseSize(opts.maxStorage, 2 * 1024 ** 3); // all uploaded files together
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
@@ -81,7 +87,11 @@ async function startServer(opts = {}) {
       files: [], // uploaded files: { id, name, size, type, channelId, messageId, by, byName, ts }
       gameEnabled: true, // game on/off, from Settings → Server (only takes effect with assets)
       audioQuality: 'max', // voice bitrate in the voice channels, from Settings → Server: a key of AUDIO_QUALITY in the client's voice.js (D38)
-      roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
+      roles: [], // { id, name, color, perms, grantable }, first = highest; managed in the dashboard and, with permissions, in the app (D34, D43)
+      defaultPerms: { ...DEFAULT_PERMS }, // what everybody gets unless a role they hold says otherwise
+      defaultGrantable: [], // role ids everyone may hand out when defaultPerms.manageRoles is on
+      permissionsOn: false, // false = open mode (everyone can do everything); sticky once someone holds an Administrator role
+      forceMuted: [], // profile ids a moderator force-muted
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
       pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
@@ -100,6 +110,27 @@ async function startServer(opts = {}) {
   }
 
   // A hand-edited or damaged state.json must not crash the role code
+  const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+  // Explicit permission settings only: key -> true|false, 'admin' only ever true. Unknown keys and bad values dropped.
+  function cleanPermMap(raw) {
+    const out = {};
+    if (!isObj(raw)) return out;
+    for (const k of PERM_KEYS) if (Object.hasOwn(raw, k) && typeof raw[k] === 'boolean' && (k !== 'admin' || raw[k])) out[k] = raw[k];
+    return out;
+  }
+  const cleanIdList = (raw, known) => (Array.isArray(raw) ? [...new Set(raw.filter((x) => typeof x === 'string' && known.has(x)))].slice(0, 200) : []);
+  // { [roleId | 'everyone']: { view?, send?, manage? } } with unknown roles and empty entries dropped (null prototype: ids come from clients)
+  function cleanOverrides(raw, known) {
+    const out = Object.create(null);
+    if (!isObj(raw)) return out;
+    for (const [key, v] of Object.entries(raw)) {
+      if ((key !== 'everyone' && !known.has(key)) || !isObj(v)) continue;
+      const o = {};
+      for (const k of CHANNEL_PERM_KEYS) if (typeof v[k] === 'boolean') o[k] = v[k];
+      if (Object.keys(o).length) out[key] = o;
+    }
+    return out;
+  }
   function cleanRoleState() {
     const roles = (Array.isArray(state.roles) ? state.roles : []).filter((r) => r && typeof r.id === 'string' && typeof r.name === 'string' && typeof r.color === 'string' && /^#[0-9a-f]{6}$/i.test(r.color));
     const known = new Set(roles.map((r) => r.id));
@@ -110,8 +141,17 @@ async function startServer(opts = {}) {
         if (ids.length) Object.defineProperty(memberRoles, pid, { value: ids, enumerable: true, writable: true, configurable: true });
       }
     }
-    state.roles = roles.slice(0, MAX_ROLES);
+    state.roles = roles.slice(0, MAX_ROLES).map((r) => ({ id: r.id, name: r.name, color: r.color, perms: cleanPermMap(r.perms), grantable: cleanIdList(r.grantable, known) }));
     state.memberRoles = memberRoles;
+    state.defaultPerms = { ...DEFAULT_PERMS, ...cleanPermMap(state.defaultPerms) };
+    state.defaultGrantable = cleanIdList(state.defaultGrantable, known);
+    state.permissionsOn = state.permissionsOn === true;
+    state.forceMuted = [...new Set((Array.isArray(state.forceMuted) ? state.forceMuted : []).filter((x) => typeof x === 'string' && x && x.length <= 64))];
+    for (const ch of Array.isArray(state.channels) ? state.channels : []) {
+      const ov = cleanOverrides(ch.overrides, known);
+      if (Object.keys(ov).length) ch.overrides = ov;
+      else delete ch.overrides;
+    }
   }
   cleanRoleState();
 
@@ -199,6 +239,68 @@ async function startServer(opts = {}) {
   const helloText = (sid, host) => 'friendspeak-hello-v1|' + sid + '|' + host;
   const hostOf = (socket) => String(socket.handshake.headers.host || '').toLowerCase();
 
+  // ---------- permissions ----------
+
+  // A role with no settings and nothing to grant is just a label ("aesthetic"): anyone
+  // with manageRoles may handle those, and unpinned (old app) profiles may hold them.
+  const isAesthetic = (r) => !Object.keys(r.perms).length && !r.grantable.length;
+  const holdsRole = (pid, rid) => Object.hasOwn(state.memberRoles, pid) && state.memberRoles[pid].includes(rid);
+  // A profile without a pinned key can be anyone (D42), so roles with permissions don't count for it
+  const heldRoles = (pid) => {
+    const pinned = !!pinOf(pid);
+    return state.roles.filter((r) => holdsRole(pid, r.id) && (pinned || isAesthetic(r)));
+  };
+  const holdsAdminRole = (pid) => heldRoles(pid).some((r) => r.perms.admin === true);
+  const isAdminPid = (pid) => state.permissionsOn && (!!state.defaultPerms.admin || holdsAdminRole(pid));
+
+  // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
+  // (only channels it can see). Open mode: everything but role management.
+  function permsOf(pid) {
+    const open = !state.permissionsOn;
+    const held = open ? [] : heldRoles(pid);
+    const admin = !open && (!!state.defaultPerms.admin || held.some((r) => r.perms.admin === true));
+    const g = { open, admin };
+    for (const k of PERM_KEYS) {
+      if (k === 'admin') continue;
+      if (open) g[k] = k !== 'manageRoles';
+      else if (admin) g[k] = true;
+      else {
+        const r = held.find((x) => typeof x.perms[k] === 'boolean');
+        g[k] = r ? r.perms[k] : !!state.defaultPerms[k];
+      }
+    }
+    if (open) g.grantable = [];
+    else if (admin) g.grantable = state.roles.map((r) => r.id);
+    else if (!g.manageRoles) g.grantable = [];
+    else g.grantable = [...new Set([...(state.defaultPerms.manageRoles ? state.defaultGrantable : []), ...held.flatMap((r) => r.grantable)])];
+    g.channels = {};
+    for (const ch of state.channels) {
+      let c = { view: true, send: true, manage: true };
+      if (!open && !admin) {
+        const pick = (k, base) => {
+          const ov = ch.overrides;
+          if (!ov) return base;
+          for (const r of held) if (Object.hasOwn(ov, r.id) && typeof ov[r.id][k] === 'boolean') return ov[r.id][k];
+          if (Object.hasOwn(ov, 'everyone') && typeof ov.everyone[k] === 'boolean') return ov.everyone[k];
+          return base;
+        };
+        const view = pick('view', g.view);
+        c = { view, send: view && pick('send', g.send), manage: view && pick('manage', g.manageChannels) };
+      }
+      if (c.view) g.channels[ch.id] = c;
+    }
+    return g;
+  }
+  const canView = (pid, cid) => !!permsOf(pid).channels[cid]?.view;
+  // The actor of an action is { profileId } (the app) or { dashboard: true } (the admin dashboard, which may do anything valid)
+  const isDash = (actor) => actor?.dashboard === true;
+  const noPerm = (what) => ({ error: `You don’t have permission to ${what}` });
+  // null when the actor holds `key`, else the { error } to answer with
+  const need = (actor, key, what) => (isDash(actor) || (typeof actor?.profileId === 'string' && permsOf(actor.profileId)[key]) ? null : noPerm(what));
+  // Nobody but an admin acts on an admin
+  const touchable = (actor, targetPid) => isDash(actor) || !isAdminPid(targetPid) || isAdminPid(actor.profileId);
+  const ADMIN_TARGET = { error: 'Only an administrator can do that to an administrator' };
+
   function cleanProfile(p = {}) {
     const pid = str(p.id, 64) || id();
     return {
@@ -231,8 +333,10 @@ async function startServer(opts = {}) {
   function mentionsOf(text, replied, senderId) {
     // Code is blanked to the same length, so positions still point into the stored text
     const plain = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => ' '.repeat(m.length));
-    const names = [{ name: 'everyone', kind: 'everyone', id: '' }];
-    for (const r of state.roles) names.push({ name: r.name, kind: 'role', id: r.id });
+    // Without the permission a mention of roles or @everyone is plain text: no spans either
+    const may = permsOf(senderId);
+    const names = may.mentionEveryone ? [{ name: 'everyone', kind: 'everyone', id: '' }] : [];
+    if (may.mentionRoles) for (const r of state.roles) names.push({ name: r.name, kind: 'role', id: r.id });
     // People also answer to name#tag, which tells apart people with the same name
     for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ name: p.name, kind: 'user', id: pid }, { name: `${p.name}#${mentionTag(pid)}`, kind: 'user', id: pid });
     names.sort((a, b) => b.name.length - a.name.length);
@@ -348,6 +452,7 @@ async function startServer(opts = {}) {
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
     const ch = channel(String(req.query.channelId || ''));
     if (!ch || ch.type !== 'text') return res.status(400).json({ error: 'No such channel' });
+    if (!permsOf(u.profile.id).channels[ch.id]?.send) return res.status(403).json({ error: noPerm('send messages here').error });
     const size = Number(req.get('content-length'));
     if (!Number.isInteger(size) || size <= 0) return res.status(400).json({ error: 'Empty file' });
     const free = MAX_STORAGE - usedBytes() - reserved;
@@ -479,33 +584,46 @@ async function startServer(opts = {}) {
   // (`since` and `ip` are for the admin dashboard only; userList() never sends them)
   const users = new Map();
 
-  function userList() {
-    return [...users.entries()].map(([sid, { profile: { banner, ...profile }, ...u }]) => ({
-      sid,
-      ...profile, // minus the banner: this is re-sent on every mute toggle; clients get banners from `profiles`
-      voice: u.voice,
-      muted: u.muted,
-      deafened: u.deafened,
-      sharing: u.sharing,
-      camera: u.camera,
-      playing: u.playing,
-    }));
+  // Everyone online. `g`: the perms of whoever this is for; a voice channel they can't see is left out.
+  // A force-muted person is muted whatever they send, unless they may lift it themselves.
+  function userList(g) {
+    return [...users.entries()].map(([sid, { profile: { banner, ...profile }, ...u }]) => {
+      const forceMuted = state.forceMuted.includes(profile.id);
+      return {
+        sid,
+        ...profile, // minus the banner: this is re-sent on every mute toggle; clients get banners from `profiles`
+        voice: !g || !u.voice || g.channels[u.voice]?.view ? u.voice : null,
+        muted: u.muted || (forceMuted && !permsOf(profile.id).forceMute),
+        forceMuted,
+        deafened: u.deafened,
+        sharing: u.sharing,
+        camera: u.camera,
+        playing: u.playing,
+      };
+    });
   }
 
   // A hand-edited state.json may hold anything
   const audioQuality = () => (AUDIO_QUALITIES.includes(state.audioQuality) ? state.audioQuality : 'max');
 
-  function publicState() {
+  // The channels `g` can see; they carry their permission overrides
+  const channelsFor = (g) => state.channels.filter((c) => g.channels[c.id]);
+
+  function publicState(g) {
     return {
       name: state.name,
       icon: state.icon,
       audioQuality: audioQuality(),
-      channels: state.channels,
+      channels: channelsFor(g),
       emojis: state.emojis,
       profiles: state.profiles,
       bans: publicBans(),
       roles: state.roles,
       memberRoles: state.memberRoles,
+      defaultPerms: state.defaultPerms,
+      defaultGrantable: state.defaultGrantable,
+      permissionsOn: state.permissionsOn,
+      forceMuted: state.forceMuted,
       storage: usage(),
       game: gameInfo(),
       update: updater.info(),
@@ -530,23 +648,61 @@ async function startServer(opts = {}) {
       destroyUpgrade: false, // the game worlds share this http server on other paths
     });
 
-    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles });
-    const saveRoles = () => {
-      save();
-      io.emit('roles', rolesPayload());
-    };
+    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: state.permissionsOn });
     // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
     const cleanRoleName = (v) => {
       const n = typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
       return n.length <= MAX_ROLE_NAME ? n : '';
     };
+    // A role's explicit settings from a request: key -> true|false, null (or missing) = inherit
+    function cleanPerms(raw) {
+      if (!isObj(raw)) return { error: 'Permissions must be an object' };
+      const perms = {};
+      for (const k of PERM_KEYS) {
+        if (!Object.hasOwn(raw, k) || raw[k] === null) continue;
+        if (typeof raw[k] !== 'boolean') return { error: `Permission ${k} must be true, false or null` };
+        if (k !== 'admin' || raw[k]) perms[k] = raw[k];
+      }
+      return { perms };
+    }
+    function cleanGrantable(raw) {
+      if (!Array.isArray(raw)) return { error: 'Grantable roles must be a list' };
+      return { grantable: cleanIdList(raw, new Set(state.roles.map((r) => r.id))) };
+    }
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
+    // `users` goes out per socket: voice channels a socket can't see are left out
     const broadcastUsers = () => {
-      io.emit('users', userList());
+      for (const [sid, u] of users) io.to(sid).emit('users', userList(permsOf(u.profile.id)));
       adminRef.current?.notify('users');
     };
+
+    // Send an event for a channel only to the sockets that can see it
+    const toViewers = (cid, event, payload, exceptSid) => {
+      for (const [sid, u] of users) if (sid !== exceptSid && canView(u.profile.id, cid)) io.to(sid).emit(event, payload);
+    };
+
+    // Something changed who can do or see what (roles, role holders, default or channel permissions,
+    // or the channels themselves): tell everyone, take people out of voice channels they lost, and
+    // turn permissions on the first time someone is an administrator.
+    function permsChanged({ roles = true } = {}) {
+      if (!state.permissionsOn && (state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole))) state.permissionsOn = true;
+      save();
+      if (roles) io.emit('roles', rolesPayload());
+      for (const [sid, u] of users) {
+        const s = io.sockets.sockets.get(sid);
+        if (!s) continue;
+        const g = permsOf(u.profile.id);
+        s.emit('perms', g);
+        s.emit('channels', channelsFor(g));
+        if (u.voice && !g.channels[u.voice]?.send) {
+          leaveVoice(s);
+          s.emit('voice:kicked', { reason: 'perms' });
+        }
+      }
+      broadcastUsers();
+    }
 
     // Disconnect every chat and DM-signaling socket that matches, telling it why
     // ('banned' or 'removed'). Clients don't auto-reconnect after this.
@@ -693,8 +849,8 @@ async function startServer(opts = {}) {
         m.files = m.files.filter((x) => x.id !== f.id);
         if (!m.text && !m.gif && !m.files.length) {
           list.splice(i, 1);
-          io.emit('msg:deleted', { channelId: f.channelId, messageId: m.id });
-        } else io.emit('msg:update', { channelId: f.channelId, message: m });
+          toViewers(f.channelId, 'msg:deleted', { channelId: f.channelId, messageId: m.id });
+        } else toViewers(f.channelId, 'msg:update', { channelId: f.channelId, message: m });
       }
       save();
       io.emit('files:deleted', { ids: gone.map((f) => f.id), storage: usage() });
@@ -711,14 +867,18 @@ async function startServer(opts = {}) {
     }
 
     // What people can do to the server, shared by the chat sockets below and the
-    // admin dashboard (admin.js). Each returns { ok: true, … } or { error }.
+    // admin dashboard (admin.js). `actor` is { profileId } for the app and
+    // { dashboard: true } for the dashboard, which may do anything that is valid.
+    // Each returns { ok: true, … } or { error }.
     const actions = {
-      // by: who gets the credit; selfProfileId: the caller's own profile, if it has one;
-      // selfIp: the caller's address (never banned along with someone else)
-      ban({ profileId, ip, by, selfIp, selfProfileId }) {
+      // by: who gets the credit; selfIp: the caller's address (never banned along with someone else)
+      ban(actor, { profileId, ip, by, selfIp }) {
+        const denied = need(actor, 'ban', 'ban members');
+        if (denied) return denied;
         profileId = str(profileId, 64);
         if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
-        if (selfProfileId && profileId === selfProfileId) return { error: 'You can’t ban yourself' };
+        if (actor.profileId && profileId === actor.profileId) return { error: 'You can’t ban yourself' };
+        if (!touchable(actor, profileId)) return ADMIN_TARGET;
         if (state.bans.some((b) => b.profileId === profileId)) return { error: 'Already banned' };
         // Skip the IP if it's shared with the person banning (same network,
         // reverse proxy, or the host's own machine): it would ban them too.
@@ -733,28 +893,38 @@ async function startServer(opts = {}) {
         return { ok: true, ipSkipped };
       },
 
-      unban(banId) {
+      unban(actor, banId) {
+        const denied = need(actor, 'ban', 'unban members');
+        if (denied) return denied;
         state.bans = state.bans.filter((b) => b.id !== banId);
         save();
         io.emit('bans', publicBans());
         return { ok: true };
       },
 
-      removeMember({ profileId, selfProfileId }) {
+      removeMember(actor, { profileId }) {
+        const denied = need(actor, 'kick', 'remove members');
+        if (denied) return denied;
         profileId = str(profileId, 64);
         if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
-        if (selfProfileId && profileId === selfProfileId) return { error: 'You can’t remove yourself' };
+        if (actor.profileId && profileId === actor.profileId) return { error: 'You can’t remove yourself' };
+        if (!touchable(actor, profileId)) return ADMIN_TARGET;
         kick((s) => s.data.profileId === profileId, 'removed');
         delete state.profiles[profileId];
         const hadRoles = Object.hasOwn(state.memberRoles, profileId);
         if (hadRoles) delete state.memberRoles[profileId];
         save();
         io.emit('profile:removed', { id: profileId });
-        if (hadRoles) io.emit('roles', rolesPayload());
+        if (hadRoles) permsChanged();
         return { ok: true };
       },
 
-      updateServer({ name, icon, game, audioQuality: quality }) {
+      // Name, icon, voice quality and the game: admin only (open mode: anyone, as before)
+      updateServer(actor, { name, icon, game, audioQuality: quality }) {
+        if (!isDash(actor)) {
+          const g = permsOf(actor.profileId);
+          if (!g.open && !g.admin) return noPerm('change the server settings');
+        }
         if (name !== undefined) {
           name = str(name, 40).trim();
           if (!name) return { error: 'Server name required' };
@@ -791,28 +961,60 @@ async function startServer(opts = {}) {
           delete state.profiles[profileId].card;
           io.emit('profile', { id: profileId, ...state.profiles[profileId] });
         }
+        // Whoever claims the id next must not inherit roles with permissions
+        if (Object.hasOwn(state.memberRoles, profileId)) {
+          const aesthetic = state.memberRoles[profileId].filter((x) => isAesthetic(state.roles.find((r) => r.id === x)));
+          if (aesthetic.length !== state.memberRoles[profileId].length) {
+            if (aesthetic.length) state.memberRoles[profileId] = aesthetic;
+            else delete state.memberRoles[profileId];
+            permsChanged();
+          }
+        }
         save();
         return { ok: true };
       },
 
-      // --- roles: labels only, they grant nothing (D3, D34) ---
+      // --- roles and permissions ---
 
-      createRole({ name, color }) {
+      // The app can only touch roles once someone is an administrator (until then they are set up in
+      // the dashboard); after that it takes manageRoles. null when allowed.
+      roleGate(actor) {
+        if (isDash(actor)) return null;
+        if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
+        return need(actor, 'manageRoles', 'manage roles');
+      },
+
+      createRole(actor, { name, color, perms, grantable } = {}) {
+        const denied = actions.roleGate(actor);
+        if (denied) return denied;
         name = cleanRoleName(name);
         if (!name) return { error: `Role name must be 1 to ${MAX_ROLE_NAME} characters` };
         if (!isColor(color)) return { error: 'Color must look like #8b6cf6' };
         if (roleNamed(name)) return { error: 'A role with that name already exists' };
         if (state.roles.length >= MAX_ROLES) return { error: `At most ${MAX_ROLES} roles` };
-        const role = { id: id(), name, color: color.toLowerCase() };
+        const p = perms === undefined ? { perms: {} } : cleanPerms(perms);
+        if (p.error) return p;
+        const gr = grantable === undefined ? { grantable: [] } : cleanGrantable(grantable);
+        if (gr.error) return gr;
+        if ((Object.keys(p.perms).length || gr.grantable.length) && !isDash(actor) && !permsOf(actor.profileId).admin) return noPerm('give roles permissions');
+        const role = { id: id(), name, color: color.toLowerCase(), perms: p.perms, grantable: gr.grantable };
         state.roles.push(role);
-        saveRoles();
+        permsChanged();
         return { ok: true, role };
       },
 
-      // position: zero-based index to move the role to
-      updateRole(roleId, { name, color, position } = {}) {
+      // position: zero-based index to move the role to. perms: key -> true|false|null (null = inherit),
+      // replaces the role's whole set. grantable: role ids it may hand out. Position, perms and
+      // grantable are for administrators; others only rename and recolor aesthetic roles.
+      updateRole(actor, roleId, { name, color, position, perms, grantable } = {}) {
+        const denied = actions.roleGate(actor);
+        if (denied) return denied;
         const role = typeof roleId === 'string' && state.roles.find((r) => r.id === roleId);
         if (!role) return { error: 'Unknown role' };
+        if (!isDash(actor) && !permsOf(actor.profileId).admin) {
+          if (position !== undefined || perms !== undefined || grantable !== undefined) return noPerm('change role permissions or order');
+          if (!isAesthetic(role)) return noPerm('edit that role');
+        }
         if (name !== undefined) {
           name = cleanRoleName(name);
           if (!name) return { error: `Role name must be 1 to ${MAX_ROLE_NAME} characters` };
@@ -820,43 +1022,118 @@ async function startServer(opts = {}) {
         }
         if (color !== undefined && !isColor(color)) return { error: 'Color must look like #8b6cf6' };
         if (position !== undefined && !Number.isInteger(position)) return { error: 'Position must be a whole number' };
+        let newPerms, newGrantable;
+        if (perms !== undefined) {
+          const p = cleanPerms(perms);
+          if (p.error) return p;
+          newPerms = p.perms;
+        }
+        if (grantable !== undefined) {
+          const gr = cleanGrantable(grantable);
+          if (gr.error) return gr;
+          newGrantable = gr.grantable;
+        }
+        if (newPerms || newGrantable) {
+          const after = { perms: newPerms || role.perms, grantable: newGrantable || role.grantable };
+          if (!isAesthetic(after)) {
+            const pid = Object.keys(state.memberRoles).find((x) => holdsRole(x, roleId) && !pinOf(x));
+            if (pid) return { error: `${state.profiles[pid]?.name || pid} uses an old app without a profile key and holds this role, so it can only be a role without permissions` };
+          }
+        }
         if (name !== undefined) role.name = name;
         if (color !== undefined) role.color = color.toLowerCase();
+        if (newPerms) role.perms = newPerms;
+        if (newGrantable) role.grantable = newGrantable;
         if (position !== undefined) {
           state.roles.splice(state.roles.indexOf(role), 1);
           state.roles.splice(Math.max(0, Math.min(position, state.roles.length)), 0, role);
         }
-        saveRoles();
+        permsChanged();
         return { ok: true, role };
       },
 
-      deleteRole(roleId) {
+      deleteRole(actor, roleId) {
+        const denied = actions.roleGate(actor);
+        if (denied) return denied;
         const role = typeof roleId === 'string' && state.roles.find((r) => r.id === roleId);
         if (!role) return { error: 'Unknown role' };
+        if (!isDash(actor) && !permsOf(actor.profileId).admin && !isAesthetic(role)) return noPerm('delete that role');
         state.roles = state.roles.filter((r) => r !== role);
         for (const pid of Object.keys(state.memberRoles)) {
           const kept = state.memberRoles[pid].filter((x) => x !== roleId);
           if (kept.length) state.memberRoles[pid] = kept;
           else delete state.memberRoles[pid];
         }
-        saveRoles();
+        for (const r of state.roles) r.grantable = r.grantable.filter((x) => x !== roleId);
+        state.defaultGrantable = state.defaultGrantable.filter((x) => x !== roleId);
+        for (const ch of state.channels) {
+          if (ch.overrides && Object.hasOwn(ch.overrides, roleId)) {
+            delete ch.overrides[roleId];
+            if (!Object.keys(ch.overrides).length) delete ch.overrides;
+          }
+        }
+        permsChanged();
         return { ok: true };
       },
 
-      // The profile's full new list: unknown ids and duplicates dropped, at most 10
-      setMemberRoles(profileId, roleIds) {
+      // The profile's full new list: unknown ids and duplicates dropped, at most 10. Other than for
+      // administrators, every role added or removed must be an aesthetic one the actor may grant.
+      setMemberRoles(actor, profileId, roleIds) {
+        const denied = actions.roleGate(actor);
+        if (denied) return denied;
         profileId = str(profileId, 64);
         if (!profileId || !Object.hasOwn(state.profiles, profileId)) return { error: 'Unknown user' };
         if (!Array.isArray(roleIds)) return { error: 'Roles must be a list' };
+        if (!touchable(actor, profileId)) return ADMIN_TARGET;
         const known = new Set(state.roles.map((r) => r.id));
         const list = [...new Set(roleIds.filter((x) => typeof x === 'string' && known.has(x)))].slice(0, MAX_ROLES_PER_MEMBER);
         const before = Object.hasOwn(state.memberRoles, profileId) ? state.memberRoles[profileId] : [];
-        if (list.join() !== before.join()) {
+        const changed = [...list.filter((x) => !before.includes(x)), ...before.filter((x) => !list.includes(x))];
+        const byId = (rid) => state.roles.find((r) => r.id === rid);
+        if (!isDash(actor)) {
+          const g = permsOf(actor.profileId);
+          if (!g.admin) {
+            const bad = changed.map(byId).find((r) => r && (!g.grantable.includes(r.id) || !isAesthetic(r)));
+            if (bad) return noPerm(`change the role ${bad.name}`);
+          }
+        }
+        if (!pinOf(profileId)) {
+          const bad = list.map(byId).find((r) => !before.includes(r.id) && !isAesthetic(r));
+          if (bad) return { error: `${state.profiles[profileId].name} uses an old app without a profile key, so they can only get roles without permissions` };
+        }
+        if (changed.length) {
           if (list.length) state.memberRoles[profileId] = list;
           else delete state.memberRoles[profileId];
-          saveRoles();
+          permsChanged();
         }
         return { ok: true, roles: list };
+      },
+
+      // What everybody gets (admin only): perms is a partial key -> bool, grantable replaces the list
+      setDefaultPerms(actor, { perms, grantable } = {}) {
+        if (!isDash(actor)) {
+          if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
+          if (!permsOf(actor.profileId).admin) return noPerm('change the default permissions');
+        }
+        const next = { ...state.defaultPerms };
+        if (perms !== undefined) {
+          if (!isObj(perms)) return { error: 'Permissions must be an object' };
+          for (const k of PERM_KEYS) {
+            if (!Object.hasOwn(perms, k)) continue;
+            if (typeof perms[k] !== 'boolean') return { error: `Permission ${k} must be true or false` };
+            next[k] = perms[k];
+          }
+        }
+        let list = state.defaultGrantable;
+        if (grantable !== undefined) {
+          const gr = cleanGrantable(grantable);
+          if (gr.error) return gr;
+          list = gr.grantable;
+        }
+        state.defaultPerms = next;
+        state.defaultGrantable = list;
+        permsChanged();
+        return { ok: true, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable };
       },
     };
 
@@ -906,7 +1183,8 @@ async function startServer(opts = {}) {
         users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
         state.profiles[p.id] = storedProfile(p);
         save();
-        ack({ ok: true, sid: socket.id, server: publicState(), users: userList() });
+        const g = permsOf(p.id);
+        ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g });
         socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
         broadcastUsers();
       });
@@ -925,10 +1203,12 @@ async function startServer(opts = {}) {
       // --- text ---
 
       const myId = () => users.get(socket.id).profile.id;
+      // What this socket's profile may do in a channel: { view, send, manage }
+      const inChannel = (cid) => permsOf(myId()).channels[cid] || { view: false, send: false, manage: false };
 
       on('msg:history', ({ channelId, before }, ack) => {
         const list = thread(channelId);
-        if (!list) return ack({ messages: [] });
+        if (!list || !inChannel(channelId).view) return ack({ messages: [] });
         const end = before ? list.findIndex((m) => m.id === before) : list.length;
         ack({ messages: list.slice(Math.max(0, end - 50), end < 0 ? list.length : end) });
       });
@@ -936,6 +1216,7 @@ async function startServer(opts = {}) {
       on('msg:send', ({ channelId, text, gif, replyTo, files }, ack) => {
         const list = thread(channelId);
         if (!list) return ack({ error: 'no such channel' });
+        if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
         text = str(text, MAX_MESSAGE_LEN).trim();
         const g =
           gif && typeof gif.url === 'string' && /^https:\/\//.test(gif.url)
@@ -965,17 +1246,15 @@ async function startServer(opts = {}) {
         if (list.length > MAX_HISTORY) list.splice(0, list.length - MAX_HISTORY);
         for (const f of attached) f.messageId = msg.id;
         save();
-        io.emit('msg:new', { channelId, message: msg });
+        toViewers(channelId, 'msg:new', { channelId, message: msg });
         // People with this server bookmarked but not open hear about mentions over /dm (D41)
         if (mentions) {
-          const rooms = new Set();
-          if (mentions.everyone) rooms.add('members');
-          else {
-            for (const pid of mentions.users || []) rooms.add('p:' + pid);
-            for (const [pid, held] of Object.entries(state.memberRoles)) if (held.some((r) => mentions.roles?.includes(r))) rooms.add('p:' + pid);
-          }
-          if (rooms.size) {
-            dm.to([...rooms]).except('p:' + msg.author).emit('mention', {
+          // Only people who can read the channel hear about it
+          const targets = new Set(mentions.everyone ? Object.keys(state.profiles) : mentions.users);
+          if (!mentions.everyone) for (const [pid, held] of Object.entries(state.memberRoles)) if (held.some((r) => mentions.roles?.includes(r))) targets.add(pid);
+          const rooms = [...targets].filter((pid) => canView(pid, channelId)).map((pid) => 'p:' + pid);
+          if (rooms.length) {
+            dm.to(rooms).except('p:' + msg.author).emit('mention', {
               channelId,
               channelName: channel(channelId).name,
               serverName: state.name,
@@ -983,38 +1262,44 @@ async function startServer(opts = {}) {
             });
           }
         }
-        if (attached.length) io.emit('files:new', { files: attached.map(publicFile), storage: usage() });
+        if (attached.length) toViewers(channelId, 'files:new', { files: attached.map(publicFile), storage: usage() });
         ack({ ok: true });
       });
 
-      on('msg:edit', ({ channelId, messageId, text }) => {
+      on('msg:edit', ({ channelId, messageId, text }, ack) => {
         const m = thread(channelId)?.find((x) => x.id === messageId);
         const u = users.get(socket.id);
         text = str(text, MAX_MESSAGE_LEN).trim();
         if (!m || m.author !== u.profile.id || !text) return;
+        if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
         m.text = text;
         m.edited = Date.now();
         const mentions = mentionsOf(text, m.replyTo && thread(channelId).find((x) => x.id === m.replyTo), m.author);
         if (mentions) m.mentions = mentions;
         else delete m.mentions;
         save();
-        io.emit('msg:update', { channelId, message: m });
+        toViewers(channelId, 'msg:update', { channelId, message: m });
       });
 
-      on('msg:delete', ({ channelId, messageId }) => {
+      // Your own messages, or anyone's with manageMessages (and sight of the channel)
+      on('msg:delete', ({ channelId, messageId }, ack) => {
         const list = thread(channelId) || [];
         const i = list.findIndex((x) => x.id === messageId);
-        if (i < 0 || list[i].author !== myId()) return;
+        if (i < 0) return ack({ error: 'no such message' });
+        const g = permsOf(myId());
+        if (list[i].author !== myId() && !(g.manageMessages && g.channels[channelId]?.view)) return ack(noPerm('delete other people’s messages'));
         const [m] = list.splice(i, 1);
         save();
-        io.emit('msg:deleted', { channelId, messageId });
+        toViewers(channelId, 'msg:deleted', { channelId, messageId });
         if (m.files?.length) deleteFiles(m.files.map((f) => f.id));
+        ack({ ok: true });
       });
 
-      on('msg:react', ({ channelId, messageId, emoji }) => {
+      on('msg:react', ({ channelId, messageId, emoji }, ack) => {
         const m = thread(channelId)?.find((x) => x.id === messageId);
         emoji = str(emoji, 64);
         if (!m || !emoji) return;
+        if (!inChannel(channelId).send) return ack(noPerm('react here'));
         const pid = users.get(socket.id).profile.id;
         const who = (m.reactions[emoji] ||= []);
         const i = who.indexOf(pid);
@@ -1022,62 +1307,88 @@ async function startServer(opts = {}) {
         else who.push(pid);
         if (!who.length) delete m.reactions[emoji];
         save();
-        io.emit('msg:update', { channelId, message: m });
+        toViewers(channelId, 'msg:update', { channelId, message: m });
       });
 
       on('typing', ({ channelId }) => {
-        if (!thread(channelId)) return;
-        socket.broadcast.emit('typing', { channelId, sid: socket.id, name: users.get(socket.id).profile.name });
+        if (!thread(channelId) || !inChannel(channelId).send) return;
+        toViewers(channelId, 'typing', { channelId, sid: socket.id, name: users.get(socket.id).profile.name }, socket.id);
       });
 
-      // --- bans (anyone can ban or unban, like channels: D3, D27) ---
+      // --- bans, removing members, server settings: by permission (open mode: anyone, D3, D27, D43) ---
 
       on('ban:add', ({ profileId, ip }, ack) => {
-        ack(actions.ban({ profileId, ip, by: users.get(socket.id).profile.name, selfIp: clientIp(socket), selfProfileId: myId() }));
+        ack(actions.ban({ profileId: myId() }, { profileId, ip, by: users.get(socket.id).profile.name, selfIp: clientIp(socket) }));
       });
 
       // Remove someone from the server: disconnect them and drop them from the
       // member list. Unlike a ban they can come back (and reappear).
       on('member:remove', ({ profileId }, ack) => {
-        ack(actions.removeMember({ profileId, selfProfileId: myId() }));
+        ack(actions.removeMember({ profileId: myId() }, { profileId }));
       });
 
       on('ban:remove', ({ id: banId }, ack) => {
-        ack(actions.unban(banId));
+        ack(actions.unban({ profileId: myId() }, banId));
       });
-
-      // --- server name / icon (anyone can change them, D3) ---
 
       on('server:update', ({ name, icon, game, audioQuality }, ack) => {
-        ack(actions.updateServer({ name, icon, game, audioQuality }));
+        ack(actions.updateServer({ profileId: myId() }, { name, icon, game, audioQuality }));
       });
+
+      // --- roles and permissions ---
+
+      on('role:create', ({ name, color, perms, grantable }, ack) => ack(actions.createRole({ profileId: myId() }, { name, color, perms, grantable })));
+      on('role:update', ({ id: rid, ...patch }, ack) => {
+        const { name, color, position, perms, grantable } = patch;
+        ack(actions.updateRole({ profileId: myId() }, rid, { name, color, position, perms, grantable }));
+      });
+      on('role:delete', ({ id: rid }, ack) => ack(actions.deleteRole({ profileId: myId() }, rid)));
+      on('member:roles', ({ profileId, roles }, ack) => ack(actions.setMemberRoles({ profileId: myId() }, profileId, roles)));
+      on('perms:default', ({ perms, grantable }, ack) => ack(actions.setDefaultPerms({ profileId: myId() }, { perms, grantable })));
 
       // --- channels ---
 
       on('channel:create', ({ name, type }, ack) => {
+        if (!permsOf(myId()).manageChannels) return ack(noPerm('create channels'));
         type = type === 'voice' ? 'voice' : 'text';
         name = str(name, MAX_CHANNEL_NAME).trim();
         if (type === 'text') name = name.toLowerCase().replace(/\s+/g, '-');
         if (!name) return ack({ error: 'name required' });
         const ch = { id: id(), name, type };
         state.channels.push(ch);
-        save();
-        io.emit('channels', state.channels);
+        permsChanged({ roles: false });
         ack({ ok: true, channel: ch });
       });
 
-      on('channel:rename', ({ id: cid, name }) => {
+      on('channel:rename', ({ id: cid, name }, ack) => {
         const ch = channel(cid);
         name = str(name, MAX_CHANNEL_NAME).trim();
-        if (!ch || !name) return;
+        if (!ch || !name) return ack({ error: 'no such channel' });
+        if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
         ch.name = ch.type === 'text' ? name.toLowerCase().replace(/\s+/g, '-') : name;
         save();
-        io.emit('channels', state.channels);
+        for (const [sid, u] of users) if (canView(u.profile.id, cid)) io.to(sid).emit('channels', channelsFor(permsOf(u.profile.id)));
+        ack({ ok: true });
       });
 
-      on('channel:delete', ({ id: cid }) => {
+      // The full new overrides object of a channel: { [roleId | 'everyone']: { view?, send?, manage? } }
+      on('channel:perms', ({ id: cid, overrides }, ack) => {
         const ch = channel(cid);
-        if (!ch || state.channels.filter((c) => c.type === ch.type).length <= 1) return;
+        if (!ch) return ack({ error: 'no such channel' });
+        if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
+        if (!isObj(overrides)) return ack({ error: 'Overrides must be an object' });
+        const ov = cleanOverrides(overrides, new Set(state.roles.map((r) => r.id)));
+        if (Object.keys(ov).length) ch.overrides = ov;
+        else delete ch.overrides;
+        permsChanged({ roles: false });
+        ack({ ok: true });
+      });
+
+      on('channel:delete', ({ id: cid }, ack) => {
+        const ch = channel(cid);
+        if (!ch) return ack({ error: 'no such channel' });
+        if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
+        if (state.channels.filter((c) => c.type === ch.type).length <= 1) return ack({ error: `There must be at least one ${ch.type} channel` });
         state.channels = state.channels.filter((c) => c.id !== cid);
         delete state.messages[cid];
         deleteFiles(state.files.filter((f) => f.channelId === cid).map((f) => f.id));
@@ -1085,12 +1396,11 @@ async function startServer(opts = {}) {
           if (u.voice === cid) {
             const s = io.sockets.sockets.get(sid);
             if (s) leaveVoice(s);
-            io.to(sid).emit('voice:kicked');
+            io.to(sid).emit('voice:kicked', { reason: 'deleted' });
           }
         }
-        save();
-        io.emit('channels', state.channels);
-        broadcastUsers();
+        permsChanged({ roles: false });
+        ack({ ok: true });
       });
 
       // --- files ---
@@ -1098,19 +1408,24 @@ async function startServer(opts = {}) {
       // Attached files of one channel, or of the whole server; newest first
       on('file:list', ({ channelId }, ack) => {
         const cid = str(channelId, 32);
-        const files = state.files.filter((f) => f.messageId && (!cid || f.channelId === cid));
+        const may = permsOf(myId()).channels;
+        const files = state.files.filter((f) => f.messageId && may[f.channelId]?.view && (!cid || f.channelId === cid));
         ack({ files: files.map(publicFile).sort((a, b) => b.ts - a.ts), storage: usage() });
       });
 
-      // Anyone can delete any file (trust model: friends, D3)
+      // Your own files, or anyone's with manageFiles (and sight of the channel)
       on('file:delete', ({ ids }, ack) => {
-        deleteFiles((Array.isArray(ids) ? ids : []).map((x) => str(x, 64)));
+        const g = permsOf(myId());
+        const files = (Array.isArray(ids) ? ids : []).map((x) => fileById(str(x, 64))).filter(Boolean);
+        if (files.some((f) => f.by !== myId() && !(g.manageFiles && g.channels[f.channelId]?.view))) return ack(noPerm('delete other people’s files'));
+        deleteFiles(files.map((f) => f.id));
         ack({ ok: true });
       });
 
       // --- custom emojis ---
 
       on('emoji:add', ({ name, url }, ack) => {
+        if (!permsOf(myId()).manageEmojis) return ack(noPerm('add emojis'));
         name = str(name, 32).toLowerCase().replace(/[^a-z0-9_]/g, '');
         if (!name) return ack({ error: 'Name must be letters, numbers or _' });
         if (!isDataImage(url, MAX_EMOJI_BYTES)) return ack({ error: 'Image must be png/jpg/gif/webp under 256KB' });
@@ -1121,10 +1436,12 @@ async function startServer(opts = {}) {
         ack({ ok: true });
       });
 
-      on('emoji:remove', ({ name }) => {
+      on('emoji:remove', ({ name }, ack) => {
+        if (!permsOf(myId()).manageEmojis) return ack(noPerm('remove emojis'));
         state.emojis = state.emojis.filter((e) => e.name !== name);
         save();
         io.emit('emojis', state.emojis);
+        ack({ ok: true });
       });
 
       // --- GIFs (server-side key, used when the client has none) ---
@@ -1149,6 +1466,7 @@ async function startServer(opts = {}) {
       on('voice:join', ({ channelId }, ack) => {
         const ch = channel(channelId);
         if (!ch || ch.type !== 'voice') return ack({ error: 'no such channel' });
+        if (!inChannel(channelId).send) return ack(noPerm('join that voice channel'));
         leaveVoice(socket);
         const u = users.get(socket.id);
         const peers = [...users.entries()].filter(([, x]) => x.voice === channelId).map(([sid]) => sid);
@@ -1161,6 +1479,43 @@ async function startServer(opts = {}) {
       on('voice:leave', () => {
         leaveVoice(socket);
         broadcastUsers();
+      });
+
+      // Take someone out of the voice channel they're in (they can rejoin)
+      on('voice:kick', ({ profileId }, ack) => {
+        const denied = need({ profileId: myId() }, 'voiceKick', 'remove people from voice');
+        if (denied) return ack(denied);
+        profileId = str(profileId, 64);
+        if (profileId === myId()) return ack({ error: 'You can’t remove yourself from voice' });
+        if (!touchable({ profileId: myId() }, profileId)) return ack(ADMIN_TARGET);
+        const me = permsOf(myId());
+        const [sid] = [...users].find(([, x]) => x.profile.id === profileId && x.voice && me.channels[x.voice]?.view) || [];
+        const target = sid && io.sockets.sockets.get(sid);
+        if (!target) return ack({ error: 'They aren’t in a voice channel' });
+        leaveVoice(target);
+        target.emit('voice:kicked', { reason: 'kicked', by: users.get(socket.id).profile.name });
+        broadcastUsers();
+        ack({ ok: true });
+      });
+
+      // Force-mute someone (or lift it). Lifting only clears the flag: their own mute stays. A
+      // force-muted person who may force-mute can lift it on themselves, nothing else on themselves.
+      on('voice:forcemute', ({ profileId, muted }, ack) => {
+        const denied = need({ profileId: myId() }, 'forceMute', 'force-mute people');
+        if (denied) return ack(denied);
+        profileId = str(profileId, 64);
+        muted = !!muted;
+        if (!profileId || !Object.hasOwn(state.profiles, profileId)) return ack({ error: 'Unknown user' });
+        if (profileId === myId() && muted) return ack({ error: 'You can’t force-mute yourself' });
+        if (!touchable({ profileId: myId() }, profileId)) return ack(ADMIN_TARGET);
+        if (state.forceMuted.includes(profileId) !== muted) {
+          state.forceMuted = muted ? [...state.forceMuted, profileId] : state.forceMuted.filter((x) => x !== profileId);
+          save();
+          const by = users.get(socket.id).profile.name;
+          for (const [sid, x] of users) if (x.profile.id === profileId) io.to(sid).emit('voice:forcemuted', { muted, by });
+          broadcastUsers();
+        }
+        ack({ ok: true });
       });
 
       on('voice:state', ({ muted, deafened }) => {

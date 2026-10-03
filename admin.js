@@ -436,6 +436,7 @@ function createAdmin(ctx) {
 
   const BY = 'Admin dashboard';
   const actions = ctx.actions;
+  const DASH = { dashboard: true }; // the actor of everything below: it may do anything that is valid
   const rolesOf = (st, pid) => (Object.hasOwn(st.memberRoles, pid) ? st.memberRoles[pid] : []);
   const roleNames = (st, ids) => (ids.length ? ids.map((x) => st.roles.find((r) => r.id === x)?.name || '?').join(', ') : 'none');
   // A short fingerprint of the key a profile id is pinned to (D42), or null
@@ -490,7 +491,7 @@ function createAdmin(ctx) {
   api.post('/users/:profileId/remove', (req, res) => {
     const pid = urlId(req.params.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
-    answer(res, actions.removeMember({ profileId: pid }), () => logAction(req, 'user.remove', name));
+    answer(res, actions.removeMember(DASH, { profileId: pid }), () => logAction(req, 'user.remove', name));
   });
 
   api.post('/users/:profileId/reset-key', (req, res) => {
@@ -503,23 +504,49 @@ function createAdmin(ctx) {
     const pid = urlId(req.body?.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
     const ip = req.body?.ip === true;
-    answer(res, actions.ban({ profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
+    answer(res, actions.ban(DASH, { profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
   });
 
   api.delete('/bans/:id', (req, res) => {
     const ban = ctx.state().bans.find((b) => b.id === req.params.id);
-    answer(res, actions.unban(req.params.id), () => ban && logAction(req, 'ban.remove', ban.name));
+    answer(res, actions.unban(DASH, req.params.id), () => ban && logAction(req, 'ban.remove', ban.name));
   });
 
   api.get('/roles', (req, res) => {
     const st = ctx.state();
     const profiles = Object.create(null);
     for (const [pid, p] of Object.entries(st.profiles)) profiles[pid] = { name: p.name, color: p.color, avatar: p.avatar };
-    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles });
+    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn });
+  });
+
+  // Permissions: what everybody gets, and whether they apply yet (open mode until someone is an administrator)
+  const permsView = () => {
+    const st = ctx.state();
+    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn, roles: st.roles };
+  };
+  api.get('/permissions', (_req, res) => res.json(permsView()));
+
+  api.put('/permissions', (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const patch = {};
+    if (b.perms !== undefined) patch.perms = b.perms;
+    if (b.grantable !== undefined) patch.grantable = b.grantable;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+    const was = { ...ctx.state().defaultPerms };
+    answer(res, actions.setDefaultPerms(DASH, patch), () => {
+      const now = ctx.state().defaultPerms;
+      const what = Object.keys(now).filter((k) => now[k] !== was[k]).map((k) => `${k} ${now[k] ? 'on' : 'off'}`);
+      if (patch.grantable !== undefined) what.push('grantable roles');
+      logAction(req, 'perms.default', what.join(', ') || 'no change');
+    });
   });
 
   api.post('/roles', (req, res) => {
-    answer(res, actions.createRole({ name: req.body?.name, color: req.body?.color }), (r) => logAction(req, 'role.create', r.role.name));
+    const b = req.body || {};
+    const role = { name: b.name, color: b.color };
+    if (b.perms !== undefined) role.perms = b.perms;
+    if (b.grantable !== undefined) role.grantable = b.grantable;
+    answer(res, actions.createRole(DASH, role), (r) => logAction(req, 'role.create', r.role.name + (Object.keys(r.role.perms).length ? ' (with permissions)' : '')));
   });
 
   api.patch('/roles/:id', (req, res) => {
@@ -527,9 +554,9 @@ function createAdmin(ctx) {
     const old = ctx.state().roles.find((r) => r.id === id);
     const b = req.body || {};
     const patch = {};
-    for (const k of ['name', 'color', 'position']) if (b[k] !== undefined) patch[k] = b[k];
-    answer(res, actions.updateRole(id, patch), (r) => {
-      const what = Object.keys(patch).map((k) => (k === 'name' ? `renamed to ${r.role.name}` : k === 'color' ? 'color' : `moved to ${patch.position + 1}`));
+    for (const k of ['name', 'color', 'position', 'perms', 'grantable']) if (b[k] !== undefined) patch[k] = b[k];
+    answer(res, actions.updateRole(DASH, id, patch), (r) => {
+      const what = [...new Set(Object.keys(patch).map((k) => (k === 'name' ? `renamed to ${r.role.name}` : k === 'color' ? 'color' : k === 'position' ? `moved to ${patch.position + 1}` : 'permissions')))];
       logAction(req, 'role.update', `${old.name}${what.length ? ': ' + what.join(', ') : ''}`);
     });
   });
@@ -537,12 +564,12 @@ function createAdmin(ctx) {
   api.delete('/roles/:id', (req, res) => {
     const id = urlId(req.params.id);
     const old = ctx.state().roles.find((r) => r.id === id);
-    answer(res, actions.deleteRole(id), () => logAction(req, 'role.delete', old.name));
+    answer(res, actions.deleteRole(DASH, id), () => logAction(req, 'role.delete', old.name));
   });
 
   api.put('/users/:profileId/roles', (req, res) => {
     const pid = urlId(req.params.profileId);
-    answer(res, actions.setMemberRoles(pid, req.body?.roles), (r) => {
+    answer(res, actions.setMemberRoles(DASH, pid, req.body?.roles), (r) => {
       const st = ctx.state();
       logAction(req, 'role.assign', `${st.profiles[pid].name}: ${roleNames(st, r.roles)}`);
     });
@@ -654,7 +681,7 @@ function createAdmin(ctx) {
     if (patch.name !== undefined && typeof patch.name !== 'string') return res.status(400).json({ error: 'Server name required' });
     if (patch.icon !== undefined && typeof patch.icon !== 'string') return res.status(400).json({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
     if (patch.game !== undefined && typeof patch.game !== 'boolean') return res.status(400).json({ error: 'game must be true or false' });
-    answer(res, actions.updateServer(patch), () => {
+    answer(res, actions.updateServer(DASH, patch), () => {
       const what = [];
       if (patch.name !== undefined) what.push(`name "${ctx.state().name}"`);
       if (patch.icon !== undefined) what.push(patch.icon ? 'icon' : 'icon removed');

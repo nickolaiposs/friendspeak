@@ -992,13 +992,14 @@ export class VoiceClient {
     for (const sid of this.peers.keys()) this.applyVolume(sid);
   }
 
-  // Per-user volume and mute are keyed by profile id so they survive reconnects.
+  // Per-user volume and mute are keyed by profile id so they survive reconnects. Someone force-muted by a moderator is silent here
+  // too (forceMutedFor(sid) is set by the app), so a modified client can't be heard by honest peers.
   applyVolume(sid) {
     const peer = this.peers.get(sid);
     if (!peer?.setGain) return;
     const pid = this.profileIdFor?.(sid);
     const st = settings.get();
-    const v = this.deafened || st.userMutes[pid] ? 0 : (st.userVolumes[pid] ?? 1);
+    const v = this.deafened || st.userMutes[pid] || this.forceMutedFor?.(sid) ? 0 : (st.userVolumes[pid] ?? 1);
     peer.setGain(Math.min(MAX_USER_VOLUME, Math.max(0, +v || 0)));
   }
 
