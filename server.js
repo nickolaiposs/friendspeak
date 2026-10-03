@@ -355,6 +355,7 @@ async function startServer(opts = {}) {
     mail = new Map(Object.entries(JSON.parse(fs.readFileSync(MAIL_FILE, 'utf8'))));
   } catch {}
   let mailTimer = null;
+  let closing = false; // close() was called: sockets are going away with the server
   function writeMail() {
     clearTimeout(mailTimer);
     mailTimer = null;
@@ -577,6 +578,9 @@ async function startServer(opts = {}) {
         if (kept.length !== box.items.length) (box.items = kept), saveMail();
       });
       socket.on('disconnect', () => {
+        // Shutting down disconnects everyone: that's not them leaving, and
+        // their direct connections don't need this server (D39)
+        if (closing) return;
         if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
       });
     });
@@ -1150,6 +1154,7 @@ async function startServer(opts = {}) {
         updater.stop();
         admin?.close();
         writeState();
+        closing = true;
         io.close();
         server.close(() => resolve());
       }),
