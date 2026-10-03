@@ -195,6 +195,13 @@ td.nowrap { white-space: nowrap; }
 .member { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-3); border-radius: 999px; padding: 1px 4px 1px 10px; }
 .member button { padding: 0 6px; color: var(--muted); border-radius: 50%; }
 .member button:hover { color: var(--red-text); }
+.perms { margin: 10px 0 4px; }
+.perms summary { cursor: pointer; font-weight: 600; }
+.perms[open] summary { margin-bottom: 8px; }
+.permgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 18px; margin: 8px 0; }
+.permrow { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.permrow.admin { justify-content: flex-start; margin-bottom: 4px; }
+.rolecard > .perms ~ .members { margin-top: 10px; }
 .inline-sel { width: auto; padding: 3px 8px; max-width: 200px; }
 input[type='color'] { width: 48px; height: 36px; padding: 2px; }
 .rolenew { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }

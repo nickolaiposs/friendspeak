@@ -18,7 +18,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** port-forwarding one TCP port is enough. The game crashing the process takes chat down too (acceptable at this scale).
 **Alternatives:** Yukon's default of separate ports under pm2 behind a reverse proxy.
 
-## D3: No accounts, client-owned identity · Active (spoofable ids superseded by D42)
+## D3: No accounts, client-owned identity · Active (spoofable ids superseded by D42; "anyone can manage" superseded by D43)
 **Context:** the core requirement is "saved profiles with no signup anywhere".
 **Decision:**
 - A profile (uuid, name, color, avatar, status) is created and stored in the client, and it can be exported/imported.
@@ -236,7 +236,7 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** everyone, including the host, needs the desktop app. D7's browser routes (localhost UI, self-signed HTTPS in a browser) no longer apply; the app is always a secure context. The game client is still served by the server, because its assets live there and it runs in an iframe from the server's origin (D15).
 **Alternatives:** keeping the web client as an option (two supported surfaces, and the mic caveats of D7).
 
-## D27: The offline list, removals and bans follow the "friends" trust model · Active (DMs superseded by D28)
+## D27: The offline list, removals and bans follow the "friends" trust model · Active (DMs superseded by D28; who may remove and ban by D43)
 **Context:** friends asked for Discord-style direct messages, to see people who aren't online, and to keep someone out of the server. There are no accounts and profile ids are spoofable (D3), and every profile id is visible to everyone in `users` and `profiles`.
 **Decision:**
 - ~~**DMs** were threads in `state.dms`, relayed and stored by the server.~~ Replaced by peer-to-peer DMs (D28); old `state.dms` data is dropped on load.
@@ -339,7 +339,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -519,3 +519,20 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 - No new keys: friend codes, mailboxes and DM sealing (D32) keep using the same key pairs, so nothing already stored changes.
 
 **Alternatives:** the profile id becoming the key hash (rejected in D32 for the same reasons: it renames every profile and breaks history, bans and roles); a server-issued nonce event before `hello` (an extra round trip and a new event old servers don't send, where the socket id already is a fresh server-chosen value); keys on the server (accounts, against D3); refusing every unsigned `hello` (locks out old apps on profiles nobody can take from them anyway); trusting `X-Forwarded-Host` (a relaying server would set it to its own name); letting a removal drop the pin (anyone in the app could then take over a member's profile).
+
+## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active
+**Context:** issue #2. Anyone who knew the address (and password) could do everything: channels, emojis, the server's name and icon, files, removals and bans (D3, D27). Roles were labels set in the dashboard (D34). Since D42 a profile id with a pinned key can't be copied, so permissions can finally hang on a profile.
+**Decision:**
+- **Permissions:** `admin` (everything, ignores every other setting), `view`, `send` (message in text channels, join voice channels), `mentionRoles`, `mentionEveryone`, `kick` (remove from the server), `voiceKick`, `ban` (and unban), `forceMute`, `manageRoles`, `manageChannels`, `manageEmojis`, `manageFiles` (other people's files; your own you can always delete), `manageMessages` (delete other people's messages; your own you can always delete). The server's name, icon, voice quality and game switch, and the default permissions, are admin only.
+- **Default role:** `state.defaultPerms`, every key as a boolean. It starts with `view`, `send` and both mention keys. Admins (and the dashboard) can change any of it, the admin toggle included, which makes everyone an admin.
+- **Roles** keep their order (first = highest) and gain `perms`, holding only explicit settings (`true` or `false`; missing inherits), and `grantable`, the roles a holder of `manageRoles` may give out. For each key the highest held role that sets it wins, else the default. An admin role beats everything.
+- **Channel overrides:** each channel may carry `overrides[roleId | 'everyone']` with `view`, `send` (join, for voice) and `manage` (rename, delete and edit its overrides; inherits from `manageChannels`). A held role's channel setting beats the everyone channel setting, which beats the server-wide result. Like Discord, a role that may see everything still doesn't see a channel whose everyone override hides it, unless that channel allows the role. Without `view` the server doesn't send the channel, its messages, typing or files, and mention pushes skip that person.
+- **Moderators:** without admin, `manageRoles` only creates, edits, deletes and grants **aesthetic** roles (no permissions, nothing grantable), and only grants those in its grantable list. Only admins touch roles that carry any permission, reorder roles or edit the defaults. Nobody but an admin can kick, ban, voice-kick, force-mute or change the roles of an admin.
+- **Force mute** is a server flag beside the person's own mute (`state.forceMuted`, persisted). While it is set the server reports them muted and their app keeps the mic closed, and other apps silence their audio, so a modified app isn't heard by unmodified ones. Lifting it only clears the flag and never unmutes someone who muted themselves. A force-muted person who has `forceMute` can lift their own.
+- **Open until the first admin:** an updated or new server is open (`permissionsOn` false): everyone can do what they could before, and roles and permissions can only be set up in the dashboard, so nobody in the app can claim admin first. The first time someone holds a role with `admin` (or the default gets it), `permissionsOn` turns on for good.
+- **Keys:** a role with any permission can only be held by a profile with a pinned key (D42). Old apps' ids are copyable, so they only get aesthetic roles, and permissions of a role an unpinned profile still holds don't count. **Reset key** in the dashboard also takes away the profile's roles that carry permissions, since whoever claims the id next may not be its owner.
+- **Where:** the app's **Server settings** (Overview, Roles, Members, Emojis, Bans) replaces Settings → Server; channel overrides are under a channel's right-click **Permissions…**; roles and moderation actions are on a person's right-click menu everywhere they appear. The dashboard can do all of it regardless of permissions.
+- **Version skew (D29):** every new field and event is optional. An app on an older server allows everything as before. An older app on a new server gets refusals in acks (events without an ack are silently ignored) and filtered channel lists.
+
+**Consequences:** enforcement lives on the server, except voice: audio is peer to peer (D5), so a force-muted person with a modified app can still send audio. Unmodified receivers drop it. Hosts who never open the dashboard keep today's open server. Losing the only admin's profile file leaves the server without one until the dashboard grants it again (or resets the key, D42). A server run with `ADMIN=off` has no dashboard, so it stays open.
+**Alternatives:** Discord's "allow wins" across roles (couldn't express a role that takes something away, as the issue asks); enforcing the defaults on update (locks hosts out of channel management until they find the dashboard); making the first person to connect admin (a race); separate "manage server" permission (the issue keeps server settings with admins).
