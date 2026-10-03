@@ -271,6 +271,23 @@ function allowScreenShare() {
   });
 }
 
+// In the app window, zoom is the UI size setting (theme.js): the page steps it
+// (+1, -1, or 0 to reset) and applies it. Other windows (the game's pop-out) zoom
+// like a browser.
+function zoomItem(label, accelerator, step, extra = {}) {
+  return {
+    label,
+    accelerator,
+    ...extra,
+    click: (_item, focused) => {
+      if (!focused) return;
+      if (focused === win) return win.webContents.send('desktop:zoom', step);
+      const wc = focused.webContents;
+      wc.setZoomLevel(step ? wc.getZoomLevel() + step * 0.5 : 0);
+    },
+  };
+}
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   Menu.setApplicationMenu(
@@ -279,7 +296,17 @@ function buildMenu() {
       { role: 'editMenu' },
       {
         label: 'View',
-        submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }],
+        submenu: [
+          { role: 'reload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          zoomItem('Actual Size', 'CommandOrControl+0', 0),
+          zoomItem('Zoom In', 'CommandOrControl+Plus', 1),
+          zoomItem('Zoom In', 'CommandOrControl+=', 1, { visible: false, acceleratorWorksWhenHidden: true }), // + without Shift
+          zoomItem('Zoom Out', 'CommandOrControl+-', -1),
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
       },
       { role: 'windowMenu' },
     ])
