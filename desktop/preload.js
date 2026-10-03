@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   setZoom: (factor) => Number.isFinite(factor) && webFrame.setZoomFactor(Math.min(2, Math.max(0.5, factor))),
   onZoom: (cb) => ipcRenderer.on('desktop:zoom', (_e, step) => cb(step)),
 
+  // Notifications: bring the window forward, and show an unread count on the app icon
+  focus: () => ipcRenderer.invoke('desktop:focus'),
+  setBadge: (n) => ipcRenderer.invoke('desktop:badge', n),
+
   // Save a chat file (a normal link would open in the system browser)
   download: (url) => ipcRenderer.invoke('desktop:download', url),
 

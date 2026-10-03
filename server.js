@@ -179,6 +179,40 @@ async function startServer(opts = {}) {
     return (state.messages[cid] ||= []);
   }
 
+  // ---------- mentions ----------
+
+  // Who a message mentions: { users: [profileId], roles: [roleId], everyone: true }, empty parts left out
+  // (null when nobody). Same rules as findMentions() in public/js/util.js, which is an ES module
+  // the server can't import, so keep the two in step: '@' at the start or after whitespace, then a
+  // name (case-insensitive, may have spaces), then the end or a char outside [\w-]; longest name
+  // wins; code spans are ignored. Replying to someone mentions them.
+  function mentionsOf(text, replied, senderId) {
+    const plain = text.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`\n]+`/g, ' ');
+    const lower = plain.toLowerCase();
+    const names = [{ key: 'everyone', kind: 'everyone' }];
+    for (const r of state.roles) names.push({ key: r.name.toLowerCase(), kind: 'role', id: r.id });
+    for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ key: p.name.toLowerCase(), kind: 'user', id: pid });
+    names.sort((a, b) => b.key.length - a.key.length);
+    const users = new Set();
+    const roles = new Set();
+    let everyone = false;
+    for (let i = lower.indexOf('@'); i >= 0; i = lower.indexOf('@', i + 1)) {
+      if (i > 0 && !/\s/.test(plain[i - 1])) continue;
+      const hit = names.find((n) => lower.startsWith(n.key, i + 1) && !/[\w-]/.test(plain[i + 1 + n.key.length] || ''));
+      if (!hit) continue;
+      if (hit.kind === 'everyone') everyone = true;
+      else (hit.kind === 'role' ? roles : users).add(hit.id);
+    }
+    if (replied && replied.author !== senderId) users.add(replied.author);
+    users.delete(senderId);
+    if (!users.size && !roles.size && !everyone) return null;
+    const out = {};
+    if (users.size) out.users = [...users];
+    if (roles.size) out.roles = [...roles];
+    if (everyone) out.everyone = true;
+    return out;
+  }
+
   // ---------- bans ----------
 
   // Bans match the profile id and, optionally, the IP it last connected from.
@@ -827,6 +861,8 @@ async function startServer(opts = {}) {
           .map((fid) => fileById(str(fid, 64)))
           .filter((f, i, a) => f && !f.messageId && f.channelId === channelId && f.by === u.profile.id && a.indexOf(f) === i);
         if (!text && !g && !attached.length) return ack({ error: 'empty' });
+        const replied = (replyTo = str(replyTo, 32)) ? list.find((m) => m.id === replyTo) : null;
+        const mentions = mentionsOf(text, replied, u.profile.id);
         const msg = {
           id: id(),
           author: u.profile.id,
@@ -834,7 +870,8 @@ async function startServer(opts = {}) {
           text,
           gif: g,
           files: attached.length ? attached.map((f) => ({ id: f.id, name: f.name, size: f.size, type: f.type })) : undefined,
-          replyTo: str(replyTo, 32) || null,
+          replyTo: replyTo || null,
+          mentions: mentions || undefined,
           reactions: {}, // emoji -> [profileId]
           ts: Date.now(),
         };
@@ -843,6 +880,23 @@ async function startServer(opts = {}) {
         for (const f of attached) f.messageId = msg.id;
         save();
         io.emit('msg:new', { channelId, message: msg });
+        // People with this server bookmarked but not open hear about mentions over /dm (D41)
+        if (mentions) {
+          const rooms = new Set();
+          if (mentions.everyone) rooms.add('members');
+          else {
+            for (const pid of mentions.users || []) rooms.add('p:' + pid);
+            for (const [pid, held] of Object.entries(state.memberRoles)) if (held.some((r) => mentions.roles?.includes(r))) rooms.add('p:' + pid);
+          }
+          if (rooms.size) {
+            dm.to([...rooms]).except('p:' + msg.author).emit('mention', {
+              channelId,
+              channelName: channel(channelId).name,
+              serverName: state.name,
+              message: { id: msg.id, author: msg.author, name: msg.name, text: text.slice(0, 300), ts: msg.ts, replyTo: msg.replyTo, mentions },
+            });
+          }
+        }
         if (attached.length) io.emit('files:new', { files: attached.map(publicFile), storage: usage() });
         ack({ ok: true });
       });
@@ -854,6 +908,9 @@ async function startServer(opts = {}) {
         if (!m || m.author !== u.profile.id || !text) return;
         m.text = text;
         m.edited = Date.now();
+        const mentions = mentionsOf(text, m.replyTo && thread(channelId).find((x) => x.id === m.replyTo), m.author);
+        if (mentions) m.mentions = mentions;
+        else delete m.mentions;
         save();
         io.emit('msg:update', { channelId, message: m });
       });

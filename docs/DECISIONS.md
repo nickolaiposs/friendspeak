@@ -484,3 +484,16 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Consequences:** the zoom covers the whole window, including the game iframe and video. At large sizes the window is narrower in CSS pixels, so the member list hides below 900px (the existing breakpoint) and at 200% the narrowest window is 470 CSS px wide. The client has no UI size outside the desktop app (it ships only there, D26).
 **Alternatives:** CSS `zoom` on `<html>` (works in a browser too, but Chromium's CSS zoom still has edge cases with coordinates, canvases and iframes, and it would fight the menu's native zoom); a `--ui-scale` variable on every fixed size in the stylesheet (hundreds of rules to convert, and every new rule must remember it); keeping Electron's zoom roles and reading the level back (it's per origin, not persisted, and the roles have no event when they change it).
+
+## D41: Notifications: mentions and DMs notify, server messages don't; pushed over /dm for servers not in view · Active
+**Context:** issues #14 and #53. A chat with a few busy channels would be unusable if every message pinged, but missing a direct question is worse. The app only holds a chat socket to the server in view, so it can't hear about anything else.
+**Decision:**
+- Only DMs, incoming DM calls and mentions notify (OS notification plus a ping sound). Regular server messages keep only the unread dot. Mentions and DMs also show an unread badge even when muted.
+- A mention is `@name`, `@role` or `@everyone` (names may contain spaces, longest wins, code spans ignored), or a reply to your message. The server computes it on send and stores `message.mentions`, so old messages and every client agree. Clients of an older server fall back to the same rules locally (`findMentions`).
+- For servers that aren't in view, the server pushes a `mention` event over the `/dm` namespace, where the app already keeps a socket per bookmarked server (D28, D32). It goes to the mentioned profiles, the holders of mentioned roles, or the non-guest `members` room for `@everyone`, never to the author.
+- The client decides whether to notify: master and per-type switches, muted people (anywhere) and muted servers (settings only, no server state).
+
+**Consequences:** the matching rules exist twice (`util.js` and `server.js`, which is CommonJS); a comment on each says so. Muting is local and the sender can't tell. Mention pushes carry the first 300 characters of text to anyone whose profile id is mentioned, which is no more than they could read in the server. Old servers send no `mention` push, so background servers don't notify until they update.
+Pushes aren't stored: a mention made while the app is closed only shows up as a highlighted message later. `@name` only resolves to profiles the server has seen (`state.profiles`), so someone who never visited a server can't be mentioned there.
+
+**Alternatives:** notifying on every message with per-channel opt-out (noisy by default); a push service (needs accounts and an outside party, against D3); sending the mention over the chat socket (only open for one server at a time); matching on the client only (can't reach servers not in view).
