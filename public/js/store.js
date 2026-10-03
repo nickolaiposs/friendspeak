@@ -95,7 +95,8 @@ const DEFAULT_SETTINGS = {
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
-  noiseSuppression: true, // the browser's (WebRTC's) own; the only mic processing there is (D38)
+  noiseSuppression: true, // the browser's (WebRTC's) own (D38)
+  autoGain: true, // the browser's automatic gain: levels a quiet or loud mic (D44)
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)

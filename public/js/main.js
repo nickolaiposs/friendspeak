@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME, CUES } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
@@ -562,7 +562,7 @@ function dmCallButtons(c, compact) {
   const v = c.voice;
   const off = S.muted || S.deafened || forcedMute();
   const all = [
-    compact ? null : h('button', { class: 'icon-btn' + (off ? ' off' : ''), title: forcedMute() ? 'Muted by a moderator' : off ? 'Unmute' : 'Mute', onclick: toggleMute }, icon(off ? 'micOff' : 'mic')),
+    compact ? null : h('button', { class: 'icon-btn' + (off ? ' off' : ''), title: (forcedMute() ? 'Muted by a moderator' : off ? 'Unmute' : 'Mute') + MIC_HINT, onclick: toggleMute, oncontextmenu: micMenu }, icon(off ? 'micOff' : 'mic')),
     h(
       'button',
       {
@@ -2206,7 +2206,11 @@ function renderUserPanel() {
       h('div', { class: 'voice-user self', 'data-sid': S.call?.sid || S.sid || '' }, avatarEl(p, 32)),
       h('div', { class: 'up-names' }, h('div', { class: 'up-name' }, p.name), h('div', { class: 'up-status' }, p.status || (S.connected ? 'Online' : 'Offline')))
     ),
-    h('button', { class: 'icon-btn' + (S.muted || S.deafened || forcedMute() ? ' off' : '') + (forcedMute() ? ' forced' : ''), title: forcedMute() ? 'Muted by a moderator' : 'Mute', onclick: toggleMute }, icon(S.muted || S.deafened || forcedMute() ? 'micOff' : 'mic')),
+    h(
+      'button',
+      { class: 'icon-btn' + (S.muted || S.deafened || forcedMute() ? ' off' : '') + (forcedMute() ? ' forced' : ''), title: (forcedMute() ? 'Muted by a moderator' : 'Mute') + MIC_HINT, onclick: toggleMute, oncontextmenu: micMenu },
+      icon(S.muted || S.deafened || forcedMute() ? 'micOff' : 'mic')
+    ),
     h('button', { class: 'icon-btn' + (S.deafened ? ' off' : ''), title: 'Deafen', onclick: toggleDeafen }, icon(S.deafened ? 'headOff' : 'head')),
     h('button', { class: 'icon-btn', title: 'Soundboard', onclick: (e) => openSoundboard(e.currentTarget) }, icon('board')),
     h('button', { class: 'icon-btn', title: 'Settings', onclick: () => openSettings() }, icon('gear'))
@@ -4137,6 +4141,40 @@ function cameraDialog() {
   preview.show();
 }
 
+// Switch microphones; in a call (or a mic test) the new one is live at once.
+// A listen-only call (no mic when it started) gets its mic this way too.
+async function switchMic(deviceId) {
+  try {
+    await audio.setInputDevice(deviceId, !!(liveVoice() || audio.micStream));
+    if (liveVoice()?.micError) (liveVoice().micError = null), renderVoicePanel();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// Right-click on a mute button: pick the microphone
+const MIC_HINT = ' (right-click for microphones)';
+const micMenu = (e) => (e.preventDefault(), micPopover(e.currentTarget));
+async function micPopover(anchor) {
+  const devs = (await navigator.mediaDevices?.enumerateDevices().catch(() => [])) || [];
+  const mics = devs.filter((d) => d.kind === 'audioinput');
+  const cur = settings.get().inputDevice;
+  const pick = (id) => (closePopover(), switchMic(id));
+  popover(
+    anchor,
+    h(
+      'div',
+      { class: 'menu' },
+      h('div', { class: 'menu-label' }, 'Microphone'),
+      [{ deviceId: '', label: 'Default' }, ...mics].map((d, i) =>
+        h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Microphone ${i}`))
+      ),
+      h('div', { class: 'menu-sep' }),
+      h('button', { class: 'menu-item', onclick: () => (closePopover(), openSettings('voice')) }, 'Voice settings…')
+    )
+  );
+}
+
 async function cameraPopover(anchor) {
   const devs = (await navigator.mediaDevices?.enumerateDevices().catch(() => [])) || [];
   const cams = devs.filter((d) => d.kind === 'videoinput');
@@ -5036,7 +5074,7 @@ function settingsAppearance(body) {
 
 function settingsVoice(body) {
   const st = settings.get();
-  const inSel = h('select', { onchange: (e) => (settings.set({ inputDevice: e.target.value }), restartMic()) }, h('option', { value: '' }, 'Default'));
+  const inSel = h('select', { onchange: async (e) => ((busy = true), await switchMic(e.target.value), (busy = false)) }, h('option', { value: '' }, 'Default'));
   const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
   const camSel = h(
     'select',
@@ -5125,7 +5163,8 @@ function settingsVoice(body) {
     if (testing && !busy && !audio.micStream) setTest(false); // the call it ran in ended, and took the mic with it
     // A device or OS can refuse a constraint without an error
     const info = audio.micInfo;
-    const note = info?.want.noiseSuppression && info.got.noiseSuppression === false ? 'This microphone or system didn’t apply noise suppression.' : '';
+    const refused = [info?.want.noiseSuppression && info.got.noiseSuppression === false && 'noise suppression', info?.want.autoGainControl && info.got.autoGainControl === false && 'automatic gain'].filter(Boolean);
+    const note = refused.length ? `This microphone or system didn’t apply ${refused.join(' or ')}.` : '';
     if (micNote.textContent !== note) micNote.textContent = note;
     micNote.hidden = !note;
   }, 60);
@@ -5198,12 +5237,14 @@ function settingsVoice(body) {
     h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
-    slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
+    slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
     h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
     h('h3', {}, 'Microphone'),
-    slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
+    slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
+    check('autoGain', 'Automatic gain', restartMic),
+    h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
     check('noiseSuppression', 'Noise suppression', restartMic),
-    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. Nothing else is done to your voice. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
+    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
     micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
