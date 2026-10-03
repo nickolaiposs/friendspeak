@@ -1,6 +1,6 @@
 # Checks for `dev` and pull requests. There's no test suite (AGENTS.md →
-# Verifying changes), so this catches syntax errors and a broken game build,
-# and makes sure a PR into `prod` is releasable.
+# Verifying changes), so this catches syntax errors, a broken game build and a
+# media sidecar that doesn't compile, and makes sure a PR into `prod` is releasable.
 name: CI
 
 on:
@@ -30,6 +30,30 @@ jobs:
           for i in $(seq 30); do curl -sf localhost:3999/api/info && exit 0; sleep 1; done
           exit 1
       - run: npm run build:game
+
+  # The native media sidecar (native/, Rust): it must build on every OS it ships for
+  media:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: 1 # Windows: the crypto library's assembly, without installing NASM
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/target
+          key: media-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+      - working-directory: native
+        run: cargo build --release --locked
+      - name: It runs
+        working-directory: native
+        run: cargo run --release --locked -- --version
 
   # A merge into prod releases package.json's version, so it must be new and have notes
   releasable:

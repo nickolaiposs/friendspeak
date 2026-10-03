@@ -32,6 +32,17 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   screenSources: () => ipcRenderer.invoke('desktop:screen-sources'),
   pickScreenSource: (pick) => ipcRenderer.invoke('desktop:screen-pick', pick),
 
+  // Native media sidecar (D45): capture, encode and send streams outside the browser engine.
+  // caps() starts it and resolves to { sources, hardware, audio } (null when there is none);
+  // send() takes its commands; on() delivers its events ({ ev, kind, … }, and { ev: 'exit' } if it dies).
+  media: {
+    caps: () => ipcRenderer.invoke('desktop:media-caps'),
+    send: (cmd) => ipcRenderer.send('desktop:media-send', cmd),
+    on: (cb) => ipcRenderer.on('desktop:media', (_e, ev) => cb(ev)),
+  },
+  // Hardware acceleration (D46): { hardwareAcceleration, atStart, gpu }; pass a patch to change it
+  prefs: (patch) => ipcRenderer.invoke('desktop:prefs', patch),
+
   // App updates from GitHub Releases: { current, status, version, url, canInstall, progress, error }
   updateState: () => ipcRenderer.invoke('desktop:update-state'),
   onUpdate: (cb) => ipcRenderer.on('desktop:update', (_e, state) => cb(state)),
