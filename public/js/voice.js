@@ -39,6 +39,28 @@ export const MODES = {
   smooth: { hint: 'motion', degrade: 'maintain-framerate', bpp: 0.04, maxFps: Infinity },
   sharp: { hint: 'detail', degrade: 'maintain-resolution', bpp: 0.02, maxFps: 30 },
 };
+// Voice is sent as the best Opus there is (D38): fullband stereo at the
+// codec's highest bitrate, with in-band FEC, and without DTX so quiet moments
+// aren't cut out. A receiver's SDP tells the sender what to encode, so these
+// are written into both descriptions (see tuneOpus): ours makes a friend send
+// us this, theirs makes us send it to them, whichever app version they run.
+const OPUS = { stereo: 1, 'sprop-stereo': 1, maxaveragebitrate: 510000, maxplaybackrate: 48000, useinbandfec: 1, usedtx: 0, cbr: 0 };
+// A server's voice quality (Settings → Server): the bitrate each of us sends
+// our voice at in its channels. It is a cap on the sender, so changing it
+// needs no renegotiation. DM calls always use "max".
+export const AUDIO_QUALITY = { low: 32_000, standard: 64_000, high: 128_000, max: OPUS.maxaveragebitrate };
+
+// Write OPUS into the fmtp line of every Opus payload type in an SDP
+export function tuneOpus(sdp) {
+  for (const pt of new Set([...sdp.matchAll(/^a=rtpmap:(\d+) opus\/48000\/2/gim)].map((m) => m[1]))) {
+    const had = (old) => Object.fromEntries(old.split(';').filter(Boolean).map((kv) => kv.trim().split('=')));
+    const write = (old = '') => `a=fmtp:${pt} ` + Object.entries({ ...had(old), ...OPUS }).map(([k, v]) => `${k}=${v}`).join(';');
+    const fmtp = new RegExp(`^a=fmtp:${pt} (.*)$`, 'gm');
+    sdp = fmtp.test(sdp) ? sdp.replace(fmtp, (_, old) => write(old)) : sdp.replace(new RegExp(`^a=rtpmap:${pt} opus.*$`, 'gim'), (line) => `${line}\r\n${write()}`);
+  }
+  return sdp;
+}
+
 // What a kind may be captured and sent at. Cameras keep the MEDIA ceiling.
 const ceilingOf = (kind, tier) => (kind === 'camera' ? MEDIA.camera : TIERS[tier] || TIERS.auto);
 
@@ -281,6 +303,7 @@ export class VoiceClient {
     this.peers = new Map();
     this.statPrev = new Map(); // videoStats() previous samples: "out|in|<sid>|<kind>" -> counters
     this.deafened = false;
+    this.audioQuality = 'max'; // a key of AUDIO_QUALITY (setAudioQuality)
     this.local = { screen: null, camera: null }; // our own captures (MediaStream)
     this.quality = { screen: { tier: 'auto', mode: 'smooth' }, camera: { tier: 'camera', mode: 'smooth' } };
     this.latest = { screen: [], camera: [] }; // latest per-viewer samples from the sampler
@@ -347,13 +370,14 @@ export class VoiceClient {
       note: { screen: null, camera: null }, // shown in the stats panel
     };
     this.peers.set(sid, peer);
-    for (const track of audio.outStream.getAudioTracks()) pc.addTrack(track, audio.outStream);
+    for (const track of audio.outStream.getAudioTracks()) peer.voiceSender = pc.addTrack(track, audio.outStream);
+    this.capVoice(peer);
     pc.onicecandidate = (e) => e.candidate && this.send(sid, { candidate: e.candidate });
     // Fires for the first offer and again whenever media tracks are added or removed.
     pc.onnegotiationneeded = () =>
       this.enqueue(sid, async () => {
         if (pc.signalingState !== 'stable') return; // re-fires once we're back to stable
-        await pc.setLocalDescription();
+        await this.setLocal(pc);
         this.send(sid, { sdp: pc.localDescription });
       });
     pc.onconnectionstatechange = () => {
@@ -385,6 +409,33 @@ export class VoiceClient {
       this.applyVolume(sid);
     };
     return peer;
+  }
+
+  // setLocalDescription() with our Opus settings in it. Should a browser
+  // refuse the edited SDP, the plain one still connects the call.
+  async setLocal(pc) {
+    try {
+      const desc = await (pc.signalingState === 'have-remote-offer' ? pc.createAnswer() : pc.createOffer());
+      await pc.setLocalDescription({ type: desc.type, sdp: tuneOpus(desc.sdp) });
+    } catch (e) {
+      console.warn('rtc: plain SDP', e);
+      await pc.setLocalDescription();
+    }
+  }
+
+  // The server's voice quality: cap what we send every peer, now and from here on
+  setAudioQuality(key) {
+    this.audioQuality = AUDIO_QUALITY[key] ? key : 'max';
+    for (const peer of this.peers.values()) this.capVoice(peer);
+  }
+
+  capVoice(peer) {
+    const params = peer.voiceSender?.getParameters();
+    const enc = params?.encodings?.[0];
+    const maxBitrate = AUDIO_QUALITY[this.audioQuality];
+    if (!enc || enc.maxBitrate === maxBitrate) return;
+    enc.maxBitrate = maxBitrate;
+    peer.voiceSender.setParameters(params).catch((e) => console.warn('rtc: voice bitrate', e));
   }
 
   // Serialize signaling per peer so ICE candidates never race the SDP.
@@ -436,11 +487,12 @@ export class VoiceClient {
         const collision = data.sdp.type === 'offer' && pc.signalingState !== 'stable';
         peer.ignoreOffer = collision && !peer.polite;
         if (peer.ignoreOffer) return;
-        await pc.setRemoteDescription(data.sdp); // rolls back our own offer if we're polite
+        await pc.setRemoteDescription({ type: data.sdp.type, sdp: tuneOpus(String(data.sdp.sdp)) }); // rolls back our own offer if we're polite
         if (data.sdp.type === 'offer') {
-          await pc.setLocalDescription();
+          await this.setLocal(pc);
           this.send(from, { sdp: pc.localDescription });
         }
+        this.capVoice(peer); // a sender has no encodings to cap before its first negotiation in some browsers
       } else if (data.candidate) {
         try {
           await pc.addIceCandidate(data.candidate);

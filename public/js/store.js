@@ -95,12 +95,7 @@ const DEFAULT_SETTINGS = {
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
-  echoCancellation: true,
-  autoGainControl: true,
-  noiseReduction: 'high', // 'off' | 'standard' (the browser's) | 'high' (RNNoise, D35)
-  noiseGate: 'off', // 'off' | 'auto' (follows the room's noise) | 'manual' (noiseGateThreshold)
-  noiseGateThreshold: -50, // dB
-  speakerMode: false, // turn the mic down while friends are heard, for people on speakers
+  noiseSuppression: true, // the browser's (WebRTC's) own; the only mic processing there is (D38)
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)
@@ -112,7 +107,13 @@ const DEFAULT_SETTINGS = {
   hideOffline: false, // collapse the member list's Offline section
   railDmsHidden: false, // collapsed groups in the left rail
   railServersHidden: false,
-  cues: true,
+  cues: true, // master switch for the app's sounds
+  sounds: {}, // cue kind -> false when that sound is off (missing = on), see CUES in audio.js
+  notify: true, // master switch for notifications (DMs, mentions, calls)
+  notifyMentions: true,
+  notifyDms: true,
+  notifyMutedUsers: {}, // profileId -> name: no notifications from them, anywhere. Not userMutes (voice).
+  notifyMutedServers: {}, // serverId -> true: no notifications from this server
   dismissedBanners: {}, // update/maintenance banner key -> when it was closed
   // appearance (theme.js)
   theme: 'dark', // 'dark' | 'light' | 'contrast' | 'custom'
@@ -121,14 +122,17 @@ const DEFAULT_SETTINGS = {
   fontCustom: '', // name of a font installed on this device
   fontSize: 14.5, // px
   density: 'cozy', // 'compact' | 'cozy' | 'roomy'
+  uiScale: 100, // percent: one of UI_SCALES, the desktop window's zoom
 };
 
 export const settings = {
   get() {
     const saved = read('fs.settings', {});
     const s = { ...DEFAULT_SETTINGS, ...saved };
-    // noiseReduction replaced a "Noise suppression" checkbox: keep an explicit off
-    if (saved.noiseSuppression === false && !saved.noiseReduction) s.noiseReduction = 'off';
+    // Before D38 this was noiseReduction ('off' | 'standard' | 'high'): keep an
+    // explicit off. The old key goes away with the next set().
+    if (saved.noiseReduction) s.noiseSuppression = saved.noiseReduction !== 'off';
+    delete s.noiseReduction;
     return s;
   },
   set(patch) {
@@ -136,6 +140,32 @@ export const settings = {
     write('fs.settings', s);
     return s;
   },
+};
+
+// Unread mentions per server and channel, so the red badges survive a restart:
+// { [serverId]: { [channelId]: count } }
+export const mentionUnread = {
+  all: () => read('fs.mentionUnread', {}),
+  add(serverId, channelId) {
+    const all = this.all();
+    all[serverId] = { ...all[serverId], [channelId]: (all[serverId]?.[channelId] || 0) + 1 };
+    write('fs.mentionUnread', all);
+  },
+  // One channel, or the whole server when no channel is given
+  clear(serverId, channelId) {
+    const all = this.all();
+    if (!all[serverId]) return false;
+    if (channelId) {
+      if (!all[serverId][channelId]) return false;
+      delete all[serverId][channelId];
+      if (!Object.keys(all[serverId]).length) delete all[serverId];
+    } else delete all[serverId];
+    write('fs.mentionUnread', all);
+    return true;
+  },
+  channel: (serverId, channelId) => read('fs.mentionUnread', {})[serverId]?.[channelId] || 0,
+  server: (serverId) => Object.values(read('fs.mentionUnread', {})[serverId] || {}).reduce((n, c) => n + c, 0),
+  total: () => Object.values(read('fs.mentionUnread', {})).reduce((n, ch) => n + Object.values(ch).reduce((a, c) => a + c, 0), 0),
 };
 
 // ---------- IndexedDB: soundboard and direct messages ----------

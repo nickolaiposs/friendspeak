@@ -35,6 +35,7 @@ async function startServer(opts = {}) {
   const MAX_AVATAR_BYTES = 384 * 1024;
   const MAX_BANNER_BYTES = 640 * 1024; // profile background
   const MAX_ICON_BYTES = 512 * 1024;
+  const AUDIO_QUALITIES = ['low', 'standard', 'high', 'max']; // voice quality levels, lowest first
   const MAX_ROLES = 50;
   const MAX_ROLES_PER_MEMBER = 10;
   const MAX_ROLE_NAME = 32;
@@ -79,15 +80,19 @@ async function startServer(opts = {}) {
       bans: [], // { id, profileId, name, ip, by, ts } (ip is never sent to clients)
       files: [], // uploaded files: { id, name, size, type, channelId, messageId, by, byName, ts }
       gameEnabled: true, // game on/off, from Settings → Server (only takes effect with assets)
+      audioQuality: 'max', // voice bitrate in the voice channels, from Settings → Server: a key of AUDIO_QUALITY in the client's voice.js (D38)
       roles: [], // labels managed in the admin dashboard: { id, name, color }, first = highest (D34)
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
+      pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
     };
   }
 
   let state;
+  let pinsMissing = false; // a state.json from before D42: pin the keys its profiles already have
   try {
     state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    pinsMissing = !state.pins;
     state = { ...defaultState(), ...state };
     delete state.dms; // DMs used to be stored here; they're peer to peer now (D28)
   } catch {
@@ -155,6 +160,45 @@ async function startServer(opts = {}) {
   // the card on; clients check its signature and pin it themselves.
   const cleanCard = (c, pid) => (c && typeof c === 'object' && c.id === pid && isKey(c.s, 43) && isKey(c.d, 43) && isKey(c.sig, 86) ? { id: pid, s: c.s, d: c.d, sig: c.sig } : undefined);
 
+  // Whether `sig` is an Ed25519 signature of `text` by the public key `s` (both base64url)
+  const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
+  function verifySig(s, sig, text) {
+    try {
+      const raw = Buffer.from(s, 'base64url');
+      if (raw.length !== 32 || typeof sig !== 'string') return false;
+      const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI, raw]), format: 'der', type: 'spki' });
+      return crypto.verify(null, Buffer.from(text), key, Buffer.from(sig, 'base64url'));
+    } catch {
+      return false;
+    }
+  }
+  // A card signed by its own key (identity.js makes them)
+  const cardValid = (c) => !!c && verifySig(c.s, c.sig, 'friendspeak-card-v1|' + c.id + '|' + c.d);
+
+  // ---------- profile keys (D42) ----------
+
+  // A profile id belongs to the first key that proves it holds it here: every
+  // later hello with that id must be signed by the same key. The key travels
+  // only inside an exported profile file, so copying an id is no longer enough.
+  // Null prototype: profile ids come from clients and could be "__proto__".
+  state.pins = Object.assign(
+    Object.create(null),
+    Object.fromEntries(Object.entries(state.pins && typeof state.pins === 'object' ? state.pins : {}).filter(([pid, s]) => pid && pid.length <= 64 && isKey(s, 43)))
+  );
+  // Profiles from before this already sent a self-signed card (D32): pin it once, now,
+  // rather than leave the id to whoever signs first after the update
+  if (pinsMissing) {
+    for (const [pid, p] of Object.entries(state.profiles || {})) {
+      const card = cleanCard(p?.card, pid);
+      if (card && cardValid(card)) state.pins[pid] = card.s;
+    }
+  }
+  const pinOf = (pid) => state.pins[pid] || null;
+  // What a client signs to say hello: the socket id is a fresh value the server
+  // chose, and the host it dialed stops another server from passing its hello on
+  const helloText = (sid, host) => 'friendspeak-hello-v1|' + sid + '|' + host;
+  const hostOf = (socket) => String(socket.handshake.headers.host || '').toLowerCase();
+
   function cleanProfile(p = {}) {
     const pid = str(p.id, 64) || id();
     return {
@@ -175,6 +219,57 @@ async function startServer(opts = {}) {
     const ch = channel(cid);
     if (!ch || ch.type !== 'text') return null;
     return (state.messages[cid] ||= []);
+  }
+
+  // ---------- mentions ----------
+
+  // Who a message mentions: { users: [profileId], roles: [roleId], everyone: true }, empty parts left out
+  // (null when nobody). Same rules as findMentions() in public/js/util.js, which is an ES module
+  // the server can't import, so keep the two in step: '@' at the start or after whitespace, then a
+  // name (case-insensitive, may have spaces), then the end or a char outside [\w-]; longest name
+  // wins; code spans are ignored. Replying to someone mentions them.
+  function mentionsOf(text, replied, senderId) {
+    // Code is blanked to the same length, so positions still point into the stored text
+    const plain = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => ' '.repeat(m.length));
+    const names = [{ name: 'everyone', kind: 'everyone', id: '' }];
+    for (const r of state.roles) names.push({ name: r.name, kind: 'role', id: r.id });
+    // People also answer to name#tag, which tells apart people with the same name
+    for (const [pid, p] of Object.entries(state.profiles)) if (p.name) names.push({ name: p.name, kind: 'user', id: pid }, { name: `${p.name}#${mentionTag(pid)}`, kind: 'user', id: pid });
+    names.sort((a, b) => b.name.length - a.name.length);
+    const users = new Set();
+    const roles = new Set();
+    const spans = []; // [at, length, kind, id]: lets clients draw a mention with the current name
+    let everyone = false;
+    for (let i = plain.indexOf('@'); i >= 0; i = plain.indexOf('@', i + 1)) {
+      if (i > 0 && !/\s/.test(plain[i - 1])) continue;
+      const fits = (n) => plain.slice(i + 1, i + 1 + n.name.length).toLowerCase() === n.name.toLowerCase() && !/[\w-]/.test(plain[i + 1 + n.name.length] || '');
+      const hit = names.find(fits);
+      if (!hit) continue;
+      // An untagged name more than one person has mentions all of them
+      for (const n of names.filter((n) => n.name.length === hit.name.length && fits(n))) {
+        if (n.kind === 'everyone') everyone = true;
+        else (n.kind === 'role' ? roles : users).add(n.id);
+        spans.push([i, 1 + n.name.length, n.kind, n.id]);
+      }
+    }
+    if (replied && replied.author !== senderId) users.add(replied.author);
+    users.delete(senderId);
+    if (!users.size && !roles.size && !everyone && !spans.length) return null;
+    const out = {};
+    if (users.size) out.users = [...users];
+    if (roles.size) out.roles = [...roles];
+    if (everyone) out.everyone = true;
+    if (spans.length) out.spans = spans;
+    return out;
+  }
+
+  // Same as mentionTag() in public/js/util.js: a short tag from a profile id
+  function mentionTag(id) {
+    let h = 0;
+    for (const ch of String(id)) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; // spread it, so similar ids get unlike tags
+    h = (h ^ (h >>> 16)) >>> 0;
+    return (h % 1679616).toString(36).padStart(4, '0');
   }
 
   // ---------- bans ----------
@@ -353,6 +448,7 @@ async function startServer(opts = {}) {
     mail = new Map(Object.entries(JSON.parse(fs.readFileSync(MAIL_FILE, 'utf8'))));
   } catch {}
   let mailTimer = null;
+  let closing = false; // close() was called: sockets are going away with the server
   function writeMail() {
     clearTimeout(mailTimer);
     mailTimer = null;
@@ -374,18 +470,8 @@ async function startServer(opts = {}) {
   mailSweepTimer.unref();
 
   // The address (mailbox name) of whoever signed `nonce` with the Ed25519 key `s`, or null
-  const ED25519_SPKI = Buffer.from('302a300506032b6570032100', 'hex');
-  function mailAddress(s, sig, nonce) {
-    try {
-      const raw = Buffer.from(s, 'base64url');
-      if (raw.length !== 32) return null;
-      const key = crypto.createPublicKey({ key: Buffer.concat([ED25519_SPKI, raw]), format: 'der', type: 'spki' });
-      if (!crypto.verify(null, Buffer.from('friendspeak-dm-auth-v1|' + nonce), key, Buffer.from(sig, 'base64url'))) return null;
-      return crypto.createHash('sha256').update(raw).digest('base64url');
-    } catch {
-      return null;
-    }
-  }
+  const mailAddress = (s, sig, nonce) =>
+    verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce) ? crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url') : null;
 
   // ---------- realtime ----------
 
@@ -406,10 +492,14 @@ async function startServer(opts = {}) {
     }));
   }
 
+  // A hand-edited state.json may hold anything
+  const audioQuality = () => (AUDIO_QUALITIES.includes(state.audioQuality) ? state.audioQuality : 'max');
+
   function publicState() {
     return {
       name: state.name,
       icon: state.icon,
+      audioQuality: audioQuality(),
       channels: state.channels,
       emojis: state.emojis,
       profiles: state.profiles,
@@ -484,14 +574,14 @@ async function startServer(opts = {}) {
     // code. They can reach the people whose profile id or mailbox address
     // they already know, and nothing else: no member list, no mailbox.
     const dm = io.of('/dm');
-    const dmOnline = () => [...new Set([...dm.sockets.values()].map((s) => s.data.profileId))];
+    const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
     const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
       const { profileId, password, guest } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
       const wrong = !!PASSWORD && password !== PASSWORD;
       // A guest can't use the profile id of someone on this server
-      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid))) return next(new Error('Wrong server password'));
+      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Wrong server password'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
@@ -501,21 +591,29 @@ async function startServer(opts = {}) {
     dm.on('connection', (socket) => {
       const pid = socket.data.profileId;
       const guest = socket.data.guest;
-      // Newest wins, like chat sessions: a reconnect replaces the stale socket
-      for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
-      socket.join('p:' + pid);
-      if (!guest) {
-        socket.join('members');
-        socket.emit('online', dmOnline());
-      }
-      socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+      // A profile id with a key pinned here (D42) is only someone once they sign
+      // the challenge below with that key. Until then the socket can use
+      // mailboxes, but it isn't present, can't signal and replaces no one.
+      const arrive = () => {
+        socket.data.verified = true;
+        // Newest wins, like chat sessions: a reconnect replaces the stale socket
+        for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
+        socket.join('p:' + pid);
+        if (!guest) {
+          socket.join('members');
+          socket.emit('online', dmOnline());
+        }
+        socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+      };
+      if (!pinOf(pid)) arrive();
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
-        if (to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
+        if (socket.data.verified && to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
       });
       // Guests name the people they want presence for
       socket.on('watch', (ids, ack) => {
         if (typeof ack !== 'function') return;
+        if (!socket.data.verified) return ack({ online: [] });
         const list = [...new Set((Array.isArray(ids) ? ids : []).slice(0, 200).map((v) => str(v, 64)).filter(Boolean))];
         for (const room of socket.rooms) if (room.startsWith('w:')) socket.leave(room);
         for (const v of list) socket.join('w:' + v);
@@ -530,6 +628,7 @@ async function startServer(opts = {}) {
         if (typeof ack !== 'function') return;
         const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
         if (!addr) return ack({ error: 'Bad signature' });
+        if (!socket.data.verified && s === pinOf(pid)) arrive();
         if (socket.data.addr) socket.leave('a:' + socket.data.addr);
         socket.data.addr = addr;
         socket.join('a:' + addr);
@@ -571,6 +670,9 @@ async function startServer(opts = {}) {
         if (kept.length !== box.items.length) (box.items = kept), saveMail();
       });
       socket.on('disconnect', () => {
+        // Shutting down disconnects everyone: that's not them leaving, and
+        // their direct connections don't need this server (D39)
+        if (closing || !socket.data.verified) return;
         if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
       });
     });
@@ -652,7 +754,7 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
-      updateServer({ name, icon, game }) {
+      updateServer({ name, icon, game, audioQuality: quality }) {
         if (name !== undefined) {
           name = str(name, 40).trim();
           if (!name) return { error: 'Server name required' };
@@ -662,14 +764,34 @@ async function startServer(opts = {}) {
           if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
           state.icon = icon || '';
         }
+        if (quality !== undefined) {
+          if (!AUDIO_QUALITIES.includes(quality)) return { error: 'Voice quality must be one of ' + AUDIO_QUALITIES.join(', ') };
+          state.audioQuality = quality;
+        }
         if (game !== undefined) {
           if (game && !gameRef.current?.available) return { error: gameInfo().reason || 'The game is not available on this server' };
           state.gameEnabled = !!game;
           if (!game) for (const u of users.values()) u.playing = false;
         }
         save();
-        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo() });
+        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo(), audioQuality: audioQuality() });
         if (game === false) broadcastUsers();
+        return { ok: true };
+      },
+
+      // Forget the key a profile id is pinned to (D42), for someone who lost it:
+      // the next hello that signs with any key claims the id. Dashboard only,
+      // or anyone could take over anyone's profile.
+      resetKey(profileId) {
+        profileId = str(profileId, 64);
+        if (!profileId || !pinOf(profileId)) return { error: 'That profile has no key here' };
+        delete state.pins[profileId];
+        // The old card would mislead DM contacts until the new key says hello
+        if (Object.hasOwn(state.profiles, profileId)) {
+          delete state.profiles[profileId].card;
+          io.emit('profile', { id: profileId, ...state.profiles[profileId] });
+        }
+        save();
         return { ok: true };
       },
 
@@ -750,11 +872,22 @@ async function startServer(opts = {}) {
           }
         });
 
-      socket.on('hello', ({ profile, password } = {}, ack) => {
+      socket.on('hello', ({ profile, password, proof } = {}, ack) => {
         if (typeof ack !== 'function') return;
         if (PASSWORD && password !== PASSWORD) return ack({ error: 'Wrong server password' });
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) return ack({ error: 'You are banned from this server', banned: true });
+        // Prove the profile's key (D42). Apps from before D42 send no proof: they
+        // can still use a profile id that no key has claimed yet, as before.
+        const pin = pinOf(p.id);
+        const card = p.card && cardValid(p.card) ? p.card : undefined;
+        const signed = !!card && verifySig(card.s, str(proof, 128), helloText(socket.id, hostOf(socket)));
+        // A proof that doesn't check out is a bug or a proxy that rewrites Host, never a reason to go on unprotected
+        if (proof && !signed) return ack({ error: 'Could not verify your profile key. If this server is behind a reverse proxy, it must pass the original Host header.', key: true });
+        if (pin && !signed) return ack({ error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
+        if (pin && card.s !== pin) return ack({ error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
+        if (signed && !pin) state.pins[p.id] = card.s;
+        p.card = card;
         lastIp.set(p.id, clientIp(socket));
         // One live session per profile. After a network drop the old socket
         // lingers until its ping times out (~45 s), so a reconnect would show
@@ -781,6 +914,7 @@ async function startServer(opts = {}) {
       on('profile:update', (profile) => {
         const u = users.get(socket.id);
         const p = cleanProfile({ ...profile, id: u.profile.id });
+        p.card = u.profile.card; // checked at hello; it can't change during a session
         u.profile = p;
         state.profiles[p.id] = storedProfile(p);
         save();
@@ -813,6 +947,8 @@ async function startServer(opts = {}) {
           .map((fid) => fileById(str(fid, 64)))
           .filter((f, i, a) => f && !f.messageId && f.channelId === channelId && f.by === u.profile.id && a.indexOf(f) === i);
         if (!text && !g && !attached.length) return ack({ error: 'empty' });
+        const replied = (replyTo = str(replyTo, 32)) ? list.find((m) => m.id === replyTo) : null;
+        const mentions = mentionsOf(text, replied, u.profile.id);
         const msg = {
           id: id(),
           author: u.profile.id,
@@ -820,7 +956,8 @@ async function startServer(opts = {}) {
           text,
           gif: g,
           files: attached.length ? attached.map((f) => ({ id: f.id, name: f.name, size: f.size, type: f.type })) : undefined,
-          replyTo: str(replyTo, 32) || null,
+          replyTo: replyTo || null,
+          mentions: mentions || undefined,
           reactions: {}, // emoji -> [profileId]
           ts: Date.now(),
         };
@@ -829,6 +966,23 @@ async function startServer(opts = {}) {
         for (const f of attached) f.messageId = msg.id;
         save();
         io.emit('msg:new', { channelId, message: msg });
+        // People with this server bookmarked but not open hear about mentions over /dm (D41)
+        if (mentions) {
+          const rooms = new Set();
+          if (mentions.everyone) rooms.add('members');
+          else {
+            for (const pid of mentions.users || []) rooms.add('p:' + pid);
+            for (const [pid, held] of Object.entries(state.memberRoles)) if (held.some((r) => mentions.roles?.includes(r))) rooms.add('p:' + pid);
+          }
+          if (rooms.size) {
+            dm.to([...rooms]).except('p:' + msg.author).emit('mention', {
+              channelId,
+              channelName: channel(channelId).name,
+              serverName: state.name,
+              message: { id: msg.id, author: msg.author, name: msg.name, text: text.slice(0, 300), ts: msg.ts, replyTo: msg.replyTo, mentions },
+            });
+          }
+        }
         if (attached.length) io.emit('files:new', { files: attached.map(publicFile), storage: usage() });
         ack({ ok: true });
       });
@@ -840,6 +994,9 @@ async function startServer(opts = {}) {
         if (!m || m.author !== u.profile.id || !text) return;
         m.text = text;
         m.edited = Date.now();
+        const mentions = mentionsOf(text, m.replyTo && thread(channelId).find((x) => x.id === m.replyTo), m.author);
+        if (mentions) m.mentions = mentions;
+        else delete m.mentions;
         save();
         io.emit('msg:update', { channelId, message: m });
       });
@@ -891,8 +1048,8 @@ async function startServer(opts = {}) {
 
       // --- server name / icon (anyone can change them, D3) ---
 
-      on('server:update', ({ name, icon, game }, ack) => {
-        ack(actions.updateServer({ name, icon, game }));
+      on('server:update', ({ name, icon, game, audioQuality }, ack) => {
+        ack(actions.updateServer({ name, icon, game, audioQuality }));
       });
 
       // --- channels ---
@@ -1099,6 +1256,7 @@ async function startServer(opts = {}) {
         actions,
         usage,
         gameInfo,
+        audioQuality,
         updater,
         saveUpdateSettings: (o) => {
           state.updateSettings = o;
@@ -1139,6 +1297,7 @@ async function startServer(opts = {}) {
         updater.stop();
         admin?.close();
         writeState();
+        closing = true;
         io.close();
         server.close(() => resolve());
       }),

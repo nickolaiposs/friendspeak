@@ -271,6 +271,23 @@ function allowScreenShare() {
   });
 }
 
+// In the app window, zoom is the UI size setting (theme.js): the page steps it
+// (+1, -1, or 0 to reset) and applies it. Other windows (the game's pop-out) zoom
+// like a browser.
+function zoomItem(label, accelerator, step, extra = {}) {
+  return {
+    label,
+    accelerator,
+    ...extra,
+    click: (_item, focused) => {
+      if (!focused) return;
+      if (focused === win) return win.webContents.send('desktop:zoom', step);
+      const wc = focused.webContents;
+      wc.setZoomLevel(step ? wc.getZoomLevel() + step * 0.5 : 0);
+    },
+  };
+}
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   Menu.setApplicationMenu(
@@ -279,7 +296,17 @@ function buildMenu() {
       { role: 'editMenu' },
       {
         label: 'View',
-        submenu: [{ role: 'reload' }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }],
+        submenu: [
+          { role: 'reload' },
+          { role: 'toggleDevTools' },
+          { type: 'separator' },
+          zoomItem('Actual Size', 'CommandOrControl+0', 0),
+          zoomItem('Zoom In', 'CommandOrControl+Plus', 1),
+          zoomItem('Zoom In', 'CommandOrControl+=', 1, { visible: false, acceleratorWorksWhenHidden: true }), // + without Shift
+          zoomItem('Zoom Out', 'CommandOrControl+-', -1),
+          { type: 'separator' },
+          { role: 'togglefullscreen' },
+        ],
       },
       { role: 'windowMenu' },
     ])
@@ -391,6 +418,20 @@ ipcMain.handle('desktop:trust-server', (_e, address) => trustServer(String(addre
 // Chat file downloads: Electron shows a save dialog, and pinned certificates apply
 ipcMain.handle('desktop:download', (_e, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) win?.webContents.downloadURL(url);
+});
+// Notification clicks bring the window back
+ipcMain.handle('desktop:focus', () => {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
+// Unread count on the dock/taskbar icon; Windows has no count, so flash the taskbar instead
+ipcMain.handle('desktop:badge', (_e, n) => {
+  n = Math.min(9999, Math.max(0, Math.trunc(Number(n)) || 0));
+  if (process.platform === 'win32') {
+    if (win && !win.isDestroyed()) win.flashFrame(n > 0 && !win.isFocused());
+  } else app.setBadgeCount(n);
 });
 ipcMain.handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
 

@@ -1,5 +1,5 @@
 // Exposes a small, explicit API to the friendspeak UI (window.friendspeakDesktop).
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 let registered = new Set();
 
@@ -15,6 +15,15 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   },
   hasGlobalHotkey: (combo) => registered.has(combo),
   onHotkey: (cb) => ipcRenderer.on('desktop:hotkey', (_e, combo) => cb(combo)),
+
+  // UI size (Settings → Appearance): the window's zoom factor. The View menu's
+  // zoom items ask the page to step it, so the setting stays the source of truth.
+  setZoom: (factor) => Number.isFinite(factor) && webFrame.setZoomFactor(Math.min(2, Math.max(0.5, factor))),
+  onZoom: (cb) => ipcRenderer.on('desktop:zoom', (_e, step) => cb(step)),
+
+  // Notifications: bring the window forward, and show an unread count on the app icon
+  focus: () => ipcRenderer.invoke('desktop:focus'),
+  setBadge: (n) => ipcRenderer.invoke('desktop:badge', n),
 
   // Save a chat file (a normal link would open in the system browser)
   download: (url) => ipcRenderer.invoke('desktop:download', url),
