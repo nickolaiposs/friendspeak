@@ -1,6 +1,6 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions } from './util.js';
-import { profiles, servers, settings, sounds, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
+import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
@@ -72,6 +72,9 @@ const initials = (label) =>
 const me = () => profiles.active();
 // What servers get: the profile plus its public card for DMs (never the keys)
 const myProfile = async () => ({ ...me(), card: (await identityFor(me()).catch(() => null))?.card });
+// An export from before D32 has no keys: this device makes new ones, which servers that know the profile refuse (D42)
+const warnIfKeyless = (p) =>
+  !identities.get(p.id) && toast(`${p.name}'s file has no keys, so servers that already know this profile won't accept it. Export it again from the device it's on.`, 'error');
 const channelById = (id) => S.server?.channels.find((c) => c.id === id);
 const profileOf = (id, fallbackName) =>
   S.server?.profiles?.[id] || DM.contacts.get(id) || (id === me()?.id ? me() : null) || { name: fallbackName || 'unknown' };
@@ -1045,7 +1048,7 @@ function welcome() {
     hidden: true,
     onchange: async () => {
       try {
-        await importProfile(importInput.files[0]);
+        warnIfKeyless(await importProfile(importInput.files[0]));
         close();
         boot();
       } catch (e) {
@@ -1285,7 +1288,12 @@ function openSocket(entry, rejoinVoice = null) {
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
 
   socket.on('connect', async () => {
-    const res = await socket.emitWithAck('hello', { profile: await myProfile(), password: entry.password || '' });
+    const identity = await identityFor(me()).catch(() => null);
+    const res = await socket.emitWithAck('hello', {
+      profile: { ...me(), card: identity?.card },
+      password: entry.password || '',
+      proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
+    });
     if (res.error) {
       toast(res.error, 'error');
       if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
@@ -4688,6 +4696,7 @@ function settingsProfile(body) {
       try {
         const np = await importProfile(importInput.files[0]);
         toast(`Imported ${np.name}`);
+        warnIfKeyless(np);
         switchProfile(np.id);
         settingsProfile(body.replaceChildren() || body);
       } catch (e) {
@@ -4711,7 +4720,7 @@ function settingsProfile(body) {
       }, 'Save profile')
     ),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only in this browser. Export one to use it on another computer.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
     h(
       'div',
       { class: 'profile-list' },
@@ -4729,7 +4738,7 @@ function settingsProfile(body) {
                 {
                   class: 'btn small ghost danger',
                   onclick: async () => {
-                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device?`))) return;
+                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
                     profiles.remove(x.id);
                     if (x.id === p.id) switchProfile(profiles.all()[0].id);
                     settingsProfile(body.replaceChildren() || body);

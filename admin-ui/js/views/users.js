@@ -52,6 +52,13 @@ export default {
       try { await api.post(`users/${encodeURIComponent(u.id)}/remove`); } catch (e) { fail(e); }
     };
 
+    const resetKey = async (u) => {
+      const ok = await confirmDialog({ title: `Reset ${u.name}’s key?`, confirmLabel: 'Reset key', danger: true,
+        body: 'Only someone holding this profile’s key can connect as it. Reset it for someone who lost their key (no exported profile file): the next person to connect with this profile ID claims it with their key, so do this only when you know who that will be.' });
+      if (!ok) return;
+      try { await api.post(`users/${encodeURIComponent(u.id)}/reset-key`); } catch (e) { fail(e); }
+    };
+
     const ban = async (u) => {
       const ip = u.ip || u.lastIp;
       const ipBox = h('input', { type: 'checkbox' });
@@ -74,7 +81,9 @@ export default {
     const match = (name, id) => !filter || `${name} ${id}`.toLowerCase().includes(filter);
     const btn = (label, fn, cls = '') => h('button', { class: `btn small ghost ${cls}`, onClick: fn }, label);
     const userActions = (u) => h('td', { class: 'actions' },
-      btn('Roles…', () => editRoles(u)), btn('Remove', () => remove(u), 'danger'), btn('Ban…', () => ban(u), 'danger'));
+      btn('Roles…', () => editRoles(u)), u.key && btn('Reset key', () => resetKey(u), 'danger'), btn('Remove', () => remove(u), 'danger'), btn('Ban…', () => ban(u), 'danger'));
+    const keyCell = (u) => h('td', { class: 'mono nowrap', title: u.key ? 'The start of the key this profile must sign in with' : 'No key yet: an older app, which anyone can pose as' },
+      u.key || h('span', { class: 'muted' }, 'none'));
 
     function render() {
       const d = data;
@@ -83,13 +92,13 @@ export default {
       const bans = d.bans.filter((b) => match(b.name || '', b.profileId || ''));
       const section = (title, n, content) => [h('h2', {}, `${title} (${n})`), n ? content : h('p', { class: 'muted' }, filter ? 'Nothing matches.' : 'None.')];
       return h('div', {},
-        section('Online', on.length, table(['User', 'Roles', 'Profile ID', 'IP', 'Connected', 'Doing', ''],
+        section('Online', on.length, table(['User', 'Roles', 'Profile ID', 'Key', 'IP', 'Connected', 'Doing', ''],
           on.map((u) => h('tr', {},
-            h('td', {}, ident(u)), h('td', {}, roleTags(u.roles, d.roles)), h('td', {}, idChip(u.id)), h('td', { class: 'mono' }, u.ip),
+            h('td', {}, ident(u)), h('td', {}, roleTags(u.roles, d.roles)), h('td', {}, idChip(u.id)), keyCell(u), h('td', { class: 'mono' }, u.ip),
             h('td', { class: 'nowrap' }, fmtTime(u.since)), h('td', {}, doing(u)), userActions(u))))),
-        section('Offline', off.length, table(['User', 'Roles', 'Profile ID', 'Last seen', 'Last IP', ''],
+        section('Offline', off.length, table(['User', 'Roles', 'Profile ID', 'Key', 'Last seen', 'Last IP', ''],
           off.map((u) => h('tr', {},
-            h('td', {}, ident(u)), h('td', {}, roleTags(u.roles, d.roles)), h('td', {}, idChip(u.id)),
+            h('td', {}, ident(u)), h('td', {}, roleTags(u.roles, d.roles)), h('td', {}, idChip(u.id)), keyCell(u),
             h('td', { class: 'nowrap' }, u.seen ? fmtTime(u.seen) : 'unknown'), h('td', { class: 'mono' }, u.lastIp || 'unknown'),
             userActions(u))))),
         section('Banned', bans.length, table(['Name', 'Profile ID', 'IP', 'Banned by', 'When', ''],
