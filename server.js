@@ -2092,7 +2092,8 @@ if (require.main === module) {
     const scheme = s.https ? 'https' : 'http';
     console.log(`\n  friendspeak server "${s.name}" is running\n`);
     console.log(`  Local address:     ${scheme}://localhost:${s.port}  (connect with the desktop app)`);
-    for (const ip of lanAddresses()) console.log(`  Friends connect:   ${ip}:${s.port}`);
+    // The app reads an address without a scheme as https, so a plain http server prints its scheme
+    for (const ip of lanAddresses()) console.log(`  Friends connect:   ${s.https ? '' : 'http://'}${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
     console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}/admin  (${s.admin.local ? 'no key needed from this machine' : 'admin key required'})`}`);
     console.log(`  Joining:           ${s.inviteOnly ? 'needs an invite (make them in Server settings or the admin dashboard)' : 'open to anyone with the address (invites are off)'}`);
@@ -2104,10 +2105,9 @@ if (require.main === module) {
     console.log('');
     // stdout, not console: the token must never enter the log the dashboard shows
     if (s.firstInvite) {
-      const at = env.FRIENDSPEAK_DOCKER === '1' ? null : lanAddresses()[0]; // a container's own address is no use to friends
       process.stdout.write(
         `  Invite (never expires; made on the first start, shown only now):\n\n    ${s.firstInvite}\n\n` +
-          `  Friends can paste this into "Connect to a server":  ${at ? `${s.https ? 'https://' : ''}${at}:${s.port}` : '<your address>'}#${s.firstInvite}\n` +
+          '  Friends paste it into the Invite field of "Connect to a server".\n' +
           '  Revoke it or make more in Server settings → Invites, or in the admin dashboard.\n\n'
       );
     }

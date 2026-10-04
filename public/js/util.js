@@ -366,23 +366,14 @@ export const INVITE_DURATIONS = [
   [30 * 864e5, '30 days'],
 ];
 
-// One thing to send a friend: the address and the token, "192.168.1.20:3000#K7QF-29XM-PA3T-Z6WH"
-export const inviteLink = (address, token) => `${String(address).replace(/^http:\/\//, '')}#${token}`;
-// The two halves of that (a plain address has no invite)
-export function splitInvite(text) {
-  const t = String(text || '').trim();
-  const i = t.indexOf('#');
-  return i < 0 ? { address: t, invite: '' } : { address: t.slice(0, i).trim(), invite: t.slice(i + 1).trim() };
-}
-
 export function normalizeAddress(input) {
   let a = String(input || '').trim();
   if (!a) return '';
   const explicitScheme = /^https?:\/\//i.test(a);
-  if (!explicitScheme) a = (location.protocol === 'https:' ? 'https://' : 'http://') + a;
+  if (!explicitScheme) a = 'https://' + a; // a plain http server takes a typed "http://"
   try {
     const u = new URL(a);
-    // "192.168.1.20" means the default friendspeak port; "https://host" means exactly that
+    // "192.168.1.20" means https on the default friendspeak port; "https://host" means exactly that
     if (!explicitScheme && !/^https?:\/\/[^/]+:\d+/.test(a)) u.port = '3000';
     return u.origin;
   } catch {

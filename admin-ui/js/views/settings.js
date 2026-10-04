@@ -1,8 +1,5 @@
-import { h, fileToDataUrl, debounce, fmtTime, inviteInfo, inviteStatus, inviteLink, INVITE_TYPES, INVITE_DURATIONS } from '../util.js';
+import { h, fileToDataUrl, debounce, fmtTime, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from '../util.js';
 import { load, copyText, confirmDialog, alertDialog } from '../ui.js';
-
-// The address friends type, when the dashboard was opened on it (localhost is no use to them)
-const shareHost = () => (/^(localhost|127\.|\[?::1\]?$)/.test(location.hostname) ? '' : (location.protocol === 'https:' ? 'https://' : '') + location.host);
 
 // A new invite's token: shown once, with buttons to copy it
 function tokenBox(token, onDone) {
@@ -13,12 +10,11 @@ function tokenBox(token, onDone) {
     } }, label);
     return b;
   };
-  const host = shareHost();
   return h('div', { class: 'secret-box', role: 'status' },
     h('strong', {}, 'New invite'),
     val,
     h('div', { class: 'small' }, 'Copy it now. Only a hash of it is kept, so it cannot be shown again. Friends enter it in the app under "Connect to a server".'),
-    h('div', { class: 'row' }, copier('Copy invite', token), host && copier('Copy address and invite', inviteLink(host, token)), h('button', { type: 'button', class: 'btn small ghost', onClick: onDone }, 'Done')));
+    h('div', { class: 'row' }, copier('Copy invite', token), h('button', { type: 'button', class: 'btn small ghost', onClick: onDone }, 'Done')));
 }
 
 const QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', standard: 'Standard (64 kbps)', low: 'Low (32 kbps)' };

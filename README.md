@@ -22,7 +22,7 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON. Each profile is its own account: it has its own server list and direct messages, and joins every server (password included) itself.
 - **Themes:** **Settings → Appearance** has dark, light and high-contrast themes, 50 popular color schemes (Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, … from the [Gogh](https://github.com/Gogh-Co/Gogh) collection) with a preview of each, and a color picker for every color in the UI. You can also change the font, text size, density and the size of the whole UI. It's stored on your device and nobody else sees it.
 - **Connect by IP:** save any number of servers in the left rail.
-- **Invites:** joining a server takes an invite token (`K7QF-29XM-PA3T-Z6WH`), entered once. An invite can work until it is revoked, once, a set number of times, or for a set time. The server keeps only a hash of it, and shows who made each invite, how often it was used, how long it has left and who joined with it. Paste `address#invite` into **Connect to a server** to fill in both.
+- **Invites:** joining a server takes an invite token (`K7QF-29XM-PA3T-Z6WH`), entered once. An invite can work until it is revoked, once, a set number of times, or for a set time. The server keeps only a hash of it, and shows who made each invite, how often it was used, how long it has left and who joined with it. Friends paste it into the **Invite** field of **Connect to a server**.
 - **Server settings:** click the server name, or right-click the server → **Server settings…**, for the overview (name, icon, voice quality, game), roles, members, emojis and bans. Admins can set the icon from any image (it's resized for you), an animated GIF, a GIPHY GIF or an https link. Everyone on the server sees it, like Discord.
 - **Soundboard:** add your own audio files (drag and drop works). They're stored locally, and when you play one it's mixed into your voice stream so everyone in the channel hears it, even while you're muted. Each sound can have its own emoji, volume and hotkey.
 - **Desktop app:** an Electron app for macOS, Windows and Linux. The mic always works, soundboard hotkeys work from other apps, and it connects to any friendspeak server. (It doesn't host one; run the server separately.) It tells you when a new version is out, links to the release notes, and updates itself on Windows and Linux.
@@ -42,7 +42,7 @@ The server only hosts: it has no chat web UI. Everyone, including the host, uses
 
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
-  Friends connect:   192.168.1.20:3000
+  Friends connect:   http://192.168.1.20:3000
   Admin dashboard:   http://localhost:3000/admin  (no key needed from this machine)
 ```
 
@@ -111,9 +111,9 @@ Then restart the server. The startup log shows `Penguin game: ready`. The game s
 
 ## How friends connect (read this for voice to work)
 
-The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's `IP:port`. Plain `http://` works, and the microphone always works in the app.
+The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's address. An address without a scheme means `https://` (port 3000 unless one is given), so for a plain HTTP server (`npm start`) type `http://IP:port`. The microphone works in the app either way.
 
-For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `https://HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
+For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
 To play over the internet instead of a LAN, forward the TCP port on the host's router. Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
 
@@ -148,7 +148,7 @@ Example: `SERVER_NAME="Game Night" npm start`
 
 ### Invites
 
-Joining takes an invite. The first start prints one that never expires, once, on the console (in Docker: `docker compose logs friendspeak`), together with an `address#invite` line a friend can paste into **Connect to a server**. It is not kept in the log the dashboard shows, and the server stores only its hash, so copy it then.
+Joining takes an invite. The first start prints one that never expires, once, on the console (in Docker: `docker compose logs friendspeak`). A friend pastes it into the **Invite** field of **Connect to a server**. It is not kept in the log the dashboard shows, and the server stores only its hash, so copy it then.
 
 Make more in the admin dashboard under **Server settings → Invites**, or in the app under **Server settings → Invites**: one that never expires (until it is revoked), one use, a number of uses, or one that expires after a time. A new invite's token is shown once, with buttons to copy it. The list shows who made each invite, its uses, the time it has left and who joined with it.
 
