@@ -18,6 +18,7 @@ const PERMS = [
   ['manageEmojis', 'Manage emojis'],
   ['manageFiles', 'Manage files'],
   ['manageMessages', 'Delete messages'],
+  ['createInvites', 'Create invites'],
 ];
 
 function swatch(color) {
