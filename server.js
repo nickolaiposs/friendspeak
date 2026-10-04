@@ -1110,6 +1110,18 @@ async function startServer(opts = {}) {
       u.camera = false;
     }
 
+    // Someone stops being a member (removed, banned or left): their stored profile and role
+    // assignments go, so coming back takes an invite again (D51). Their pinned key stays (D42).
+    function endMembership(profileId) {
+      const hadProfile = Object.hasOwn(state.profiles, profileId);
+      const hadRoles = Object.hasOwn(state.memberRoles, profileId);
+      if (hadProfile) delete state.profiles[profileId];
+      if (hadRoles) delete state.memberRoles[profileId];
+      save();
+      if (hadProfile) io.emit('profile:removed', { id: profileId });
+      if (hadRoles) permsChanged();
+    }
+
     // What people can do to the server, shared by the chat sockets below and the
     // admin dashboard (admin.js). `actor` is { profileId } for the app and
     // { dashboard: true } for the dashboard, which may do anything that is valid.
@@ -1131,10 +1143,10 @@ async function startServer(opts = {}) {
         if (ipSkipped) banIp = '';
         const ban = { id: id(), profileId, name: state.profiles[profileId].name, ip: banIp, by, ts: Date.now() };
         state.bans.push(ban);
-        save();
         kick((s) => s.data.profileId === profileId || (banIp && clientIp(s) === banIp), 'banned');
-        io.emit('bans', publicBans());
         console.log(`[mod] ${actorName(actor)} banned ${whoIs({ ...state.profiles[profileId], id: profileId })}${banIp ? ' and their IP' : ''}`);
+        io.emit('bans', publicBans());
+        endMembership(profileId); // unbanned, they need an invite to come back
         return { ok: true, ipSkipped };
       },
 
@@ -1145,6 +1157,7 @@ async function startServer(opts = {}) {
         state.bans = state.bans.filter((b) => b.id !== banId);
         save();
         io.emit('bans', publicBans());
+        if (lifted) endMembership(lifted.profileId); // a ban from before bans ended membership
         if (lifted) console.log(`[mod] ${actorName(actor)} unbanned ${whoIs({ name: lifted.name, id: lifted.profileId })}`);
         return { ok: true };
       },
@@ -1158,12 +1171,7 @@ async function startServer(opts = {}) {
         if (!touchable(actor, profileId)) return ADMIN_TARGET;
         kick((s) => s.data.profileId === profileId, 'removed');
         console.log(`[mod] ${actorName(actor)} removed ${whoIs({ ...state.profiles[profileId], id: profileId })} from the server`);
-        delete state.profiles[profileId];
-        const hadRoles = Object.hasOwn(state.memberRoles, profileId);
-        if (hadRoles) delete state.memberRoles[profileId];
-        save();
-        io.emit('profile:removed', { id: profileId });
-        if (hadRoles) permsChanged();
+        endMembership(profileId);
         return { ok: true };
       },
 
@@ -1664,6 +1672,15 @@ async function startServer(opts = {}) {
 
       on('ban:remove', ({ id: banId }, ack) => {
         ack(actions.unban({ profileId: myId() }, banId));
+      });
+
+      // Removing the server from the app's list: the profile stops being a member
+      on('server:leave', (_p, ack) => {
+        const pid = myId();
+        console.log(`[server] ${whoIs({ ...state.profiles[pid], id: pid })} left the server`);
+        ack({ ok: true });
+        kick((s) => s.data.profileId === pid, 'left');
+        endMembership(pid);
       });
 
       on('server:update', ({ name, icon, game, audioQuality, inviteOnly }, ack) => {
