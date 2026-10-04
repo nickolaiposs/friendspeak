@@ -115,6 +115,10 @@ const canCh = (channelId, key, c = S.conn) => {
 };
 // Server name, icon, voice quality, the game: administrators only (everyone while permissions are off)
 const canServerSettings = (c = S.conn) => !c?.perms || c.perms.admin || c.perms.open;
+// The Server settings window: administrators and moderators (anyone a role or the defaults let moderate or
+// manage something) only. Everyone while permissions are off, since then everyone can do those things.
+const SETTINGS_PERMS = ['kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages', 'createInvites'];
+const canSeeServerSettings = (c = S.conn) => !c?.perms || !!c.perms.open || !!c.perms.admin || SETTINGS_PERMS.some((k) => c.perms[k]);
 // Roles without permissions of their own are only labels: people who manage roles may hand those out
 const isAesthetic = (r) => !Object.keys(r.perms || {}).length && !r.grantable?.length;
 function isAdminPid(pid, sv = S.server) {
@@ -1274,7 +1278,7 @@ function renderRail() {
             contextMenu(e, [
               { label: muted ? 'Unmute notifications' : 'Mute notifications', run: () => toggleServerMute(s.id) },
               { label: 'Edit', run: () => serverDialog(s) },
-              active && S.connected && { label: 'Server settings…', run: () => openServerSettings() },
+              active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
               calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
               { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
@@ -1571,6 +1575,7 @@ function openSocket(entry, rejoinVoice = null) {
     syncForced(c);
     if (calling()) renderVoicePanel();
     if (!viewed()) return;
+    renderHeader();
     renderChannels();
     renderMembers();
     syncComposer();
@@ -1831,8 +1836,8 @@ function renderHeader() {
       'button',
       {
         class: 'server-title',
-        title: S.connected ? 'Server settings' : '',
-        disabled: !S.connected,
+        title: S.connected && canSeeServerSettings() ? 'Server settings' : '',
+        disabled: !S.connected || !canSeeServerSettings(),
         onclick: () => openServerSettings(),
       },
       S.server?.icon ? h('img', { class: 'header-icon', src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : null,
@@ -5879,6 +5884,7 @@ function channelPermsDialog(ch) {
 // Its own window, apart from app Settings: what this server lets you see and change depends on your roles.
 function openServerSettings(tab = 'overview') {
   if (!S.connected) return toast('Connect to a server to manage it', 'error');
+  if (!canSeeServerSettings()) return toast('Only administrators and moderators can open Server settings', 'error');
   const socket = S.socket;
   const st = { role: null }; // the Roles page's selection survives redraws
   const body = h('div', { class: 'settings-body' });
@@ -5903,6 +5909,7 @@ function openServerSettings(tab = 'overview') {
   };
   // The server changes under an open window: draw again, unless someone is typing
   const redraw = () => {
+    if (!canSeeServerSettings()) return close(); // lost the role that let us in
     const a = document.activeElement;
     if (body.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !['checkbox', 'button'].includes(a.type)))) return;
     show(cur, true);
