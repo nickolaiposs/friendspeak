@@ -2918,7 +2918,15 @@ function appendMessage(m, force) {
   const box = $('#messages');
   if (!box) return;
   const list = S.messages.get(S.channelId);
+  if (!list) return; // the channel is still loading: the history on its way has this message
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  // A DM sorts in by when it was sent: one sent just before yours but delivered after it goes
+  // above yours, not at the end. Drawn at the end it would sit under your name.
+  if (list[list.length - 1] !== m) {
+    renderMessages(true);
+    if (atBottom || force) box.scrollTop = box.scrollHeight;
+    return;
+  }
   const el = messageEl(m, list[list.length - 2]);
   box.append(el);
   if (atBottom || force) {
