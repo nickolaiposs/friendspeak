@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -1292,12 +1292,14 @@ function renderRail() {
 }
 
 function serverDialog(existing) {
-  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^http:\/\//, '') || '' });
-  const pass = h('input', { type: 'password', placeholder: 'optional', value: existing?.password || '' });
+  // https is the default, so it is left out when the port says the rest ("https://host" alone means port 443)
+  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^https:\/\/(?=[^/]+:\d+$)/, '') || '' });
+  // The bookmark's `password` holds the invite (D51) until it has been used, or an older server's password
+  const pass = h('input', { placeholder: 'XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', value: existing?.password || '' });
   const save = (close) => {
     const address = normalizeAddress(addr.value);
     if (!address) return toast('Enter an IP or hostname', 'error');
-    const entry = servers.upsert({ ...(existing || {}), address, password: pass.value });
+    const entry = servers.upsert({ ...(existing || {}), address, password: pass.value.trim() });
     close();
     DM.setServers(servers.all()); // every bookmarked server is also a place to meet for DMs
     renderRail();
@@ -1309,8 +1311,7 @@ function serverDialog(existing) {
       'div',
       { onkeydown: (e) => e.key === 'Enter' && save(close) },
       h('label', { class: 'field' }, h('span', {}, 'Server IP / address'), addr),
-      h('label', { class: 'field' }, h('span', {}, 'Password'), pass),
-      h('p', { class: 'muted small' }, 'Port defaults to 3000.')
+      h('label', { class: 'field' }, h('span', {}, 'Invite'), pass)
     ),
     { actions: [(c) => h('button', { class: 'btn', onclick: () => save(c) }, existing ? 'Save & connect' : 'Connect')] }
   );
@@ -1425,7 +1426,8 @@ function openSocket(entry, rejoinVoice = null) {
     const identity = await identityFor(me()).catch(() => null);
     const res = await socket.emitWithAck('hello', {
       profile: { ...me(), card: identity?.card },
-      password: entry.password || '',
+      invite: entry.password || '',
+      password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
     });
     if (res.error) {
@@ -1435,9 +1437,16 @@ function openSocket(entry, rejoinVoice = null) {
       if (!viewed()) return;
       socket.disconnect();
       renderMain(res.error);
-      if (/password/i.test(res.error)) serverDialog(entry);
+      if (res.invite || /password/i.test(res.error)) serverDialog(entry);
       return;
     }
+    // We're a member now, known by the profile's key: the invite has done its job, so don't keep it
+    if (typeof res.server?.inviteOnly === 'boolean' && entry.password) {
+      entry.password = '';
+      servers.upsert({ id: entry.id, password: '' });
+      DM.setServers(servers.all());
+    }
+    DM.retry(entry.address); // its DM socket was refused if it got there before we had joined
     Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
@@ -1571,8 +1580,9 @@ function openSocket(entry, rejoinVoice = null) {
     toast(muted ? `${by || 'A moderator'} muted you` : `${by || 'A moderator'} lifted your mute`, muted ? 'error' : 'info');
   });
 
-  socket.on('server', ({ name, icon, game, audioQuality }) => {
+  socket.on('server', ({ name, icon, game, audioQuality, inviteOnly }) => {
     Object.assign(c.server, { name, icon });
+    if (typeof inviteOnly === 'boolean') c.server.inviteOnly = inviteOnly;
     if (audioQuality) c.voice.setAudioQuality((c.server.audioQuality = audioQuality));
     if (game) {
       const wasOn = c.server.game?.enabled;
@@ -5746,6 +5756,7 @@ const PERM_INFO = [
   ['manageEmojis', 'Manage emojis', 'Add and remove custom emojis.'],
   ['manageFiles', 'Manage files', 'Delete other people’s files.'],
   ['manageMessages', 'Delete messages', 'Delete other people’s messages.'],
+  ['createInvites', 'Create invites', 'Make invites for new people, and see the server’s invites and who joined with them.'],
 ];
 
 // Inherit / Allow / Deny for a setting that may be unset (true, false or undefined)
@@ -5877,6 +5888,8 @@ function openServerSettings(tab = 'overview') {
     members: ['Members', serverMembers],
     emojis: ['Emojis', serverEmojis],
     bans: ['Bans', serverBans],
+    // Only for people who may create invites: nobody else is shown any (the server refuses them too)
+    ...(S.conn.perms?.createInvites ? { invites: ['Invites', serverInvites] } : {}),
   };
   let cur = pages[tab] ? tab : 'overview';
   const nav = h('div', { class: 'settings-nav' });
@@ -5896,6 +5909,8 @@ function openServerSettings(tab = 'overview') {
   };
   const events = ['roles', 'perms', 'channels', 'emojis', 'bans', 'server'];
   for (const ev of events) socket.on(ev, redraw);
+  const onInvites = ({ invites } = {}) => Array.isArray(invites) && ((st.invites = invites), cur === 'invites' && redraw());
+  socket.on('invites', onInvites);
   const gone = () => close();
   socket.on('disconnect', gone);
   nav.append(...Object.entries(pages).map(([k, [label]]) => h('button', { 'data-tab': k, onclick: () => show(k) }, label)));
@@ -5903,6 +5918,7 @@ function openServerSettings(tab = 'overview') {
     wide: true,
     onClose: () => {
       for (const ev of events) socket.off(ev, redraw);
+      socket.off('invites', onInvites);
       socket.off('disconnect', gone);
     },
   });
@@ -6217,6 +6233,109 @@ function serverBans(body) {
           )
         : [h('p', { class: 'muted small' }, 'Nobody is banned.')]
     )
+  );
+}
+
+// Invites (D51): the tokens new people join with. Only people with Create invites get this page.
+function serverInvites(body, { st, redraw }) {
+  const p = S.conn.perms || {};
+  const socket = S.socket;
+  if (!st.invites) {
+    st.invites = [];
+    socket.emitWithAck('invite:list', {}).then((r) => {
+      if (r.error) st.invitesError = r.error;
+      else st.invites = r.invites;
+      redraw();
+    });
+  }
+  const copy = (text, what) => navigator.clipboard.writeText(text).then(() => toast(what + ' copied'), () => toast('Could not copy', 'error'));
+
+  // Whether joining takes an invite at all: administrators
+  const required = h('input', { type: 'checkbox', checked: S.server.inviteOnly !== false, disabled: !p.admin });
+  required.onchange = async () => {
+    const r = await socket.emitWithAck('server:update', { inviteOnly: required.checked });
+    if (r.error) (toast(r.error, 'error'), (required.checked = S.server.inviteOnly !== false));
+  };
+
+  // A new invite
+  st.inviteType ||= 'permanent';
+  const note = h('input', { maxlength: 40, placeholder: 'Who it is for (optional)', value: st.inviteNote || '', oninput: () => (st.inviteNote = note.value) });
+  const type = h('select', { onchange: () => ((st.inviteType = type.value), redraw()) }, INVITE_TYPES.map(([k, label]) => h('option', { value: k }, label)));
+  type.value = st.inviteType;
+  const uses = h('input', { type: 'number', min: 2, max: 10000, value: st.inviteUses || 5, oninput: () => (st.inviteUses = uses.value) });
+  const lasts = h('select', { onchange: () => (st.inviteLasts = lasts.value) }, INVITE_DURATIONS.map(([ms, label]) => h('option', { value: ms }, label)));
+  lasts.value = st.inviteLasts || 864e5;
+  const create = async () => {
+    const payload = { label: note.value.trim() };
+    if (type.value === 'single') payload.maxUses = 1;
+    if (type.value === 'multi') payload.maxUses = Math.round(Number(uses.value));
+    if (type.value === 'timed') payload.expiresIn = Number(lasts.value);
+    const r = await socket.emitWithAck('invite:create', payload);
+    if (r.error) return toast(r.error, 'error');
+    st.inviteNote = '';
+    toast('Invite created');
+    redraw();
+  };
+  const remove = async (v) => {
+    const active = inviteStatus(v) === 'active';
+    if (active && !(await confirmModal('Revoke invite', 'Nobody can join with it any more. People who already joined with it stay.', 'Revoke'))) return;
+    doAct('invite:remove', { id: v.id });
+  };
+
+  const row = (v) => {
+    const i = inviteInfo(v);
+    const active = i.status === 'Active';
+    const mine = p.admin || v.by.id === me().id;
+    return h(
+      'div',
+      { class: 'invite-row' },
+      h(
+        'div',
+        { class: 'row' },
+        h('strong', {}, v.label || 'Invite'),
+        h('span', { class: 'invite-status' + (active ? ' active' : ''), title: v.revoked ? `Revoked by ${v.revoked.by}, ${fmtTime(v.revoked.ts)}` : null }, i.status),
+        h('span', { class: 'grow' }),
+        mine ? h('button', { class: 'btn small ghost' + (active ? ' danger' : ''), onclick: () => remove(v) }, active ? 'Revoke' : 'Remove') : null
+      ),
+      // A working invite's token: every one for an administrator, your own otherwise
+      v.token ? h('div', { class: 'row tight' }, h('span', { class: 'invite-token' }, v.token), h('button', { class: 'btn small', onclick: () => copy(v.token, 'Invite') }, 'Copy')) : null,
+      h(
+        'div',
+        { class: 'muted small' },
+        `${i.type} · made by ${v.by.name}, ${fmtTime(v.ts)} · used ${i.uses}${v.maxUses ? '' : v.uses === 1 ? ' time' : ' times'} · `,
+        h('span', { title: v.expires ? new Date(v.expires).toLocaleString() : null }, v.expires ? (active ? `${i.left} left` : 'time ended') : 'no time limit')
+      ),
+      v.joins.length
+        ? h(
+            'details',
+            { class: 'muted small' },
+            h('summary', {}, `Who joined with it (${v.uses})`),
+            v.joins.map((j) => h('div', {}, `${profileOf(j.id, j.name).name} · ${fmtTime(j.ts)}`)),
+            v.uses > v.joins.length ? h('div', {}, `and ${v.uses - v.joins.length} earlier`) : null
+          )
+        : null
+    );
+  };
+
+  body.append(
+    h('h3', {}, 'Invites'),
+    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page. Administrators can copy any working invite again, everyone else the ones they made.'),
+    h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
+    h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
+    h('h3', {}, 'New invite'),
+    h(
+      'div',
+      { class: 'row invite-form' },
+      h('label', { class: 'field grow' }, h('span', {}, 'Note'), note),
+      h('label', { class: 'field' }, h('span', {}, 'Type'), type),
+      st.inviteType === 'multi' ? h('label', { class: 'field' }, h('span', {}, 'Uses'), uses) : null,
+      st.inviteType === 'timed' ? h('label', { class: 'field' }, h('span', {}, 'Lasts'), lasts) : null,
+      h('button', { class: 'btn', onclick: create }, 'Create')
+    ),
+    h('h3', {}, 'This server’s invites'),
+    st.invitesError
+      ? h('p', { class: 'muted small' }, st.invitesError)
+      : h('div', { class: 'emoji-list' }, st.invites.length ? [...st.invites].reverse().map(row) : [h('p', { class: 'muted small' }, 'No invites yet.')])
   );
 }
 

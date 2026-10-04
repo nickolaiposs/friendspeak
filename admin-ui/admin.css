@@ -144,6 +144,11 @@ td.nowrap { white-space: nowrap; }
 .secret-box .secret { font-family: var(--mono); background: var(--bg-0); border: 1px solid var(--line); border-radius: 6px; padding: 8px; word-break: break-all; user-select: all; }
 .newkey { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .newkey .field { flex: 1; min-width: 200px; max-width: 360px; }
+.newkey .field.narrow { flex: 0 1 auto; min-width: 120px; }
+.newkey .field[hidden] { display: none; }
+.joins { margin: 4px 0 0; padding-left: 18px; }
+.invite-cell { display: flex; gap: 10px; align-items: center; white-space: nowrap; }
+.invite-cell code { user-select: all; }
 .prose { max-width: 70ch; color: var(--muted); }
 
 /* log */

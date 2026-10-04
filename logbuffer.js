@@ -22,6 +22,7 @@ const REDACTED = '[redacted]';
 const PATTERNS = [
   [/\bfsa_[A-Za-z0-9_-]{16,}/g, 'fsa_' + REDACTED],
   [/\bdata:([\w.+-]+\/[\w.+-]+);base64,[A-Za-z0-9+/=_-]{32,}/g, `data:$1;base64,${REDACTED}`],
+  [/\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}\b/gi, 'invite ' + REDACTED], // an invite token (D51)
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ' + REDACTED],
   [/\b(password|passwd|token|secret|apikey|api_key|key)=[^&\s"']+/gi, `$1=${REDACTED}`],
 ];

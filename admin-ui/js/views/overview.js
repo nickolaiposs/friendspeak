@@ -46,7 +46,7 @@ function render(o, uptimeEl) {
       card('Access', kv([
         ['HTTPS', yn(o.https, 'On', 'Off')],
         o.fingerprint && ['Fingerprint', h('span', { class: 'mono small' }, o.fingerprint)],
-        ['Server password', yn(o.password, 'Set', 'Not set')],
+        ['Joining', o.inviteOnly ? `Needs an invite (${o.invites} working)` : 'Open to anyone with the address'],
         ['Local admin access', yn(o.adminLocal, 'On', 'Off')],
       ])),
       card('Counts', kv([

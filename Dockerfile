@@ -44,7 +44,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force \
     && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
 
-COPY server.js updater.js admin.js logbuffer.js ./
+COPY server.js updater.js admin.js logbuffer.js crashlog.js ./
 COPY admin-ui ./admin-ui
 COPY public/js/util.js ./public/js/util.js
 COPY docker/healthcheck.js ./docker/healthcheck.js
