@@ -5,6 +5,7 @@
 // goes through it and relays its signaling. Without the desktop app, or where
 // the sidecar isn't there or keeps failing, `can()` is false and shares use
 // the browser engine as before.
+import { log } from './log.js';
 import { settings } from './store.js';
 
 const bridge = window.friendspeakDesktop?.media || null;
@@ -15,6 +16,7 @@ let asked = null;
 bridge?.on((ev) => {
   // The sidecar went away: every share it carried has stopped
   if (ev.ev === 'exit') {
+    log.warn(`native media process exited${ev.gone ? ' for good' : ''}`);
     caps = ev.gone ? false : null;
     asked = null;
     for (const kind of Object.keys(handlers)) handlers[kind]?.({ ev: 'stopped', kind, reason: 'the native media process stopped' });

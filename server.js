@@ -14,13 +14,46 @@ const { Server } = require('socket.io');
 const { startGame } = require('./game');
 const { createUpdater } = require('./updater');
 const logbuffer = require('./logbuffer');
+const { createCrashLog } = require('./crashlog');
 const { createAdmin } = require('./admin');
 
 const VERSION = require('./package.json').version;
 
+// The running server's crash handling (#50, #51): the process-wide handlers below
+// use whichever startServer ran last, and the CLI's failure handler uses it too
+let crashState = null; // { crashes, logs, saveNow(), clearMarker() }
+let crashHandlers = false;
+const recentRejections = new Map(); // stack or message -> when it was last reported
+
+function installCrashHandlers() {
+  if (crashHandlers) return;
+  crashHandlers = true;
+  let dying = false;
+  process.on('uncaughtException', (err) => {
+    if (dying) return;
+    dying = true;
+    try {
+      console.error('[crash] uncaught exception:', err);
+    } catch {}
+    const c = crashState;
+    c?.crashes.write('uncaughtException', err, { fatal: true });
+    c?.saveNow();
+    c?.clearMarker();
+    c?.logs?.flushSync();
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[crash] unhandled rejection:', reason);
+    const key = String(reason instanceof Error ? `${reason.name}: ${reason.message}` : reason).slice(0, 500);
+    const now = Date.now();
+    for (const [k, t] of recentRejections) if (now - t > 60e3) recentRejections.delete(k);
+    if (recentRejections.has(key)) return;
+    recentRejections.set(key, now);
+    crashState?.crashes.write('unhandledRejection', reason, { fatal: false });
+  });
+}
+
 async function startServer(opts = {}) {
-  // Keep the last console lines for the admin dashboard (D34)
-  const logs = opts.captureLogs === false ? null : logbuffer.install();
   const PORT = opts.port ?? 3000;
   const HOST = opts.host;
   const USE_HTTPS = !!opts.https;
@@ -28,6 +61,56 @@ async function startServer(opts = {}) {
   const GIPHY_API_KEY = opts.giphyKey || '';
   let fingerprint = null; // SHA-256 of the self-signed certificate, when HTTPS
   const DATA_DIR = opts.dataDir || path.join(__dirname, 'data');
+  // Keep the console lines for the admin dashboard (D34), in memory and on disk (#50)
+  const logs =
+    opts.captureLogs === false ? null : logbuffer.install({ dir: path.join(DATA_DIR, 'logs'), retentionDays: opts.logs?.retentionDays ?? 14, maxBytes: opts.logs?.maxBytes ?? 50 * 1024 ** 2 });
+  if (logs) for (const secret of [PASSWORD, GIPHY_API_KEY, opts.admin?.key, opts.update?.token, opts.update?.watchtowerToken]) logs.redact(secret);
+  const bootTime = Date.now();
+  const earlierLines = logs && opts.crashReports ? logs.tail(200) : []; // from before this boot, read before it logs anything
+  let usersRef = null;
+  const crashes = createCrashLog({ dir: path.join(DATA_DIR, 'crashes'), logs, version: VERSION, context: () => ({ online: usersRef ? usersRef.size : 0, docker: !!opts.update?.inDocker }) });
+  const MARKER = path.join(DATA_DIR, 'logs', '.running');
+  let ownsMarker = false;
+  const clearMarker = () => {
+    if (!ownsMarker) return;
+    ownsMarker = false;
+    try {
+      fs.rmSync(MARKER, { force: true });
+    } catch {}
+  };
+  crashState = { crashes, logs, saveNow: () => {}, clearMarker };
+  if (opts.crashReports) {
+    installCrashHandlers();
+    // A marker left behind means the last run never got to close()
+    let prev = null;
+    try {
+      prev = JSON.parse(fs.readFileSync(MARKER, 'utf8'));
+    } catch {}
+    const alive = (pid) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        return err.code === 'EPERM';
+      }
+    };
+    const another = prev && Number.isInteger(prev.pid) && prev.pid !== process.pid && alive(prev.pid); // another server on this data dir: leave it alone
+    if (!another) {
+      if (prev) {
+        crashes.write('unclean-exit', 'The server stopped without shutting down (killed, out of memory or power loss)', {
+          fatal: true,
+          // uptime, memory and who was online are this process's, not the one that died
+          extra: { uptime: null, memory: null, online: null, startedAt: Number(prev.startedAt) || null, previousVersion: typeof prev.version === 'string' ? prev.version.slice(0, 40) : null, lines: earlierLines.filter((l) => l.ts < bootTime) },
+        });
+        console.warn('[server] the previous run did not shut down cleanly');
+      }
+      try {
+        fs.mkdirSync(path.dirname(MARKER), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(MARKER, JSON.stringify({ pid: process.pid, startedAt: bootTime, version: VERSION }), { mode: 0o600 });
+        ownsMarker = true;
+      } catch {}
+    }
+  }
   const STATE_FILE = path.join(DATA_DIR, 'state.json');
   const MAX_HISTORY = 500;
   const MAX_MESSAGE_LEN = 4000;
@@ -173,6 +256,13 @@ async function startServer(opts = {}) {
   });
 
   let saveTimer = null;
+  // A full disk or a read-only volume fails every save: say so, but not on every one
+  let lastSaveError = 0;
+  function saveFailed(what, err) {
+    if (Date.now() - lastSaveError < 60e3) return;
+    lastSaveError = Date.now();
+    console.error(`[server] could not save ${what}: ${err.message}`);
+  }
   function writeState() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = STATE_FILE + '.tmp';
@@ -181,7 +271,13 @@ async function startServer(opts = {}) {
   }
   function save() {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(writeState, 500);
+    saveTimer = setTimeout(() => {
+      try {
+        writeState();
+      } catch (err) {
+        saveFailed('the server state', err);
+      }
+    }, 500);
     adminRef.current?.notify('state');
   }
   save();
@@ -189,6 +285,8 @@ async function startServer(opts = {}) {
   // ---------- helpers ----------
 
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
+  // Who a log line is about: a name is user input, so no control characters; plus the start of the id
+  const whoIs = (p) => `${String(p?.name ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 32) || 'anon'} (${String(p?.id ?? '').slice(0, 8)})`;
   const channel = (cid) => state.channels.find((c) => c.id === cid);
   const isDataImage = (v, max) =>
     typeof v === 'string' && /^data:image\/(png|jpe?g|gif|webp);base64,/.test(v) && v.length <= max * 1.4;
@@ -451,12 +549,24 @@ async function startServer(opts = {}) {
     const u = users.get(String(req.get('x-friendspeak-sid') || ''));
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
     const ch = channel(String(req.query.channelId || ''));
-    if (!ch || ch.type !== 'text') return res.status(400).json({ error: 'No such channel' });
-    if (!permsOf(u.profile.id).channels[ch.id]?.send) return res.status(403).json({ error: noPerm('send messages here').error });
+    if (!ch || ch.type !== 'text') {
+      console.warn(`[files] upload by ${whoIs(u.profile)} refused: no such text channel`);
+      return res.status(400).json({ error: 'No such channel' });
+    }
+    if (!permsOf(u.profile.id).channels[ch.id]?.send) {
+      console.warn(`[files] upload by ${whoIs(u.profile)} refused: no permission to send in #${ch.name}`);
+      return res.status(403).json({ error: noPerm('send messages here').error });
+    }
     const size = Number(req.get('content-length'));
-    if (!Number.isInteger(size) || size <= 0) return res.status(400).json({ error: 'Empty file' });
+    if (!Number.isInteger(size) || size <= 0) {
+      console.warn(`[files] upload by ${whoIs(u.profile)} refused: empty or unsized body`);
+      return res.status(400).json({ error: 'Empty file' });
+    }
     const free = MAX_STORAGE - usedBytes() - reserved;
-    if (size > free) return res.status(413).json({ error: `Not enough storage on this server (${fmtBytes(Math.max(0, free))} free)` });
+    if (size > free) {
+      console.warn(`[files] upload by ${whoIs(u.profile)} refused: ${size} bytes, only ${Math.max(0, free)} free of ${MAX_STORAGE}`);
+      return res.status(413).json({ error: `Not enough storage on this server (${fmtBytes(Math.max(0, free))} free)` });
+    }
     let name;
     try {
       name = decodeURIComponent(String(req.get('x-file-name') || ''));
@@ -476,12 +586,19 @@ async function startServer(opts = {}) {
       finished = true;
       reserved -= size;
       if (!err && got !== size) err = new Error('Upload was cut short');
+      if (!err) {
+        try {
+          fs.renameSync(tmp, filePath(fid));
+        } catch (e) {
+          err = Object.assign(new Error('Could not store the file'), { status: 500, cause: e });
+        }
+      }
       if (err) {
+        console.warn(`[files] upload by ${whoIs(u.profile)} failed: ${err.cause ? err.cause.message : err.message} (${got} of ${size} bytes)`);
         fs.rm(tmp, { force: true }, () => {});
         if (!res.headersSent) res.status(err.status || 400).json({ error: err.message });
         return;
       }
-      fs.renameSync(tmp, filePath(fid));
       const f = {
         id: fid,
         name,
@@ -561,7 +678,14 @@ async function startServer(opts = {}) {
     fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(mail)));
     fs.renameSync(tmp, MAIL_FILE);
   }
-  const saveMail = () => (mailTimer ||= setTimeout(writeMail, 1000));
+  const saveMail = () =>
+    (mailTimer ||= setTimeout(() => {
+      try {
+        writeMail();
+      } catch (err) {
+        saveFailed('the mailboxes', err);
+      }
+    }, 1000));
   function sweepMail() {
     const now = Date.now();
     for (const [addr, box] of mail) {
@@ -583,6 +707,18 @@ async function startServer(opts = {}) {
   // socket.id -> { profile, voice: channelId|null, muted, deafened, sharing, camera, since, ip }
   // (`since` and `ip` are for the admin dashboard only; userList() never sends them)
   const users = new Map();
+  usersRef = users;
+  // On a crash: what close() would write, each in its own try
+  crashState.saveNow = () => {
+    try {
+      writeState();
+    } catch {}
+    try {
+      if (mailTimer) writeMail();
+    } catch {}
+  };
+  // Who an action is credited to in the log: a member, or the dashboard (with the key that signed in)
+  const actorName = (actor) => (isDash(actor) ? 'Admin dashboard' + (actor.label ? ` (${String(actor.label).replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 40)})` : '') : whoIs({ ...state.profiles[actor?.profileId], id: actor?.profileId }));
 
   // Everyone online. `g`: the perms of whoever this is for; a voice channel they can't see is left out.
   // A force-muted person is muted whatever they send, unless they may lift it themselves.
@@ -890,15 +1026,18 @@ async function startServer(opts = {}) {
         save();
         kick((s) => s.data.profileId === profileId || (banIp && clientIp(s) === banIp), 'banned');
         io.emit('bans', publicBans());
+        console.log(`[mod] ${actorName(actor)} banned ${whoIs({ ...state.profiles[profileId], id: profileId })}${banIp ? ' and their IP' : ''}`);
         return { ok: true, ipSkipped };
       },
 
       unban(actor, banId) {
         const denied = need(actor, 'ban', 'unban members');
         if (denied) return denied;
+        const lifted = state.bans.find((b) => b.id === banId);
         state.bans = state.bans.filter((b) => b.id !== banId);
         save();
         io.emit('bans', publicBans());
+        if (lifted) console.log(`[mod] ${actorName(actor)} unbanned ${whoIs({ name: lifted.name, id: lifted.profileId })}`);
         return { ok: true };
       },
 
@@ -910,6 +1049,7 @@ async function startServer(opts = {}) {
         if (actor.profileId && profileId === actor.profileId) return { error: 'You can’t remove yourself' };
         if (!touchable(actor, profileId)) return ADMIN_TARGET;
         kick((s) => s.data.profileId === profileId, 'removed');
+        console.log(`[mod] ${actorName(actor)} removed ${whoIs({ ...state.profiles[profileId], id: profileId })} from the server`);
         delete state.profiles[profileId];
         const hadRoles = Object.hasOwn(state.memberRoles, profileId);
         if (hadRoles) delete state.memberRoles[profileId];
@@ -944,6 +1084,8 @@ async function startServer(opts = {}) {
           if (!game) for (const u of users.values()) u.playing = false;
         }
         save();
+        const what = [name !== undefined && 'name', icon !== undefined && (icon ? 'icon' : 'icon removed'), quality !== undefined && `voice quality ${quality}`, game !== undefined && (game ? 'game on' : 'game off')].filter(Boolean);
+        console.log(`[server] ${actorName(actor)} changed the server settings: ${what.join(', ') || 'no change'}`);
         io.emit('server', { name: state.name, icon: state.icon, game: gameInfo(), audioQuality: audioQuality() });
         if (game === false) broadcastUsers();
         return { ok: true };
@@ -952,7 +1094,7 @@ async function startServer(opts = {}) {
       // Forget the key a profile id is pinned to (D42), for someone who lost it:
       // the next hello that signs with any key claims the id. Dashboard only,
       // or anyone could take over anyone's profile.
-      resetKey(profileId) {
+      resetKey(profileId, dashActor = { dashboard: true }) {
         profileId = str(profileId, 64);
         if (!profileId || !pinOf(profileId)) return { error: 'That profile has no key here' };
         delete state.pins[profileId];
@@ -971,6 +1113,7 @@ async function startServer(opts = {}) {
           }
         }
         save();
+        console.log(`[mod] ${actorName(dashActor)} reset the profile key of ${whoIs({ ...state.profiles[profileId], id: profileId })}`);
         return { ok: true };
       },
 
@@ -1000,6 +1143,7 @@ async function startServer(opts = {}) {
         const role = { id: id(), name, color: color.toLowerCase(), perms: p.perms, grantable: gr.grantable };
         state.roles.push(role);
         permsChanged();
+        console.log(`[mod] ${actorName(actor)} created the role "${role.name}"`);
         return { ok: true, role };
       },
 
@@ -1049,6 +1193,7 @@ async function startServer(opts = {}) {
           state.roles.splice(Math.max(0, Math.min(position, state.roles.length)), 0, role);
         }
         permsChanged();
+        console.log(`[mod] ${actorName(actor)} updated the role "${role.name}": ${[name !== undefined && 'name', color !== undefined && 'color', position !== undefined && 'position', (newPerms || newGrantable) && 'permissions'].filter(Boolean).join(', ') || 'no change'}`);
         return { ok: true, role };
       },
 
@@ -1073,6 +1218,7 @@ async function startServer(opts = {}) {
           }
         }
         permsChanged();
+        console.log(`[mod] ${actorName(actor)} deleted the role "${role.name}"`);
         return { ok: true };
       },
 
@@ -1105,6 +1251,7 @@ async function startServer(opts = {}) {
           if (list.length) state.memberRoles[profileId] = list;
           else delete state.memberRoles[profileId];
           permsChanged();
+          console.log(`[mod] ${actorName(actor)} changed the roles of ${whoIs({ ...state.profiles[profileId], id: profileId })}: ${list.map((x) => byId(x)?.name || '?').join(', ') || 'none'}`);
         }
         return { ok: true, roles: list };
       },
@@ -1133,6 +1280,7 @@ async function startServer(opts = {}) {
         state.defaultPerms = next;
         state.defaultGrantable = list;
         permsChanged();
+        console.log(`[mod] ${actorName(actor)} changed the default permissions`);
         return { ok: true, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable };
       },
     };
@@ -1145,24 +1293,31 @@ async function startServer(opts = {}) {
           try {
             fn(payload || {}, typeof ack === 'function' ? ack : () => {});
           } catch (err) {
-            console.error(event, err);
+            console.error(`[socket] ${event}:`, err);
           }
         });
 
       socket.on('hello', ({ profile, password, proof } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        if (PASSWORD && password !== PASSWORD) return ack({ error: 'Wrong server password' });
+        if (PASSWORD && password !== PASSWORD) {
+          console.warn(`[auth] wrong server password from ${clientIp(socket)}`);
+          return ack({ error: 'Wrong server password' });
+        }
         const p = cleanProfile(profile);
-        if (banFor(p.id, clientIp(socket))) return ack({ error: 'You are banned from this server', banned: true });
+        if (banFor(p.id, clientIp(socket))) {
+          console.warn(`[auth] banned ${whoIs(p)} refused`);
+          return ack({ error: 'You are banned from this server', banned: true });
+        }
         // Prove the profile's key (D42). Apps from before D42 send no proof: they
         // can still use a profile id that no key has claimed yet, as before.
         const pin = pinOf(p.id);
         const card = p.card && cardValid(p.card) ? p.card : undefined;
         const signed = !!card && verifySig(card.s, str(proof, 128), helloText(socket.id, hostOf(socket)));
         // A proof that doesn't check out is a bug or a proxy that rewrites Host, never a reason to go on unprotected
-        if (proof && !signed) return ack({ error: 'Could not verify your profile key. If this server is behind a reverse proxy, it must pass the original Host header.', key: true });
-        if (pin && !signed) return ack({ error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
-        if (pin && card.s !== pin) return ack({ error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
+        const refuse = (why, res) => (console.warn(`[auth] ${whoIs(p)} refused: ${why}`), ack(res));
+        if (proof && !signed) return refuse('the profile key proof did not verify (a proxy that rewrites Host?)', { error: 'Could not verify your profile key. If this server is behind a reverse proxy, it must pass the original Host header.', key: true });
+        if (pin && !signed) return refuse('the profile is pinned to a key and the app sent none', { error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
+        if (pin && card.s !== pin) return refuse('signed with a different key than the one pinned (D42)', { error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
         if (signed && !pin) state.pins[p.id] = card.s;
         p.card = card;
         lastIp.set(p.id, clientIp(socket));
@@ -1179,11 +1334,13 @@ async function startServer(opts = {}) {
           } else if (other.voice) io.to('voice:' + other.voice).emit('voice:peer-left', { sid });
           users.delete(sid);
         }
+        if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
         socket.data.profileId = p.id;
         users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
         state.profiles[p.id] = storedProfile(p);
         save();
         const g = permsOf(p.id);
+        console.log(`[server] ${whoIs(p)} connected`);
         ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g });
         socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
         broadcastUsers();
@@ -1289,6 +1446,7 @@ async function startServer(opts = {}) {
         const g = permsOf(myId());
         if (list[i].author !== myId() && !(g.manageMessages && g.channels[channelId]?.view)) return ack(noPerm('delete other people’s messages'));
         const [m] = list.splice(i, 1);
+        if (m.author !== myId()) console.log(`[mod] ${whoIs(users.get(socket.id).profile)} deleted a message by ${whoIs({ name: m.name, id: m.author })} in #${channel(channelId).name}`);
         save();
         toViewers(channelId, 'msg:deleted', { channelId, messageId });
         if (m.files?.length) deleteFiles(m.files.map((f) => f.id));
@@ -1357,6 +1515,7 @@ async function startServer(opts = {}) {
         const ch = { id: id(), name, type };
         state.channels.push(ch);
         permsChanged({ roles: false });
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} created the ${type} channel "${name}"`);
         ack({ ok: true, channel: ch });
       });
 
@@ -1365,7 +1524,9 @@ async function startServer(opts = {}) {
         name = str(name, MAX_CHANNEL_NAME).trim();
         if (!ch || !name) return ack({ error: 'no such channel' });
         if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
+        const was = ch.name;
         ch.name = ch.type === 'text' ? name.toLowerCase().replace(/\s+/g, '-') : name;
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} renamed the channel "${was}" to "${ch.name}"`);
         save();
         for (const [sid, u] of users) if (canView(u.profile.id, cid)) io.to(sid).emit('channels', channelsFor(permsOf(u.profile.id)));
         ack({ ok: true });
@@ -1381,6 +1542,7 @@ async function startServer(opts = {}) {
         if (Object.keys(ov).length) ch.overrides = ov;
         else delete ch.overrides;
         permsChanged({ roles: false });
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} changed the permissions of the channel "${ch.name}"`);
         ack({ ok: true });
       });
 
@@ -1389,6 +1551,7 @@ async function startServer(opts = {}) {
         if (!ch) return ack({ error: 'no such channel' });
         if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
         if (state.channels.filter((c) => c.type === ch.type).length <= 1) return ack({ error: `There must be at least one ${ch.type} channel` });
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} deleted the ${ch.type} channel "${ch.name}"`);
         state.channels = state.channels.filter((c) => c.id !== cid);
         delete state.messages[cid];
         deleteFiles(state.files.filter((f) => f.channelId === cid).map((f) => f.id));
@@ -1418,6 +1581,8 @@ async function startServer(opts = {}) {
         const g = permsOf(myId());
         const files = (Array.isArray(ids) ? ids : []).map((x) => fileById(str(x, 64))).filter(Boolean);
         if (files.some((f) => f.by !== myId() && !(g.manageFiles && g.channels[f.channelId]?.view))) return ack(noPerm('delete other people’s files'));
+        const others = files.filter((f) => f.by !== myId());
+        if (others.length) console.log(`[files] ${whoIs(users.get(socket.id).profile)} deleted ${others.length} file${others.length === 1 ? '' : 's'} uploaded by others (${others.reduce((n, f) => n + f.size, 0)} bytes)`);
         deleteFiles(files.map((f) => f.id));
         ack({ ok: true });
       });
@@ -1471,12 +1636,15 @@ async function startServer(opts = {}) {
         const u = users.get(socket.id);
         const peers = [...users.entries()].filter(([, x]) => x.voice === channelId).map(([sid]) => sid);
         u.voice = channelId;
+        console.debug(`[voice] ${whoIs(u.profile)} joined ${ch.name}`);
         socket.join('voice:' + channelId);
         ack({ ok: true, peers });
         broadcastUsers();
       });
 
       on('voice:leave', () => {
+        const left = users.get(socket.id)?.voice;
+        if (left) console.debug(`[voice] ${whoIs(users.get(socket.id).profile)} left ${channel(left)?.name ?? 'a deleted channel'}`);
         leaveVoice(socket);
         broadcastUsers();
       });
@@ -1492,6 +1660,7 @@ async function startServer(opts = {}) {
         const [sid] = [...users].find(([, x]) => x.profile.id === profileId && x.voice && me.channels[x.voice]?.view) || [];
         const target = sid && io.sockets.sockets.get(sid);
         if (!target) return ack({ error: 'They aren’t in a voice channel' });
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} removed ${whoIs({ ...state.profiles[profileId], id: profileId })} from voice`);
         leaveVoice(target);
         target.emit('voice:kicked', { reason: 'kicked', by: users.get(socket.id).profile.name });
         broadcastUsers();
@@ -1512,6 +1681,7 @@ async function startServer(opts = {}) {
           state.forceMuted = muted ? [...state.forceMuted, profileId] : state.forceMuted.filter((x) => x !== profileId);
           save();
           const by = users.get(socket.id).profile.name;
+          console.log(`[mod] ${whoIs(users.get(socket.id).profile)} ${muted ? 'force-muted' : 'lifted the force-mute of'} ${whoIs({ ...state.profiles[profileId], id: profileId })}`);
           for (const [sid, x] of users) if (x.profile.id === profileId) io.to(sid).emit('voice:forcemuted', { muted, by });
           broadcastUsers();
         }
@@ -1566,6 +1736,7 @@ async function startServer(opts = {}) {
         if (!u) return;
         leaveVoice(socket);
         users.delete(socket.id);
+        console.log(`[server] ${whoIs(u.profile)} disconnected`);
         const stored = Object.hasOwn(state.profiles, u.profile.id) && state.profiles[u.profile.id];
         if (stored) {
           stored.seen = Date.now();
@@ -1591,6 +1762,7 @@ async function startServer(opts = {}) {
           return { available: false, reason: 'The game server failed to start: ' + err.message };
         });
   gameRef.current = game;
+  let unsubCrashes = null;
   const adminOn = opts.admin?.enabled !== false;
   const admin = adminOn
     ? (adminRef.current = createAdmin({
@@ -1617,16 +1789,27 @@ async function startServer(opts = {}) {
           state.updateSettings = o;
           save();
         },
-        logs: logs || { lines: () => ({ lines: [], more: false }), on: () => () => {} },
+        logs: logs || { lines: () => ({ lines: [], more: false }), query: async () => ({ lines: [], more: false }), info: () => ({ persisted: false, bytes: 0, files: 0, oldest: null, retentionDays: 0, maxBytes: 0 }), on: () => () => {}, scrub: (t) => String(t) },
+        crashes,
         options: { local: opts.admin?.local, key: opts.admin?.key },
       }))
     : null;
+  unsubCrashes = admin ? crashes.on(() => admin.notify('crashes')) : null;
+  // Unexpected errors in a route (the admin API has its own handler): logged without the stack, answered without it too
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const where = req.path.startsWith('/files/') ? '/files/…' : req.path.slice(0, 100);
+    if (err && err.status && err.status < 500) return res.status(err.status).json({ error: 'Invalid request' });
+    console.error(`[http] ${req.method} ${where} failed: ${err && err.message}`);
+    res.status(500).json({ error: 'Internal error' });
+  });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(PORT, HOST, resolve);
   });
   updater.start();
   const port = server.address().port;
+  console.log(`[server] version ${VERSION} listening on port ${port}`);
   return {
     port,
     version: VERSION,
@@ -1648,10 +1831,22 @@ async function startServer(opts = {}) {
         clearTimeout(saveTimer);
         clearInterval(sweepTimer);
         clearInterval(mailSweepTimer);
-        if (mailTimer) writeMail();
+        try {
+          if (mailTimer) writeMail();
+        } catch (err) {
+          saveFailed('the mailboxes', err);
+        }
         updater.stop();
         admin?.close();
-        writeState();
+        unsubCrashes?.();
+        try {
+          writeState();
+        } catch (err) {
+          saveFailed('the server state', err);
+        }
+        console.log('[server] shutting down');
+        logs?.flushSync();
+        clearMarker();
         closing = true;
         io.close();
         server.close(() => resolve());
@@ -1698,6 +1893,8 @@ if (require.main === module) {
     password: env.PASSWORD,
     giphyKey: env.GIPHY_API_KEY,
     maxStorage: env.MAX_STORAGE,
+    logs: { retentionDays: /^\s*\d+\s*$/.test(env.LOG_RETENTION_DAYS || '') ? Number(env.LOG_RETENTION_DAYS) : 14, maxBytes: parseSize(env.LOG_MAX_SIZE, 50 * 1024 ** 2) },
+    crashReports: true,
     dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
     admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY },
@@ -1736,6 +1933,9 @@ if (require.main === module) {
     process.once('SIGINT', shutdown);
   }, (err) => {
     console.error(err);
+    crashState?.crashes.write('startup', err, { fatal: true });
+    crashState?.clearMarker();
+    crashState?.logs?.flushSync();
     process.exit(1);
   });
 }
