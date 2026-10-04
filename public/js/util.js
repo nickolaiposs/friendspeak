@@ -324,14 +324,56 @@ export function comboFromEvent(e) {
   return parts.join('+');
 }
 
+// ---- invites (D51): shared by the app's server settings and the admin dashboard ----
+
+// 'active', or why an invite no longer lets anyone in (the rule of inviteStatus() in server.js)
+export const inviteStatus = (v, now = Date.now()) => (v.revoked ? 'revoked' : v.expires && v.expires <= now ? 'expired' : v.maxUses && v.uses >= v.maxUses ? 'used' : 'active');
+
+// What is left of a time span: "3d 4h", "2h 5m", "12m", "under a minute"
+export function fmtLeft(ms) {
+  const m = Math.floor(ms / 60e3);
+  if (m < 1) return 'under a minute';
+  const d = Math.floor(m / 1440);
+  const hr = Math.floor((m % 1440) / 60);
+  return d ? `${d}d${hr ? ` ${hr}h` : ''}` : hr ? `${hr}h${m % 60 ? ` ${m % 60}m` : ''}` : `${m}m`;
+}
+
+// An invite in words: { type, uses, left, status }
+export function inviteInfo(v, now = Date.now()) {
+  const status = inviteStatus(v, now);
+  const type = [v.maxUses === 1 ? 'One use' : v.maxUses ? 'Multi-use' : '', v.expires ? 'Time-expiring' : ''].filter(Boolean).join(', ') || 'Never expires';
+  return {
+    type,
+    uses: v.maxUses ? `${v.uses} of ${v.maxUses}` : String(v.uses),
+    left: !v.expires ? 'No limit' : status === 'active' ? fmtLeft(v.expires - now) : v.expires <= now ? 'Ended' : '',
+    status: { active: 'Active', revoked: 'Revoked', expired: 'Expired', used: 'Used up' }[status],
+  };
+}
+
+// The kinds of invite the UIs offer, and what each sends to the server
+export const INVITE_TYPES = [
+  ['permanent', 'Never expires (until revoked)'],
+  ['single', 'One use'],
+  ['multi', 'Multi-use'],
+  ['timed', 'Time-expiring'],
+];
+export const INVITE_DURATIONS = [
+  [30 * 60e3, '30 minutes'],
+  [3600e3, '1 hour'],
+  [6 * 3600e3, '6 hours'],
+  [864e5, '1 day'],
+  [7 * 864e5, '7 days'],
+  [30 * 864e5, '30 days'],
+];
+
 export function normalizeAddress(input) {
   let a = String(input || '').trim();
   if (!a) return '';
   const explicitScheme = /^https?:\/\//i.test(a);
-  if (!explicitScheme) a = (location.protocol === 'https:' ? 'https://' : 'http://') + a;
+  if (!explicitScheme) a = 'https://' + a; // a plain http server takes a typed "http://"
   try {
     const u = new URL(a);
-    // "192.168.1.20" means the default friendspeak port; "https://host" means exactly that
+    // "192.168.1.20" means https on the default friendspeak port; "https://host" means exactly that
     if (!explicitScheme && !/^https?:\/\/[^/]+:\d+/.test(a)) u.port = '3000';
     return u.origin;
   } catch {

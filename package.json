@@ -1,6 +1,6 @@
 {
   "name": "friendspeak",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Self-hosted Discord/TeamSpeak-style chat for friends with voice, GIFs, emojis, soundboards and an optional virtual penguin world (Yukon, assets not included). No accounts.",
   "main": "desktop/main.js",
   "scripts": {
@@ -8,12 +8,14 @@
     "start:https": "HTTPS=1 node server.js",
     "desktop": "electron .",
     "build:game": "node scripts/build-game.js",
+    "build:media": "node scripts/build-media.js",
+    "build:denoise": "bash scripts/denoise/build.sh",
     "postinstall": "node scripts/build-game.js --if-possible",
-    "dist": "electron-builder",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux",
-    "dist:all": "electron-builder --mac --win --linux",
+    "dist": "node scripts/build-media.js --if-possible && electron-builder",
+    "dist:mac": "node scripts/build-media.js --if-possible && electron-builder --mac",
+    "dist:win": "node scripts/build-media.js --if-possible && electron-builder --win",
+    "dist:linux": "node scripts/build-media.js --if-possible && electron-builder --linux",
+    "dist:all": "node scripts/build-media.js --if-possible && electron-builder --mac --win --linux",
     "release-notes": "node scripts/release-notes.js"
   },
   "type": "commonjs",
@@ -73,6 +75,12 @@
       "!node_modules/@mediapipe/tasks-vision/*.cjs",
       "!node_modules/@mediapipe/tasks-vision/vision_bundle.js",
       "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "native/dist/${os}-${arch}",
+        "to": "native"
+      }
     ],
     "mac": {
       "category": "public.app-category.social-networking",

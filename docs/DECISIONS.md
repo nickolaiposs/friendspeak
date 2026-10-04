@@ -18,12 +18,12 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** port-forwarding one TCP port is enough. The game crashing the process takes chat down too (acceptable at this scale).
 **Alternatives:** Yukon's default of separate ports under pm2 behind a reverse proxy.
 
-## D3: No accounts, client-owned identity · Active (spoofable ids superseded by D42)
+## D3: No accounts, client-owned identity · Active (spoofable ids superseded by D42; "anyone can manage" superseded by D43)
 **Context:** the core requirement is "saved profiles with no signup anywhere".
 **Decision:**
 - A profile (uuid, name, color, avatar, status) is created and stored in the client, and it can be exported/imported.
 - Servers trust the profile id they're sent.
-- Access control is at most one shared server password.
+- Access control is at most one shared server password (replaced by invites, D51).
 - Anyone connected can manage channels and emojis. Only the author can edit or delete a message.
 
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
@@ -166,7 +166,7 @@ Without a mic, users join **listen-only** instead of failing.
 - Desktop clients pin a server's certificate per hostname after the user confirms its fingerprint (SSH-style). A changed certificate triggers a louder warning.
 - Prompts only happen when the user connects to a server (`trustServer` IPC), never from verify-proc callbacks. That way a chat image from a bad-cert host can't pop a trust dialog.
 
-**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). Friends must type `https://` in the address, because scheme-less addresses still default to http. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
+**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). An address typed without a scheme means https (port 3000 unless one is given), so a plain HTTP server takes a typed `http://`. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
 **Alternatives:** blanket `certificate-error` acceptance, which would encrypt but allow trivial MITM; Let's Encrypt, which needs a domain.
 
 ## D21: Production packaging: Docker image + unsigned cross-platform installers · Active
@@ -236,7 +236,7 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** everyone, including the host, needs the desktop app. D7's browser routes (localhost UI, self-signed HTTPS in a browser) no longer apply; the app is always a secure context. The game client is still served by the server, because its assets live there and it runs in an iframe from the server's origin (D15).
 **Alternatives:** keeping the web client as an option (two supported surfaces, and the mic caveats of D7).
 
-## D27: The offline list, removals and bans follow the "friends" trust model · Active (DMs superseded by D28)
+## D27: The offline list, removals and bans follow the "friends" trust model · Active (DMs superseded by D28; who may remove and ban by D43)
 **Context:** friends asked for Discord-style direct messages, to see people who aren't online, and to keep someone out of the server. There are no accounts and profile ids are spoofable (D3), and every profile id is visible to everyone in `users` and `profiles`.
 **Decision:**
 - ~~**DMs** were threads in `state.dms`, relayed and stored by the server.~~ Replaced by peer-to-peer DMs (D28); old `state.dms` data is dropped on load.
@@ -294,7 +294,7 @@ Without a mic, users join **listen-only** instead of failing.
 - The background connection carries voice only: it keeps `users`, channels and the server's name current for the voice panel and the stage, but ignores messages. Coming back loads history again, like a fresh connect.
 - No server or protocol change. To the call's server you are simply still connected, and you appear online there.
 
-**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
+**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect); since D50 it ends any call and leaves every server.
 **Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
 
 ## D32: DMs get keypair identities, end-to-end sealing, server mailboxes, friend codes and images · Active
@@ -339,7 +339,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -446,7 +446,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** the same pipeline in a worker (keeps the UI thread free, but MediaPipe's loader uses `importScripts`, which module workers don't have, and a classic worker can't import the ES bundle without a build step); compositing in WebGL on MediaPipe's own context (no mask readback, but far more code for a 256 px mask); TensorFlow.js body-segmentation (wraps the same model with a bigger runtime); ONNX Runtime Web with MODNet or Robust Video Matting (cleaner edges, models of tens of MB and much more GPU); the operating system's effects (macOS Portrait, Windows Studio Effects: free where present, but hardware-dependent and missing on Linux); blurring on the viewer's side (the room would still leave the sender's machine); shipping stock photos as presets (licensing, and megabytes in every installer); a "don't show the preview again" switch (not asked for; the dialog is also where the background is chosen).
 
-## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active
+## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active (mic processing amended by D44 and D48; noise suppression replaced by D47)
 **Context:** D35's processing (RNNoise, a noise gate, speaker mode, the browser's echo canceller and automatic gain) gave people many options and changed how they sounded in ways they didn't ask for (issue #44). Toggling noise reduction during a call was also reported to crash the app (#43). Voice used WebRTC's default Opus: mono, about 32 kbps, so soundboard clips and music sounded flat (#45). And the old "Test mic" only showed a level: you couldn't hear yourself, and not at all during a call (#48).
 **Decision:**
 - **One mic option:** the browser's (WebRTC's) noise suppression, on by default. Echo cancellation and automatic gain are explicitly off; there is no RNNoise, gate or speaker mode. `mic-worklet.js` is gone, and nothing in the app loads the vendored RNNoise files any more.
@@ -519,3 +519,213 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 - No new keys: friend codes, mailboxes and DM sealing (D32) keep using the same key pairs, so nothing already stored changes.
 
 **Alternatives:** the profile id becoming the key hash (rejected in D32 for the same reasons: it renames every profile and breaks history, bans and roles); a server-issued nonce event before `hello` (an extra round trip and a new event old servers don't send, where the socket id already is a fresh server-chosen value); keys on the server (accounts, against D3); refusing every unsigned `hello` (locks out old apps on profiles nobody can take from them anyway); trusting `X-Forwarded-Host` (a relaying server would set it to its own name); letting a removal drop the pin (anyone in the app could then take over a member's profile).
+
+## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active
+**Context:** issue #2. Anyone who knew the address (and password) could do everything: channels, emojis, the server's name and icon, files, removals and bans (D3, D27). Roles were labels set in the dashboard (D34). Since D42 a profile id with a pinned key can't be copied, so permissions can finally hang on a profile.
+**Decision:**
+- **Permissions:** `admin` (everything, ignores every other setting), `view`, `send` (message in text channels, join voice channels), `mentionRoles`, `mentionEveryone`, `kick` (remove from the server), `voiceKick`, `ban` (and unban), `forceMute`, `manageRoles`, `manageChannels`, `manageEmojis`, `manageFiles` (other people's files; your own you can always delete), `manageMessages` (delete other people's messages; your own you can always delete). The server's name, icon, voice quality and game switch, and the default permissions, are admin only.
+- **Default role:** `state.defaultPerms`, every key as a boolean. It starts with `view`, `send` and both mention keys. Admins (and the dashboard) can change any of it, the admin toggle included, which makes everyone an admin.
+- **Roles** keep their order (first = highest) and gain `perms`, holding only explicit settings (`true` or `false`; missing inherits), and `grantable`, the roles a holder of `manageRoles` may give out. For each key the highest held role that sets it wins, else the default. An admin role beats everything.
+- **Channel overrides:** each channel may carry `overrides[roleId | 'everyone']` with `view`, `send` (join, for voice) and `manage` (rename, delete and edit its overrides; inherits from `manageChannels`). A held role's channel setting beats the everyone channel setting, which beats the server-wide result. Like Discord, a role that may see everything still doesn't see a channel whose everyone override hides it, unless that channel allows the role. Without `view` the server doesn't send the channel, its messages, typing or files, and mention pushes skip that person.
+- **Moderators:** without admin, `manageRoles` only creates, edits, deletes and grants **aesthetic** roles (no permissions, nothing grantable), and only grants those in its grantable list. Only admins touch roles that carry any permission, reorder roles or edit the defaults. Nobody but an admin can kick, ban, voice-kick, force-mute or change the roles of an admin.
+- **Force mute** is a server flag beside the person's own mute (`state.forceMuted`, persisted). While it is set the server reports them muted and their app keeps the mic closed, and other apps silence their audio, so a modified app isn't heard by unmodified ones. Lifting it only clears the flag and never unmutes someone who muted themselves. A force-muted person who has `forceMute` can lift their own.
+- **Open until the first admin:** an updated or new server is open (`permissionsOn` false): everyone can do what they could before, and roles and permissions can only be set up in the dashboard, so nobody in the app can claim admin first. The first time someone holds a role with `admin` (or the default gets it), `permissionsOn` turns on for good.
+- **Keys:** a role with any permission can only be held by a profile with a pinned key (D42). Old apps' ids are copyable, so they only get aesthetic roles, and permissions of a role an unpinned profile still holds don't count. **Reset key** in the dashboard also takes away the profile's roles that carry permissions, since whoever claims the id next may not be its owner.
+- **Where:** the app's **Server settings** (Overview, Roles, Members, Emojis, Bans) replaces Settings → Server. Only administrators and moderators see it: people with `admin` or any of `kick`, `voiceKick`, `ban`, `forceMute`, `manageRoles`, `manageChannels`, `manageEmojis`, `manageFiles`, `manageMessages` or `createInvites` (D51), from a role or the defaults, and everyone while the server is open. For anyone else the server's name is not a button and the menu item is gone. This is the app hiding a window, not a secret: what it lists (roles, members, emojis, bans) is still sent to every app, which needs it elsewhere. Channel overrides are under a channel's right-click **Permissions…**; roles and moderation actions are on a person's right-click menu everywhere they appear. The dashboard can do all of it regardless of permissions.
+- **Version skew (D29):** every new field and event is optional. An app on an older server allows everything as before. An older app on a new server gets refusals in acks (events without an ack are silently ignored) and filtered channel lists.
+
+**Consequences:** enforcement lives on the server, except voice: audio is peer to peer (D5), so a force-muted person with a modified app can still send audio. Unmodified receivers drop it. Hosts who never open the dashboard keep today's open server. Losing the only admin's profile file leaves the server without one until the dashboard grants it again (or resets the key, D42). A server run with `ADMIN=off` has no dashboard, so it stays open.
+**Alternatives:** Discord's "allow wins" across roles (couldn't express a role that takes something away, as the issue asks); enforcing the defaults on update (locks hosts out of channel management until they find the dashboard); making the first person to connect admin (a race); separate "manage server" permission (the issue keeps server settings with admins).
+
+## D44: The mic is sent mono at full level, with automatic gain on by default · Active (echo cancellation and a noise gate added by D48)
+**Context:** after D38, two friends in a real call found everyone too quiet, even with both mics and each other's volume at the maximum, and heard each other mostly in the left ear with noise suppression off. Measured in the app with a fake mic playing speech on the left channel only (speech at −23.5 dBFS, peaks at −12): with no processing, Chromium delivers a two-channel track with the right channel silent, and D38 sent it like that. With noise suppression (or any processing) on, the track is mono with the channels averaged, so the voice arrived 6.3 dB quieter (−29.8 dBFS). Audio interfaces (input 1) and many headsets capture this way. D38 had also turned automatic gain off, so nothing brought a quiet mic up. Separately, the input device setting never took effect in the desktop app: Electron 44 returned the default mic for `deviceId: { ideal }` every time, while `exact` worked.
+**Decision:**
+- **Mono at full level:** the mic's two channels are summed (L + R, not averaged) into one before the mic volume. A one-sided raw capture is sent at its own level in both ears, and the processed mono track gets its 6 dB back. Measured after the change: −23.6 dBFS centred without processing and −23.7 with noise suppression, the same after an Opus loopback. The outgoing track stays stereo for the soundboard.
+- **Automatic gain is back** as a setting (`settings.autoGain`), on by default, next to noise suppression. It is the browser's (WebRTC's) gain control. The desktop app disables `WebRtcAllowInputVolumeAdjustment`, so it only levels the signal digitally and leaves the system's mic volume alone. Measured on the same speech: −15.4 dBFS sent after 4 s, against −23.6 without it.
+- **More headroom, limited:** mic volume goes to 400% (was 200%) and Voices to 200% (was 100%). One limiter sits after the mic volume and one after `voiceBus` (the same hard-knee settings the per-user limiter had), so boosting can't clip. The per-user limiter is gone: the bus one covers it.
+- **Mic switching:** the device is asked for with `exact`, and the default stands in when it's unplugged. Right-click on a mute button lists the microphones, and switching restarts only the capture: the outgoing track stays, so a call doesn't renegotiate.
+
+**Consequences:**
+- A mic whose two channels are the same signal and that is sent unprocessed (both settings off) is 6 dB louder than before; the limiter keeps it from clipping, and the mic volume turns it down.
+- Automatic gain is on for everyone, including people who had D38's plain mic. It can lift background noise in pauses less than a plain boost would, but it does change how a voice sounds over a sentence, which is what #44 disliked; it's one checkbox.
+- The two limiters add the compressor's look-ahead (about 6 ms) to the mic and to incoming voices.
+- Not measured on real devices: the fake device only shows how Chromium treats a one-sided stereo capture. Whether `WebRtcAllowInputVolumeAdjustment` still exists in Electron 44's Chromium was not checked (an unknown feature name is ignored). The camera picker also asks for its device with `ideal` and may have the same problem.
+
+**Alternatives:** averaging the channels (keeps the 6 dB loss); detecting a silent channel and using only the live one (main-thread polling or a worklet for the same result in the common case); asking for `channelCount: 1` (Chromium's downmix then decides the level); our own compressor as the automatic gain (it raises noise in pauses, where WebRTC's gain control has a voice detector); raising the per-user maximum instead (fixes nothing for people who don't know to do it).
+
+## D45: Shares can be captured, encoded and sent by a native sidecar, on standard WebRTC over the mesh · Active
+**Context:** issue #57 asked for the fastest, best-looking streams the app can make. D36 found the limits of the browser engine's path: its screen capturer spends at most half its time capturing (28–33 fps in motion on a 1440p Windows share before two feature flags, 53–58 after), its hardware H.264 encoder falls back to software on odd frame sizes, and a mesh runs one encoder per viewer. An earlier idea (OS capture through FFI, no native binary) would still have passed every frame through JS and Chromium's encoder. The owner's scope for this change: keep the peer-to-peer mesh (no SFU), write it in Rust, make hardware encoding optional and on by default (D46), give mobile a way to *receive* streams and leave room for video calls from phones later, and keep friendspeak's own sound out of shared system audio (#49).
+**Decision:**
+- **A sidecar:** `friendspeak-media` (`native/`, Rust), a process the desktop app starts on first use and talks to in JSON lines on stdin/stdout (`desktop/main.js`, `native/src/proto.rs`). It captures with the OS's own APIs (ScreenCaptureKit and AVFoundation on macOS; Windows Graphics Capture and Media Foundation on Windows), encodes H.264 and sends it itself. Frames never pass through the page.
+- **Standard WebRTC on the wire:** the sidecar speaks ICE, DTLS-SRTP, RTP and transport-wide congestion control through `str0m` (a sans-IO WebRTC library in Rust). No custom UDP or framing. Each viewer gets a connection of its own from the sidecar, offered `sendonly` with H.264 (Constrained Baseline and High, packetization mode 1) and, for a share with sound, Opus. The viewer's end is a plain `RTCPeerConnection`.
+- **Still the mesh (D5), still opt-in per viewer (D22):** the server only relays signaling, unchanged: the new messages ride `rtc:signal` (and the DM call link, D33) as data it doesn't read. `{ watch, on, stream: 1 }` says a viewer can take a stream connection; the sharer answers `{ media, id, stream: 1 }` and `{ stream: kind, sdp | candidate }`; the viewer returns `{ viewing: kind, sdp | candidate }`. `{ view }` reports are unchanged.
+- **Encoded once per layer, not once per viewer:** a stream has a ladder of rungs like D36's (`native/src/ladder.rs`; `smooth` lowers resolution first, `sharp` frame rate first). Each viewer sits on the rung their bandwidth estimate and tile size call for, and viewers on the same rung share one encoder. At most three layers run at once; a viewer who would need a fourth moves down to the next one. A layer spends what its slowest viewer's connection carries. This is what the mesh can offer in place of an SFU: the upload still grows with the viewers, the encoding doesn't.
+- **Hardware first, software as the net:** a layer uses the platform's hardware encoder (VideoToolbox; Media Foundation's hardware encoders, which cover NVENC, AMF and Quick Sync), required to be hardware so the stats can't lie about it. Without one, with hardware acceleration off (D46), or if it fails mid-stream, the layer continues on OpenH264 in software (Constrained Baseline).
+- **Cameras** go through the sidecar too, in the camera's own best mode up to 1440p at 60 fps (`NATIVE_CAMERA` in `voice.js`). A camera with a background stays on the browser engine, where the background is made (D37).
+- **Share audio without friendspeak in it:** the sidecar captures the sound and sends it as Opus on the same connection as the video. On macOS a screen share's ScreenCaptureKit filter excludes the friendspeak application (its windows stay in the picture) and a window share carries that app's sound; on Windows it is WASAPI process loopback, excluding the app's process tree for a screen and including only the window's process for a window. Friends in the call no longer hear themselves back.
+- **Your own tile** is one more viewer: a loopback connection from the sidecar to the page, pinned to a small size and never the reason for a layer when another exists.
+- **The browser engine's path stays**, for everything the sidecar can't carry and as the fallback, chosen per share and per viewer:
+  - no sidecar in the app (Linux today, or an installer built without one), `settings.nativeStreaming` off, or `FRIENDSPEAK_MEDIA=off`: the share starts the old way;
+  - the sidecar can't start a capture (permission, a source it can't open): the share starts the old way;
+  - a viewer who doesn't send `stream: 1` (an app from before this) gets the browser engine's capture of the same source, opened lazily for them (`VoiceClient.legacyCapture`), over the mesh connection as in D22;
+  - a viewer whose stream connection fails asks again without `stream: 1`;
+  - the sidecar dies or its capture ends by itself: the share restarts on the browser engine for everyone watching (`VoiceClient.onNativeLost`). After three unexpected exits the app stops using the sidecar until it is restarted.
+- **Mobile (#13):** nothing mobile-specific was built, but the viewer's side is deliberately only a stock WebRTC endpoint: send `{ watch, on, stream: 1 }`, answer the offer on a receive-only connection, play H.264 (every phone decodes Constrained Baseline in hardware) and Opus. A phone could later *send* the same way, since the viewer doesn't care what made the offer: its platform WebRTC library offers a `sendonly` connection with the same messages. That is the pathway for mobile video calls; it isn't implemented.
+
+**Consequences:**
+- **Measured, on one Apple-silicon Mac (M-series, macOS 26), sidecar to Chrome 154 on the same machine, a moving test pattern:** 2560×1440 at 60 fps, VideoToolbox, H.264 High: 58–60 fps sent and decoded, no dropped frames, 8–16 ms per frame in the encoder; 1920×1080 at 60 fps on OpenH264: 60 fps at 4.5 ms per frame. A real camera (1080p30, the built-in one) ran through AVFoundation and VideoToolbox. In the desktop app, two instances in a voice channel: the viewer got 1080p60 with the share's audio on its own connection, the tier changed live, a viewer acting as an older app got the browser engine's capture, and killing the sidecar mid-share was reported to the app, which could start it again.
+- **Not run:** a real screen or window capture (the development machine refused Screen Recording to a process started from a terminal, as in D36), so ScreenCaptureKit's frame delivery, the exclusion of friendspeak from share audio, and window audio are written to the documented API but unconfirmed. **None of the Windows code has been run:** it is compiled for Windows in CI and in a cross-compiling container, no more. Nothing was measured over a real network, with several viewers, or under packet loss; the ladder constants are starting values, as D36's were.
+- **A native binary ships in the desktop app.** This reverses the earlier "no native binary" position for the desktop app only; rule 3 in AGENTS.md is about the server and still holds. Cost: Rust in the build (`npm run build:media`, CI on macOS and Windows), about 8 MB per installer, and a binary to sign once the app is signed (D21).
+- **Not cross-built:** the sidecar uses OS frameworks and compiles C and C++ (OpenH264, the crypto library), so `npm run dist:all` on a Mac produces Windows and Linux installers *without* it. Those apps work, on the browser engine's path. Releases are built per OS in CI and carry it.
+- **Linux has no sidecar yet** (PipeWire capture and VA-API encoding are not written). Linux apps share as before and can watch native streams.
+- **One more connection per viewer and kind,** with its own ICE. Like the mesh it has only STUN (D5): the sidecar learns its public address with one STUN request and offers host and server-reflexive candidates, IPv4 only. Where that fails the viewer falls back to the mesh connection.
+- **H.264 only.** AV1 and HEVC from the hardware encoders are not negotiated.
+- **Audio and video of a share are synchronized by arrival, not by capture timestamps:** both are stamped when they reach the engine.
+- **A viewer on an older app costs the sharer a second capture** of the same source (the browser engine's) and a per-viewer encoder, as before this change. On Windows a camera can usually be opened by only one of the two, so an older viewer may not get a native camera.
+- **Changing what you share** (or the camera's background) stops the old stream and starts a new one for everyone watching, instead of D22's seamless track swap, whenever the sidecar is on either side of the change.
+
+**Still open:** PipeWire and VA-API for Linux; AV1/HEVC; an upload budget across viewers; TURN (#10); running and tuning it on Windows and on real links. An SFU stays a separate, gated decision (D36).
+
+**Alternatives:** an SFU on the server (encode and upload once, hides IPs, but puts media through the server and needs UDP ports, against D2, D5 and rule 4; explicitly out of scope here); libwebrtc in the sidecar (the reference implementation, but a very large C++ dependency to build for three OSes); GStreamer `webrtcbin` (does capture, encode and WebRTC, but ships a runtime of plugins per OS); `webrtc-rs` (async and peer-connection shaped, but no send-side bandwidth estimation to drive the ladder); ffmpeg for encoding (one API for every hardware encoder, at the cost of building and shipping it); one encoder per viewer as in the browser path (simplest, but hardware encoders allow few sessions and the cost grows with viewers); capture in the sidecar with frames handed to the page to encode (keeps one WebRTC stack, and keeps the ceiling this was meant to remove).
+
+## D46: Hardware acceleration is one switch, on by default · Active
+**Context:** issue #47 asked to "enable GPU acceleration" and to scope what that means. Electron already draws with the GPU and decodes video on it by default on macOS and Windows; what was missing was a way to turn it off when a driver misbehaves, and D45 adds encoders that can run on the GPU.
+**Decision:**
+- **Settings → Voice & video → Streaming → Hardware acceleration**, on by default, covers the three places a GPU is used: drawing the app, decoding the video you watch (both Chromium), and encoding the streams you share (the sidecar's hardware encoders, D45).
+- It is stored by the main process (`userData/desktop-prefs.json`), not in the page's settings, because drawing has to be decided before there is a window: off, the app calls `app.disableHardwareAcceleration()` at start. The page reads and writes it through `friendspeakDesktop.prefs()`.
+- **When it applies:** the sidecar is told with each share (`hw`), so the next share already follows the switch. Chromium's drawing and decoding follow it at the next start, and the settings page says so.
+- The same place shows what is in effect: which encoder shares would use, and whether this run decodes and draws on the GPU (`app.getGPUFeatureStatus()`).
+
+**Consequences:**
+- One switch, not three: someone with a broken encoder driver also loses GPU drawing. The stream falls back to software by itself when a hardware encoder fails (D45), so the switch is for glitches that aren't failures.
+- No Chromium flags were added for Linux hardware video (VA-API). They vary by driver and Chromium version and couldn't be tried; Linux keeps Electron's defaults.
+- Off, 1440p60 is beyond what software encoding and drawing hold on most machines; the ladder (D45) settles lower.
+
+**Alternatives:** separate switches for drawing, decoding and encoding (more precise, more to explain, and nobody asked); storing it in the page's settings and relaunching to apply (the main process can't read `localStorage` before the window exists); always on with no switch (the issue's reading, but leaves no way out of a bad driver).
+
+## D47: Noise suppression is DeepFilterNet in a worklet, not the browser's · Active
+**Context:** after D38 the one mic option was the browser's (WebRTC's) noise suppression. It is on or off, and it leaves a lot behind: D35 measured noise-only stretches at −51 dB with it, against −68 to −71 dB with RNNoise, which D38 removed because it changed how people sounded (#44). Issue #72 asked for DeepFilterNet instead, a fullband (48 kHz) speech enhancer that D35 had passed over as too heavy without measuring it, and asked for it to be measured first, with "no" as a possible outcome.
+
+**Measured** (D35's method: speech at −20 dBFS over fan noise and key clicks at −38 dBFS, rendered offline through the worklet at 48 kHz and live with a fake mic; a recording of a person as well as D35's synthetic voice; Electron 44 on an Apple M4 Pro):
+
+| | Browser (D35) | RNNoise (D35) | DeepFilterNet 3 |
+|---|---|---|---|
+| Noise left in noise-only stretches | −51 dB | −68 to −71 dB | −66 to −69 dB at full strength, −59 dB limited to 24 dB, −49 dB limited to 12 dB |
+| Speech level | unchanged | unchanged | −0.3 dB, every band from 125 Hz to 12 kHz within 0.5 dB of the clean voice |
+| Added delay | | 21 ms | 39 ms |
+| CPU, offline render | | 0.7% of a core | 2.8% of a core |
+| Size | | 150 KB | 22 MB (14 MB wasm, 8 MB model) |
+
+Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loaded), at most 1 ms. On an idle machine the same work reads as 1.1 to 1.4 ms a frame and 15% of a core, because the core is clocked down; that is not a cost under load. Starting the model blocks the audio thread once for about 70 to 150 ms.
+
+**Decision:**
+- **The "Noise suppression" checkbox now switches DeepFilterNet.** `getUserMedia` always asks for `noiseSuppression: false`. It is still the only mic processing besides automatic gain (D44), on by default, and a saved on or off carries over.
+- **A strength slider** under it: the most the noise is turned down by, 6 to 40 dB, with "maximum" (no limit) at the top and as the default. It is libDF's attenuation limit, so it is exact: at 24 dB a noise is 24 dB quieter.
+- **A worklet of our own** (`denoise-worklet.js`, about 100 lines) around upstream's wasm, between `micMono` and `micGain`. It goes into the graph the first time the setting is on and stays; switching and the slider are messages, so nothing is rewired per toggle (the area #43 pointed at) and the mic doesn't restart. Off, it is a wire with no delay.
+- **Our own build of upstream, vendored** in `public/vendor/deepfilternet/` (`scripts/denoise/`, built in Docker from a pinned commit). No npm dependency and no bundler (D1); the server image gets nothing. It carries a patch, for two reasons found while measuring:
+  - The wasm binding uses the library's default thresholds, which skip the deep-filtering stage above 20 dB local SNR. With them the voice came out 5 dB down (10 dB in places, 9 dB at 1 to 2 kHz) over noise at −38 dBFS: the kind of change #44 complained about. Upstream's own `deep-filter` program uses −15/35/35 dB and keeps the voice level; the patch uses those.
+  - With the `tract` version upstream pins (0.21) the patched build cost 9.5% of a core. On 0.23 it costs 2.8% with the same output, so the patch also moves libDF to tract 0.23's API.
+- **If it can't run** (no 48 kHz context, a file missing, the wasm failing) the mic is sent unprocessed and Settings says why. There is no fallback to the browser's suppression: one behaviour to reason about.
+
+**Why this doesn't repeat D35/D38:** D35 added three kinds of processing with five options, and its RNNoise thinned voices. Here there is one switch and one slider, the speech level and spectrum were measured against the clean voice (−0.3 dB, 21.5 dB signal-to-distortion against 18 dB for the untouched noisy mic), and the one way found for it to change a voice was fixed in the build before shipping.
+
+**Consequences:**
+- The mic is 39 ms later with it on (30 ms in the model, 9 ms of queueing between 480-sample frames and 128-sample blocks), 18 ms more than RNNoise was.
+- It removes what isn't speech. At full strength a clap came out 67 dB down and music played into the mic 50 dB down; with a limit they are down by exactly the limit. Laughter was not measured (there is no way to synthesize it) and is the open risk from #44: the slider and the checkbox are the remedies. Soundboard clips don't pass through it.
+- Every installer grows by the 22 MB of wasm and model.
+- CPU and delay were measured on one fast machine. An older laptop will pay more than 2.8% of a core, on the audio thread that also plays friends' voices; if that crackles under load, this needs revisiting (a worker, or off by default).
+- The first switch-on in a session inserts the node and blocks the audio thread for about a tenth of a second, in a call if that is where it happens.
+- Friends on an older app still send with the browser's suppression.
+- The vendored wasm is ours to rebuild: upstream has had no release since 0.5.6 and its `main` doesn't compile against tract 0.23 without the patch.
+- `mic-worklet.js` (D35's gate, unused since D38) is deleted.
+
+**Alternatives:** the `deepfilternet3-noise-filter` npm package (its wasm is downloaded from the author's CDN at run time, is built from unpublished sources, and has the threshold problem: measured −24.6 dBFS speech from −19.5); upstream's wasm unpatched (same problem, and 2 to 3 times the CPU); upstream's low-latency model (10 ms instead of 30 ms in the model at about the same quality, but a 36 MB file); a limited default strength such as 24 dB (leaves key clicks audible, and what it would protect is equally gone at −24 dB); the model in a worker with shared buffers (keeps the audio thread free at the price of more delay and code; not needed at the measured cost); keeping the browser's suppression as a fallback or a second level (two behaviours, and D35's "levels" again); recording a "no" (the measured CPU and delay are four and two times RNNoise's, which is within what a call tolerates).
+
+## D48: Echo cancellation and a noise gate, both on by default · Active
+**Context:** D38 turned echo cancellation off and removed D35's noise gate, so headphones were expected: a friend on speakers sent everyone's voice back to them. The maintainer asked for echo cancellation back as a checkbox, on by default, and for a noise gate that is a slider only (no switch; its bottom is off), also on by default, with the mic's level shown on it.
+
+**Decision:**
+- **Echo cancellation is Chromium's** (`echoCancellation` on `getUserMedia`), a checkbox (`settings.echoCancellation`), on by default. Changing it restarts the capture; the outgoing track stays (D44). It works on the raw capture, ahead of our graph, which is where a canceller has to sit: before noise suppression.
+- **Not during a mic test:** the test plays your own voice back, and a canceller treats what the app plays as a friend's voice. The capture restarts without it for the test and with it after.
+- **The noise gate is ours** (`gate-worklet.js`), after noise suppression and before the mic volume, so its threshold is about the mic and not about how far it is turned up. One number, `settings.micGate`, in dB: −50 by default, and the slider's bottom (−80) is no gate. It opens in 2 ms, holds 250 ms, closes over 60 ms with 5 dB of hysteresis (D35's values), adds no delay, and passes the mic bit for bit while open.
+- **The slider sits on a level bar** (D35's display): the mic's level before the gate, reported by the worklet, so the bar and the gate agree exactly. It moves while the mic runs: in a call or a mic test.
+
+**Why this doesn't repeat D35/D38:** D38 removed five options that changed voices unasked. This is one checkbox and one slider, each asked for. D35's automatic threshold and speaker mode stay gone.
+
+**Consequences:**
+- With echo cancellation on, a voice can be turned down while a friend talks at the same time. People on headphones can switch it off and send the mic as before.
+- Everyone gets both on the next update, including people who had the plain mic.
+- A gate can clip a quiet word ending or a soft start; the hold and the slider are the remedies. With noise suppression on, a silent room sits near −70 to −80 dB on the bar, well under the default.
+- A mic test on speakers still feeds back, as before; the warning in Settings stays.
+- Starting or ending a mic test in a call restarts the capture (a moment of silence, while friends hear nothing from you anyway).
+- **Not measured on real speakers and microphones** (fake devices don't hear the output): whether Chromium's canceller takes the Web Audio graph's output as its reference in Electron 44, whether a non-default output device weakens it, and screen share audio, which plays in `<video>` elements. `echoCancellation: 'all'` (cancel everything the system plays) is the thing to try if friends still hear themselves. D35 left the same questions open.
+- Verified with a fake mic: the track reports `echoCancellation: true` (and `false` during a mic test); offline, a −20 dBFS tone passes unchanged, −60 dBFS around it is silenced (−95 dB and below) after the 250 ms hold, and with the gate off the output equals the input.
+
+**Alternatives:** an echo canceller of our own in the worklet (D35: a large job without Chromium's playout timing); the operating system's canceller (worse for fidelity); a gate switch next to the slider (asked not to); an automatic threshold (D35 had one; more to explain); the gate on the main thread from an analyser (timer jitter, throttled in a hidden window); the gate after the mic volume (the threshold would move with the volume slider).
+
+## D49: Logs are kept on disk and scrubbed, crashes leave a report, and nothing is sent anywhere · Active
+**Context:** The dashboard's log was a ring in memory (D34), gone at every restart, which is exactly when it is wanted. The server logged little beyond the game and the dashboard, and a crash left nothing behind. The app logged nothing at all, so a friend's "it broke" came with no evidence (#50, #51).
+
+**Decision:**
+- **The server's log is stored** as JSON lines under `DATA_DIR/logs`, by day, for `LOG_RETENTION_DAYS` (14) and up to `LOG_MAX_SIZE` (50 MB). The dashboard searches and pages through it on the server, by text, level, source and date, and exports it. `console.*` stays the way to log: a leading `[tag]` is the source.
+- **Logs say who did what, never what was said.** No message text, DM or mail blobs, passwords, keys, file names or image data. People are a name and the first 8 characters of their id; an address appears only on a refused password. Every line also passes a scrubber (registered secrets, admin keys, data URIs, bearer tokens, `password=`-style values) before it is kept, as a net under the rule and not instead of it.
+- **`debug` is never stored.** It is for what is too noisy or could carry content: voice joins and the game's `GAME_DEBUG` packet dump, which holds chat text and was moved to `console.debug` for that reason.
+- **A crash leaves a report**: the error, version, system and the last 200 log lines, in `DATA_DIR/crashes`, shown in a dashboard view of its own. An uncaught exception saves the state, flushes the log and exits 1, so Docker's restart policy brings the server back. An unhandled rejection is reported and the server keeps running. A marker file tells the next boot that the last run never shut down (killed, out of memory, power loss), which nothing else can record.
+- **The app does the same on the user's computer**: a log (errors, console warnings, connection events by host) and crash reports for the main process, the page and child processes, 14 days, scrubbed, with the home folder's name removed. Settings → About & updates shows them and saves or copies one report.
+- **Nothing is sent.** No upload, no crash reporting service, no report to the server someone is connected to. The user hands a report over themselves.
+
+**Why not send reports:** there are no accounts and no central service, by design. A report sent to "the server" would go to whoever hosts it, who isn't the one fixing the app, and a client's log is nobody else's business.
+
+**Consequences:**
+- The log now holds names, id prefixes and, for refused passwords, addresses, for 14 days. It sits behind the same gate as the dashboard, which already shows addresses; the files are mode 0600.
+- A server keeps running after an unhandled rejection, where Node alone would have exited. Its state may be off in whatever that promise was doing; the report says so.
+- Failed saves of `state.json` and the mailboxes are logged (once a minute) and no longer take the process down from a timer.
+- The scrubber only covers what is kept. The process's own stdout (`docker logs`) is unchanged, so the rule above is what protects it.
+- A short server password (under 6 characters) isn't registered with the scrubber: replacing it everywhere would mangle ordinary text. Nothing logs it.
+- Minidumps of native crashes aren't collected: without symbols they tell the user nothing, and the reason and exit code are in the report.
+- Up to 50 MB more in the data volume, and 10 MB in the app's data folder.
+- `FRIENDSPEAK_TEST_NO_DIALOGS=1` exists only so automated runs aren't stopped by the crash dialogs.
+- **Not exercised:** a full disk while logging, the app's main-process exception and child-process paths, its Save and Open folder dialogs, and anything on Windows.
+
+**Alternatives:** SQLite for the log (`node:sqlite` is there, but plain files can be read with any tool when the server won't start, which is when they matter); a logging library (a dependency for what `console` plus a tag already does); exiting on unhandled rejections (Node's default; a friends' server going down mid-call for a failed lookup costs more than it protects); Electron's `crashReporter` with an upload URL (needs a service); sending client reports to the connected server (see above).
+
+## D50: A profile is its own account on the device: its own servers, last server and mentions · Active
+**Context:** the server list was one per device. Switching profiles reconnected the new profile to the server in view, so a profile made a moment ago was in a server it never joined, with a password it never entered, and showed up in that server's member list (issue #56). DMs were already kept per profile (D28).
+**Decision:**
+- Server bookmarks (with their passwords), the last server and unread mentions are stored per profile (`fs.servers:<profileId>` and so on). A new or imported profile starts with an empty list and joins each server itself.
+- Switching profiles ends the call, leaves every server and opens the new profile's DMs, list and last server. Nothing carries over.
+- Deleting a profile deletes its server list. Its DMs stay in IndexedDB, as before, for a later import of the same profile file.
+- Settings, the soundboard and camera backgrounds stay per device: they describe the computer (devices, volumes, theme, hotkeys), not who you are.
+- **Migration:** every profile that exists at the update gets a copy of the old shared list, with the same bookmark ids. Nobody loses a server they were using; a profile that was only in a server by accident removes it once. The old keys are deleted, since they hold passwords.
+- No server or protocol change, and still no accounts (D3): this is only about what the app stores.
+
+**Consequences:**
+- A profile export doesn't carry the server list (it never did): on another device a profile starts with none.
+- A few settings are keyed by profile or bookmark id but shared by all profiles: muted people, per-person volumes, and for the migrated copies (same bookmark ids) a muted server and the last channel. Bookmarks added after the update have their own ids.
+- An app from before this decision run on the same data afterwards finds no server list.
+
+**Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
+
+## D51: People join with invites; a member is then known by their key · Active
+
+**Context:** access was one shared `PASSWORD` from the environment, compared in plaintext on every `hello`. Everyone knew it, it couldn't be taken back from one person, and nothing said who let whom in.
+
+**Decision:**
+- **Invites replace the password.** An invite is a token of 16 Crockford base32 characters (80 random bits from `crypto.randomBytes`), shown as `XXXX-XXXX-XXXX-XXXX`. Input is case-insensitive, ignores dashes and spaces and maps `O`→`0`, `I`/`L`→`1`. A lookup hashes what was typed (`SHA-256("friendspeak-invite-v1|" + token)`) and compares it with every stored hash with `timingSafeEqual`.
+- **Four kinds, two settings:** `maxUses` (null, 1 or more) and `expires` (null or a time). Neither: works until revoked. The UIs offer never-expiring, one use, multi-use and time-expiring.
+- **An invite is needed once.** `hello` takes it only from a profile that isn't a member. A member is a profile that is in `state.profiles` and signs with its pinned key (D42), so coming back sends no invite, uses nothing up, and a revoked or used-up invite locks nobody out. Joining with an invite needs a signed `hello`. A removed member needs a new invite. The app forgets an invite once it has joined.
+- **The server keeps the token of every invite** next to its hash, so a working invite can be read and handed out again instead of being replaced. Lists carry it for working invites only: all of them for the dashboard and administrators, their own for other people with `createInvites`. Lists also carry who made it, uses, expiry, who revoked it and the last 100 profiles that joined with it, never the hash. The first version kept only hashes and showed a token once; people lost tokens and had to make new invites, and the dashboard already means full control of the server.
+- **First start:** a server without an invite list (new, or from before invites) makes one invite that never expires. The CLI writes it to stdout, not through `console`, so it isn't in the log buffer, the log files or the dashboard's log view (it is listed under Invites); the scrubber also knows the token's shape.
+- **`createInvites` permission, off by default**, and off in open mode like `manageRoles`: until someone is an administrator, invites are made in the dashboard. Without it the app shows no Invites page and the server sends no invite (`invite:list` is refused, the `invites` event isn't sent). A holder revokes their own invites; an administrator or the dashboard any.
+- **Optional, on by default:** `state.inviteOnly`. Off, anyone with the address joins as before. Only the dashboard or an administrator changes it, never open mode: otherwise any member could open the server to everyone.
+- **Wrong invites are limited per address:** 10 in 10 minutes, then that address waits. Members aren't affected.
+- **`/dm`:** on an invite-only server a socket is a member only if its profile id has joined and has a pinned key, and it gets presence and a mailbox once `identify` proves that key. Anyone else is a guest (D32) or refused.
+- **Version skew:** `/api/info` still sends `password` so older apps ask for one, and `hello` reads `password` when `invite` is missing, so an older app joins with the invite typed as the password. The app sends the same text as both, so it still joins older servers with their password.
+
+**Consequences:**
+- `PASSWORD` is gone. A server that had one ignores it and warns at start; its members stay (their keys are pinned), and new people need an invite. A server that had no password becomes invite-only on update: switch **Require an invite to join** off to keep it open.
+- A profile without a pinned key (an app from before D42 that never updated) can't join an invite-only server.
+- Tokens are readable in `state.json`, its backups and the dashboard: whoever has those can let people in until the invite is revoked. An invite made while only hashes were kept has no token to show.
+- An invite says who was let in, not who they are: identities are still self-made (D3).
+
+**Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).

@@ -5,6 +5,7 @@ import overview from './views/overview.js';
 import users from './views/users.js';
 import roles from './views/roles.js';
 import log from './views/log.js';
+import crashes from './views/crashes.js';
 import keys from './views/keys.js';
 import audit from './views/audit.js';
 import channels from './views/channels.js';
@@ -12,11 +13,12 @@ import storage from './views/storage.js';
 import game from './views/game.js';
 import updates from './views/updates.js';
 import settings from './views/settings.js';
+import invites from './views/invites.js';
 
 // Add a view: create a module exporting { id, title, mount(root, ctx) } and list it here.
 const groups = [
-  ['Server', [overview, users, roles, channels, storage, game, updates, settings]],
-  ['Admin', [log, keys, audit]],
+  ['Server', [overview, users, roles, invites, channels, storage, game, updates, settings]],
+  ['Admin', [log, crashes, keys, audit]],
 ];
 const views = groups.flatMap(([, v]) => v);
 

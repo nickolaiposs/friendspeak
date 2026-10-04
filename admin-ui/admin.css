@@ -144,6 +144,11 @@ td.nowrap { white-space: nowrap; }
 .secret-box .secret { font-family: var(--mono); background: var(--bg-0); border: 1px solid var(--line); border-radius: 6px; padding: 8px; word-break: break-all; user-select: all; }
 .newkey { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .newkey .field { flex: 1; min-width: 200px; max-width: 360px; }
+.newkey .field.narrow { flex: 0 1 auto; min-width: 120px; }
+.newkey .field[hidden] { display: none; }
+.joins { margin: 4px 0 0; padding-left: 18px; }
+.invite-cell { display: flex; gap: 10px; align-items: center; white-space: nowrap; }
+.invite-cell code { user-select: all; }
 .prose { max-width: 70ch; color: var(--muted); }
 
 /* log */
@@ -195,6 +200,13 @@ td.nowrap { white-space: nowrap; }
 .member { display: inline-flex; align-items: center; gap: 4px; background: var(--bg-3); border-radius: 999px; padding: 1px 4px 1px 10px; }
 .member button { padding: 0 6px; color: var(--muted); border-radius: 50%; }
 .member button:hover { color: var(--red-text); }
+.perms { margin: 10px 0 4px; }
+.perms summary { cursor: pointer; font-weight: 600; }
+.perms[open] summary { margin-bottom: 8px; }
+.permgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 18px; margin: 8px 0; }
+.permrow { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.permrow.admin { justify-content: flex-start; margin-bottom: 4px; }
+.rolecard > .perms ~ .members { margin-top: 10px; }
 .inline-sel { width: auto; padding: 3px 8px; max-width: 200px; }
 input[type='color'] { width: 48px; height: 36px; padding: 2px; }
 .rolenew { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
@@ -223,3 +235,15 @@ fieldset.card legend { padding: 0 6px; font-weight: 600; color: var(--text-stron
 .choice-help { display: block; }
 .linkbtn { color: var(--link); text-decoration: underline; padding: 0; }
 #ucron { font-family: var(--mono); }
+
+/* log history, crash reports */
+.logbar input[type='datetime-local'] { width: auto; padding: 4px 6px; margin-left: 4px; }
+.logbar .btn { text-decoration: none; }
+.loginfo { margin: -4px 0 8px; }
+.logrow mark { background: color-mix(in srgb, var(--yellow) 40%, transparent); color: inherit; border-radius: 2px; }
+.logbox.crashlog { flex: none; min-height: 0; max-height: 420px; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--bg-hover); }
+td.msg { max-width: 0; width: 100%; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crash-actions { margin-bottom: 10px; }
+pre.stack-trace { margin: 0; padding: 10px 12px; background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--radius); font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }

@@ -10,3 +10,5 @@ game/client/assets/scripts/client/
 game/assets-pack/
 game/assets-extra/
 .env
+/native/target/
+/native/dist/
