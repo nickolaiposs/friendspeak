@@ -6273,7 +6273,7 @@ function serverInvites(body, { st, redraw }) {
     const r = await socket.emitWithAck('invite:create', payload);
     if (r.error) return toast(r.error, 'error');
     st.inviteNote = '';
-    st.newInvite = r.token;
+    toast('Invite created');
     redraw();
   };
   const remove = async (v) => {
@@ -6297,6 +6297,8 @@ function serverInvites(body, { st, redraw }) {
         h('span', { class: 'grow' }),
         mine ? h('button', { class: 'btn small ghost' + (active ? ' danger' : ''), onclick: () => remove(v) }, active ? 'Revoke' : 'Remove') : null
       ),
+      // A working invite's token: every one for an administrator, your own otherwise
+      v.token ? h('div', { class: 'row tight' }, h('span', { class: 'invite-token' }, v.token), h('button', { class: 'btn small', onclick: () => copy(v.token, 'Invite') }, 'Copy')) : null,
       h(
         'div',
         { class: 'muted small' },
@@ -6317,24 +6319,10 @@ function serverInvites(body, { st, redraw }) {
 
   body.append(
     h('h3', {}, 'Invites'),
-    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page.'),
+    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page. Administrators can copy any working invite again, everyone else the ones they made.'),
     h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
     h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
     h('h3', {}, 'New invite'),
-    st.newInvite
-      ? h(
-          'div',
-          { class: 'invite-new' },
-          h('div', { class: 'invite-token' }, st.newInvite),
-          h('p', { class: 'muted small' }, 'Copy it now: the server keeps only a hash of it, so it can’t be shown again.'),
-          h(
-            'div',
-            { class: 'row tight' },
-            h('button', { class: 'btn small', onclick: () => copy(st.newInvite, 'Invite') }, 'Copy invite'),
-            h('button', { class: 'btn small ghost', onclick: () => ((st.newInvite = null), redraw()) }, 'Done')
-          )
-        )
-      : null,
     h(
       'div',
       { class: 'row invite-form' },

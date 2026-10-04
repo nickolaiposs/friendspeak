@@ -758,7 +758,7 @@ function createAdmin(ctx) {
     });
   });
 
-  // Invites (D51): the tokens people join with. A token is in the answer to the POST and nowhere else.
+  // Invites (D51): the tokens people join with. The dashboard is sent the token of every working invite.
   api.get('/invites', (req, res) => answer(res, actions.listInvites(dash(req))));
 
   api.post('/invites', (req, res) => {

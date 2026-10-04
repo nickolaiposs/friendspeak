@@ -706,16 +706,16 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
 
-## D51: People join with invites, kept as hashes; a member is then known by their key · Active
+## D51: People join with invites; a member is then known by their key · Active
 
 **Context:** access was one shared `PASSWORD` from the environment, compared in plaintext on every `hello`. Everyone knew it, it couldn't be taken back from one person, and nothing said who let whom in.
 
 **Decision:**
-- **Invites replace the password.** An invite is a token of 16 Crockford base32 characters (80 random bits from `crypto.randomBytes`), shown as `XXXX-XXXX-XXXX-XXXX`. Input is case-insensitive, ignores dashes and spaces and maps `O`→`0`, `I`/`L`→`1`. The server stores only `SHA-256("friendspeak-invite-v1|" + token)`: the token is random, so a fast hash is enough. A lookup compares every stored hash with `timingSafeEqual`.
+- **Invites replace the password.** An invite is a token of 16 Crockford base32 characters (80 random bits from `crypto.randomBytes`), shown as `XXXX-XXXX-XXXX-XXXX`. Input is case-insensitive, ignores dashes and spaces and maps `O`→`0`, `I`/`L`→`1`. A lookup hashes what was typed (`SHA-256("friendspeak-invite-v1|" + token)`) and compares it with every stored hash with `timingSafeEqual`.
 - **Four kinds, two settings:** `maxUses` (null, 1 or more) and `expires` (null or a time). Neither: works until revoked. The UIs offer never-expiring, one use, multi-use and time-expiring.
 - **An invite is needed once.** `hello` takes it only from a profile that isn't a member. A member is a profile that is in `state.profiles` and signs with its pinned key (D42), so coming back sends no invite, uses nothing up, and a revoked or used-up invite locks nobody out. Joining with an invite needs a signed `hello`. A removed member needs a new invite. The app forgets an invite once it has joined.
-- **A token is shown once:** in the ack of `invite:create` or `POST /admin/api/invites`, and for the first one on stdout. Lists carry who made it, uses, expiry, who revoked it and the last 100 profiles that joined with it, never the token or hash.
-- **First start:** a server without an invite list (new, or from before invites) makes one invite that never expires. The CLI writes it to stdout, not through `console`, so it isn't in the log buffer, the log files or the dashboard; the scrubber also knows the token's shape.
+- **The server keeps the token of every invite** next to its hash, so a working invite can be read and handed out again instead of being replaced. Lists carry it for working invites only: all of them for the dashboard and administrators, their own for other people with `createInvites`. Lists also carry who made it, uses, expiry, who revoked it and the last 100 profiles that joined with it, never the hash. The first version kept only hashes and showed a token once; people lost tokens and had to make new invites, and the dashboard already means full control of the server.
+- **First start:** a server without an invite list (new, or from before invites) makes one invite that never expires. The CLI writes it to stdout, not through `console`, so it isn't in the log buffer, the log files or the dashboard's log view (it is listed under Invites); the scrubber also knows the token's shape.
 - **`createInvites` permission, off by default**, and off in open mode like `manageRoles`: until someone is an administrator, invites are made in the dashboard. Without it the app shows no Invites page and the server sends no invite (`invite:list` is refused, the `invites` event isn't sent). A holder revokes their own invites; an administrator or the dashboard any.
 - **Optional, on by default:** `state.inviteOnly`. Off, anyone with the address joins as before. Only the dashboard or an administrator changes it, never open mode: otherwise any member could open the server to everyone.
 - **Wrong invites are limited per address:** 10 in 10 minutes, then that address waits. Members aren't affected.
@@ -725,7 +725,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 **Consequences:**
 - `PASSWORD` is gone. A server that had one ignores it and warns at start; its members stay (their keys are pinned), and new people need an invite. A server that had no password becomes invite-only on update: switch **Require an invite to join** off to keep it open.
 - A profile without a pinned key (an app from before D42 that never updated) can't join an invite-only server.
-- A lost token can't be recovered, only replaced. That is the price of keeping hashes.
+- Tokens are readable in `state.json`, its backups and the dashboard: whoever has those can let people in until the invite is revoked. An invite made while only hashes were kept has no token to show.
 - An invite says who was let in, not who they are: identities are still self-made (D3).
 
-**Alternatives:** keeping tokens readable so they can be copied again later (a backup or a look at `state.json` would hand them out); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).
+**Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).
