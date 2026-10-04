@@ -81,7 +81,7 @@ export default {
       add);
 
     root.append(
-      h('p', { class: 'prose' }, 'Admin keys are separate from the invites people join with. Give each admin their own key so one can be revoked without affecting the others. The first time a key signs in it sets up 2-step sign-in with an authenticator app, and needs that app’s code from then on (unless the server runs with ', h('code', {}, 'ADMIN_MFA=off'), '). If you lose every key, set ', h('code', {}, 'ADMIN_KEY'), ' or delete ', h('code', {}, 'admin.json'), ' in the data folder and restart the server.'),
+      h('p', { class: 'prose' }, 'Give each admin their own key. Lost every key? Set ', h('code', {}, 'ADMIN_KEY'), ' or delete ', h('code', {}, 'admin.json'), ' in the data folder, then restart.'),
       secretSlot, form, formErr, h('h2', {}, 'Keys'), box);
     refresh();
 

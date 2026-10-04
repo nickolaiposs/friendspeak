@@ -476,7 +476,7 @@ function friendDialog() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below. It holds your public key and the addresses of your saved servers, which pass messages along without being able to read them.'),
+      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below.'),
       h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
       h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
       h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
@@ -1204,7 +1204,7 @@ function welcome() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'No sign-up, no accounts. Your profile is saved only on this device. You can keep several and switch any time.'),
+      h('p', { class: 'muted' }, 'No sign-up, no accounts. Your profile is saved only on this device.'),
       el,
       importInput
     ),
@@ -2010,7 +2010,7 @@ function dmSidebar() {
         c.unread ? h('span', { class: 'count' }, c.unread) : null
       )
     ),
-    h('p', { class: 'muted small dm-hint' }, 'Messages are encrypted between your two devices. No server can read them. Start one from anyone’s name in a server’s member list, or add a friend with a friend code.')
+    h('p', { class: 'muted small dm-hint' }, 'End-to-end encrypted. Start one from a member list, or add a friend with a friend code.')
   );
 }
 
@@ -2032,7 +2032,7 @@ async function banPrompt(profileId) {
         {},
         h('p', {}, `${name} will be disconnected and can't come back with this profile. People who can ban can lift it in Server settings → Bans.`),
         h('label', { class: 'field inline' }, withIp, h('span', {}, 'Also ban their IP address')),
-        h('p', { class: 'muted small' }, 'There are no accounts, so a new profile gets around a profile ban. The IP ban is skipped when they share your network.')
+        h('p', { class: 'muted small' }, 'A new profile gets around a profile ban. The IP ban is skipped when they share your network.')
       ),
       {
         actions: [
@@ -2452,7 +2452,7 @@ function renderMain(error) {
               )
             )
           : null,
-        h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server (npm start or Docker) and connect to it here. It prints its LAN addresses on startup.')
+        h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server and connect to it here.')
       )
     );
     return;
@@ -3844,7 +3844,7 @@ function openGifPicker(anchor, onPick) {
               'div',
               { class: 'gif-nokey' },
               h('p', {}, 'GIFs need a free GIPHY API key.'),
-              h('p', { class: 'muted small' }, 'Get one at developers.giphy.com, then paste it in Settings → Integrations (or the server host can set GIPHY_API_KEY).'),
+              h('p', { class: 'muted small' }, 'Get one at developers.giphy.com and paste it in Settings → Integrations.'),
               onPick ? null : h('button', { class: 'btn small', onclick: () => (pop.close(), openSettings('integrations')) }, 'Open settings')
             )
           : h('div', { class: 'error-text center' }, e.message)
@@ -4146,7 +4146,6 @@ async function screenPicker({ switching = false } = {}) {
         {},
         h('div', { class: 'share-choices' }, choice('monitor', 'screen', 'Entire screen', 'A whole display'), choice('window', 'window', 'Window', 'One app window')),
         audioBox('Share audio'),
-        h('p', { class: 'muted small' }, 'Your browser asks which screen or window next. Chrome and Edge can share system audio on Windows and window audio on recent macOS; other browsers may send video only.'),
         quality
       )
     );
@@ -4582,8 +4581,7 @@ function cameraDialog() {
       'div',
       { class: 'cam-dialog' },
       preview.el,
-      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
-      h('p', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')
+      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el)
     ),
     {
       actions: live
@@ -5422,7 +5420,7 @@ function settingsProfile(body) {
       }, 'Save profile')
     ),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Each has its own servers and direct messages. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device. Export one to use it on another device.'),
     h(
       'div',
       { class: 'profile-list' },
@@ -5459,7 +5457,7 @@ function settingsProfile(body) {
       h('button', { class: 'btn small ghost', onclick: () => importInput.click() }, 'Import…'),
       importInput
     ),
-    h('p', { class: 'muted small' }, 'An exported profile includes its private keys for direct messages. Keep the file to yourself: whoever has it can read and send DMs as you.')
+    h('p', { class: 'muted small' }, 'Keep the file private; whoever has it can impersonate you.')
   );
 }
 
@@ -5536,13 +5534,13 @@ function settingsAppearance(body) {
     h('h3', {}, 'Theme'),
     h('div', { class: 'theme-grid' }, Object.entries(THEMES).map(([id, t]) => tile(t.name, t.colors, id))),
     h('h3', {}, 'Color schemes'),
-    h('p', { class: 'muted small' }, 'Popular terminal color schemes from the Gogh collection. Click one to load its colors, then adjust them below.'),
+    h('p', { class: 'muted small' }, 'Click a scheme to load its colors, then adjust them below.'),
     h('div', { class: 'theme-grid scroll' }, SCHEMES.map((s) => tile(s.name, s.colors))),
     h('h3', {}, 'Colors', customBadge),
     h('p', { class: 'muted small' }, 'Changing a color makes a custom theme from the one in use.'),
     ...COLOR_GROUPS.flatMap(([title, colors]) => [h('div', { class: 'color-group' }, title), h('div', { class: 'color-grid' }, colors.map(picker))]),
     h('h3', {}, 'Size'),
-    h('p', { class: 'muted small' }, `UI size scales the whole window: text, icons and spacing. ${mod} + and ${mod} − change it too.`),
+    h('p', { class: 'muted small' }, `${mod} + and ${mod} − change UI size too.`),
     h(
       'div',
       { class: 'field' },
@@ -5777,22 +5775,22 @@ function settingsVoice(body) {
       icon('head'),
       h('div', {}, h('strong', {}, 'Only test your mic with headphones on. '), 'On speakers your mic picks up its own playback and makes a loud feedback screech.')
     ),
-    h('p', { class: 'muted small' }, 'Test mic plays your microphone back to you. While it runs you hear nobody else, and nobody hears you.'),
+    h('p', { class: 'muted small' }, 'While it runs you hear nobody else, and nobody hears you.'),
     h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
-    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
+    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn), preview.el),
     ...streamingSettings(check),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
-    h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
+    h('p', { class: 'muted small' }, 'Covers everything except the game. Click someone in a voice channel to change only their volume.'),
     h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
     check('autoGain', 'Automatic gain', restartMic),
     h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
     check('echoCancellation', 'Echo cancellation', restartMic),
-    h('p', { class: 'muted small' }, 'Keeps what your speakers play out of your mic, so friends don’t hear themselves. With headphones on you can turn it off: your voice is then sent untouched while others talk.'),
+    h('p', { class: 'muted small' }, 'Keeps your speakers out of your mic. With headphones on you can turn it off.'),
     check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
     denoiseLimit,
     h(
@@ -5836,7 +5834,7 @@ function settingsVoice(body) {
 function streamingSettings(check) {
   if (!desktop?.media) return [];
   const status = h('p', { class: 'muted small' }, 'Checking what this computer can do…');
-  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak for the change to reach the app’s own drawing and video playback. Your next share already uses it.');
+  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak to apply this everywhere.');
   const hwBox = h('input', { type: 'checkbox', checked: true });
   const describe = (caps, prefs) => {
     const hw = prefs.hardwareAcceleration;
@@ -5856,9 +5854,9 @@ function streamingSettings(check) {
   return [
     h('h3', {}, 'Streaming'),
     check('nativeStreaming', 'Native streaming'),
-    h('p', { class: 'muted small' }, 'Screen shares and the camera are captured and encoded outside the browser engine: more frames, sharper, and encoded once however many friends watch. A camera with a background, and anything this can’t capture, uses the standard pipeline.'),
+    h('p', { class: 'muted small' }, 'Smoother, sharper screen shares and camera.'),
     h('label', { class: 'check-row' }, hwBox, h('span', {}, 'Hardware acceleration')),
-    h('p', { class: 'muted small' }, 'Use the graphics card to encode your streams, play video and draw the app. Turn it off if streams or the window show glitches; everything then runs on the processor.'),
+    h('p', { class: 'muted small' }, 'Uses the graphics card. Turn it off if streams or the window show glitches.'),
     status,
     restart,
   ];
@@ -5893,9 +5891,9 @@ function settingsNotifications(body) {
       check('notify', 'All notifications'),
       check('notifyMentions', 'Mentions & replies', { disabled: !st.notify }),
       check('notifyDms', 'Direct messages & calls', { disabled: !st.notify }),
-      h('p', { class: 'muted small' }, 'Regular messages in a server never notify you. They only mark the channel unread. Mentions and DMs always show an unread badge, even when muted.'),
+      h('p', { class: 'muted small' }, 'Only mentions and DMs notify you. They show an unread badge even when muted.'),
       h('h3', {}, 'Muted people'),
-      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”: they won’t notify you in DMs or on any server.')]),
+      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”.')]),
       h('h3', {}, 'Muted servers'),
       ...(muted.length
         ? muted.map((id) => {
@@ -6025,7 +6023,7 @@ function logsSection() {
     'div',
     { class: 'logs-section' },
     h('h3', {}, 'Logs and crash reports'),
-    h('p', { class: 'muted small' }, 'Logs record errors and connection events on this computer only, never your messages. Nothing is sent anywhere unless you share a report yourself.'),
+    h('p', { class: 'muted small' }, 'Logs stay on this computer and never include your messages.'),
     status,
     h(
       'div',
@@ -6111,7 +6109,7 @@ const VOICE_QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', st
 
 // The server's permission keys, in its order: key, label, what it lets someone do
 const PERM_INFO = [
-  ['admin', 'Administrator', 'Everything. Ignores every other setting and every channel’s own settings.'],
+  ['admin', 'Administrator', 'Everything. Ignores every other setting.'],
   ['view', 'See channels', 'Read messages and files in this server’s channels.'],
   ['send', 'Send messages and join voice', 'Message in text channels and join voice channels.'],
   ['mentionRoles', 'Mention roles', '@role mentions notify people.'],
@@ -6121,11 +6119,11 @@ const PERM_INFO = [
   ['ban', 'Ban members', 'Ban and unban people.'],
   ['forceMute', 'Force mute', 'Mute people in voice so they can’t unmute themselves.'],
   ['manageRoles', 'Manage roles', 'Create and delete roles without permissions, and hand them out.'],
-  ['manageChannels', 'Manage channels', 'Create channels, and rename or delete them unless a channel says otherwise.'],
+  ['manageChannels', 'Manage channels', 'Create, rename and delete channels.'],
   ['manageEmojis', 'Manage emojis', 'Add and remove custom emojis.'],
   ['manageFiles', 'Manage files', 'Delete other people’s files.'],
   ['manageMessages', 'Delete messages', 'Delete other people’s messages.'],
-  ['createInvites', 'Create invites', 'Make invites for new people, and see the server’s invites and who joined with them.'],
+  ['createInvites', 'Create invites', 'Make invites and see who joined with them.'],
 ];
 
 // Inherit / Allow / Deny for a setting that may be unset (true, false or undefined)
@@ -6211,7 +6209,7 @@ function channelPermsDialog(ch) {
     h(
       'div',
       {},
-      h('p', { class: 'muted small' }, 'A channel’s settings beat the server-wide ones, and a role’s beats everyone’s. Inherit keeps the server-wide setting. Administrators always have everything.'),
+      h('p', { class: 'muted small' }, 'Inherit keeps the server-wide setting.'),
       S.conn.perms?.open ? h('p', { class: 'muted small' }, 'Permissions are off on this server, so these only take effect once someone is an administrator.') : null,
       h(
         'div',
@@ -6348,7 +6346,7 @@ function serverOverview(body) {
     ),
     h('h3', {}, 'Voice'),
     h('label', { class: 'field' }, h('span', {}, 'Voice quality'), quality),
-    h('p', { class: 'muted small' }, 'How much data everyone’s voice uses in this server’s voice channels. Each person sends their voice to every other person in the channel, so lower it if a big channel strains someone’s upload.'),
+    h('p', { class: 'muted small' }, 'Lower it if a big channel strains someone’s upload.'),
     h('h3', {}, 'Games'),
     h('label', { class: 'check-row' + (gameToggle.disabled ? ' disabled' : '') }, gameToggle, h('span', {}, 'Club Penguin')),
     h('p', { class: 'muted small' }, g.available ? 'Shows Club Penguin under Games for everyone on this server.' : g.reason || 'Club Penguin is not available on this server.'),
@@ -6358,7 +6356,7 @@ function serverOverview(body) {
           h(
             'div',
             { class: 'row' },
-            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used. ${can('manageFiles') ? 'You can delete anyone’s files.' : 'You can delete your own files.'} The host sets the limit with MAX_STORAGE.`),
+            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used.`),
             h('button', { class: 'btn small', onclick: () => openFileBrowser() }, 'Browse files')
           ),
         ]
@@ -6411,7 +6409,7 @@ function serverRoles(body, { st, redraw }) {
         )
       )
     );
-  const grantNote = h('p', { class: 'muted small' }, 'Only roles without permissions of their own can be handed out this way, and never to an administrator.');
+  const grantNote = h('p', { class: 'muted small' }, 'Only roles without permissions can be handed out here.');
 
   let editor;
   if (st.role === 'default') {
@@ -6420,7 +6418,7 @@ function serverRoles(body, { st, redraw }) {
       'div',
       { class: 'roles-edit' },
       h('h3', {}, 'Default permissions'),
-      h('p', { class: 'muted small' }, 'What everyone on the server can do. A role’s own settings win over these, and a channel’s over both.' + (admin || open ? '' : ' Only administrators can change them.')),
+      h('p', { class: 'muted small' }, 'What everyone can do unless a role or channel says otherwise.' + (admin || open ? '' : ' Only administrators can change them.')),
       ...PERM_INFO.map(([key, label, desc]) =>
         h(
           'label',
@@ -6480,7 +6478,7 @@ function serverRoles(body, { st, redraw }) {
         : h('p', { class: 'muted small' }, 'You can’t edit this role.'),
       h('p', { class: 'muted small' }, holders.length ? `Held by ${holders.join(', ')}.` : 'Nobody has this role yet. Give it to people from the Members page.'),
       h('h3', {}, 'Permissions'),
-      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. A person with several roles gets the setting from the highest one that has one. A role with permissions can only be held by people whose profile has a key.' + (admin && !open ? '' : ' Only administrators can change these.')),
+      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. With several roles, the highest one wins.' + (admin && !open ? '' : ' Only administrators can change these.')),
       ...PERM_INFO.map(([key, label, desc]) =>
         key === 'admin'
           ? h('label', { class: 'check-row perm-row' + (!admin || open ? ' disabled' : '') }, h('input', { type: 'checkbox', checked: !!r.perms?.admin, disabled: !admin || open, onchange: (e) => setPerms('admin', e.target.checked ? true : undefined) }), h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)))
@@ -6492,7 +6490,7 @@ function serverRoles(body, { st, redraw }) {
     );
   }
   body.append(
-    ...[open ? h('p', { class: 'banner-note' }, 'Permissions are off on this server: everyone can do everything, as before. They start applying once someone holds a role with Administrator, which is set up in the admin dashboard. Until then roles are labels, and this page is read-only.') : null,
+    ...[open ? h('p', { class: 'banner-note' }, 'Permissions are off: everyone can do everything. They apply once someone is made Administrator in the admin dashboard.') : null,
     h('div', { class: 'roles-page' }, list, editor)].filter(Boolean)
   );
 }
@@ -6505,7 +6503,6 @@ function serverMembers(body) {
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   body.append(
     h('h3', {}, 'Members'),
-    h('p', { class: 'muted small' }, hasPerms() ? 'Everyone who has joined. Roles you can hand out show a Roles button.' : 'Everyone who has joined.'),
     h(
       'div',
       { class: 'emoji-list' },
@@ -6533,7 +6530,7 @@ function serverEmojis(body) {
   const fileIn = h('input', { type: 'file', accept: 'image/*' });
   body.append(
     ...[h('h3', {}, 'Custom emojis'),
-    h('p', { class: 'muted small' }, 'Everyone on this server can use them as :name:, from the emoji picker, or in channel names.' + (ok ? ' Any image works (it’s resized); GIFs must be under 256KB.' : ' Adding and removing them needs the Manage emojis permission.')),
+    h('p', { class: 'muted small' }, 'Use them as :name: or from the emoji picker.' + (ok ? ' GIFs must be under 256KB.' : ' Adding them needs the Manage emojis permission.')),
     ok
       ? h(
           'div',
@@ -6690,7 +6687,7 @@ function serverInvites(body, { st, redraw }) {
 
   body.append(
     h('h3', {}, 'Invites'),
-    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page. Administrators can copy any working invite again, everyone else the ones they made.'),
+    h('p', { class: 'muted small' }, 'A token someone enters once to join this server.'),
     h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
     h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
     h('h3', {}, 'New invite'),
