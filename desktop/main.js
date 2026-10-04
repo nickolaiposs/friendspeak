@@ -14,6 +14,7 @@ const crypto = require('crypto');
 const tls = require('tls');
 const { spawn } = require('child_process');
 const readline = require('readline');
+const { createLogs } = require('./logs');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -45,6 +46,11 @@ protocol.registerSchemesAsPrivileged([
 
 // Separate profile/data folder, e.g. to run two copies side by side
 if (process.env.FRIENDSPEAK_USER_DATA) app.setPath('userData', path.resolve(process.env.FRIENDSPEAK_USER_DATA));
+
+// Logs and crash reports (issue #51): on this computer only, never sent anywhere. See logs.js.
+const logs = createLogs({ app, dir: app.getPath('userData') });
+logs.install();
+const NO_DIALOGS = process.env.FRIENDSPEAK_TEST_NO_DIALOGS === '1'; // tests: no modal dialogs, reload at once
 
 // Settings the main process needs before there is a window to ask (the page's
 // own settings live in its localStorage): { hardwareAcceleration }
@@ -210,6 +216,31 @@ function createWindow() {
     }
   });
 
+  // The page's process died (crash, out of memory, killed): offer to reload, but not in a loop
+  const goneAt = [];
+  win.webContents.on('render-process-gone', async (_e, d) => {
+    if (d.reason === 'clean-exit' || quitting || !win) return;
+    const w = win;
+    const now = Date.now();
+    goneAt.push(now);
+    const loop = goneAt.filter((t) => now - t < 60e3).length >= 3;
+    let reload = NO_DIALOGS && !loop;
+    if (!NO_DIALOGS) {
+      const { response } = await dialog.showMessageBox(w.isDestroyed() ? undefined : w, {
+        type: 'error',
+        title: 'friendspeak',
+        message: 'friendspeak stopped working',
+        detail: 'A report was saved. You can view and share it from Settings → About & updates once it is running again.',
+        buttons: loop ? ['Quit'] : ['Reload', 'Quit'],
+        defaultId: 0,
+        cancelId: loop ? 0 : 1,
+      }).catch(() => ({ response: 1 }));
+      reload = !loop && response === 0;
+    }
+    if (reload && !w.isDestroyed()) w.reload();
+    else if (!reload && !NO_DIALOGS) app.quit();
+  });
+
   win.loadURL('friendspeak://app/index.html');
   win.on('closed', () => (win = null));
 }
@@ -333,7 +364,10 @@ function startMedia() {
     }
     media.proc = proc;
     proc.stdin.on('error', () => {}); // a dead sidecar is handled by 'exit'
-    proc.stderr.on('data', (d) => process.stderr.write(d));
+    proc.stderr.on('data', (d) => {
+      process.stderr.write(d);
+      for (const line of String(d).split('\n')) if (line.trim()) logs.media(line);
+    });
     readline.createInterface({ input: proc.stdout }).on('line', (line) => {
       let ev;
       try {
@@ -525,6 +559,7 @@ function startUpdater() {
   updater.on('update-available', (info) => setUpdate({ status: 'available', version: info.version, url: `${RELEASES}/tag/v${info.version}` }));
   updater.on('download-progress', (p) => setUpdate({ status: 'downloading', progress: Math.round(p.percent) }));
   updater.on('update-downloaded', () => setUpdate({ status: 'ready', progress: 100 }));
+  updater.on('error', (err) => console.warn('[update]', String(err?.message || err).split('\n')[0]));
   updater.on('error', (err) => setUpdate({ status: update.version ? 'available' : 'error', error: String(err?.message || err).split('\n')[0] }));
   setTimeout(checkForUpdates, 10e3);
   setInterval(checkForUpdates, 4 * 60 * 60e3);
@@ -578,6 +613,17 @@ ipcMain.handle('desktop:prefs', async (_e, patch) => {
   }
   return { ...prefs, atStart: HW_AT_START, gpu: app.getGPUFeatureStatus() };
 });
+// Logs and crash reports: only the app's own page may ask (not the game's iframe, which shares its preload)
+const ownPage = (e) => !!e.senderFrame && e.senderFrame === e.sender.mainFrame && e.senderFrame.url.startsWith('friendspeak://app/');
+const own = (fn) => (e, ...a) => (ownPage(e) ? fn(...a) : undefined);
+ipcMain.on('desktop:log', own((msg) => logs.fromRenderer(msg)));
+ipcMain.handle('desktop:logs-read', own((o) => logs.read({ limit: o?.limit, before: o?.before })));
+ipcMain.handle('desktop:logs-summary', own(() => logs.summary()));
+ipcMain.handle('desktop:logs-seen', own(() => logs.seen()));
+ipcMain.handle('desktop:logs-report', own(() => logs.report()));
+ipcMain.handle('desktop:logs-save', own(() => logs.save(win && !win.isDestroyed() ? win : undefined)));
+ipcMain.handle('desktop:logs-reveal', own(() => logs.reveal()));
+ipcMain.handle('desktop:logs-clear', own(() => logs.clear()));
 ipcMain.handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
 
 // ---------------------------------------------------------------- lifecycle

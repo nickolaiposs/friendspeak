@@ -43,6 +43,22 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   // Hardware acceleration (D46): { hardwareAcceleration, atStart, gpu }; pass a patch to change it
   prefs: (patch) => ipcRenderer.invoke('desktop:prefs', patch),
 
+  // Logs and crash reports (issue #51), kept on this computer only. write() records a line from the page
+  // ({ level: debug|info|warn|error, text, stack? }, fire and forget); read() gives { lines: [{ id, ts, level,
+  // source, text, stack? }], more }, oldest first, the newest `limit` older than the line id `before`;
+  // summary() { errors (last 7 days), crashes: [{ id, ts, kind, message }], unseen, bytes, dir }; seen() marks
+  // the crash reports seen; report() is the text to hand over; save() asks where and resolves { saved } or { error }.
+  logs: {
+    write: (line) => ipcRenderer.send('desktop:log', line),
+    read: (opts) => ipcRenderer.invoke('desktop:logs-read', opts),
+    summary: () => ipcRenderer.invoke('desktop:logs-summary'),
+    seen: () => ipcRenderer.invoke('desktop:logs-seen'),
+    report: () => ipcRenderer.invoke('desktop:logs-report'),
+    save: () => ipcRenderer.invoke('desktop:logs-save'),
+    reveal: () => ipcRenderer.invoke('desktop:logs-reveal'),
+    clear: () => ipcRenderer.invoke('desktop:logs-clear'),
+  },
+
   // App updates from GitHub Releases: { current, status, version, url, canInstall, progress, error }
   updateState: () => ipcRenderer.invoke('desktop:update-state'),
   onUpdate: (cb) => ipcRenderer.on('desktop:update', (_e, state) => cb(state)),

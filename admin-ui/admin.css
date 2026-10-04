@@ -230,3 +230,15 @@ fieldset.card legend { padding: 0 6px; font-weight: 600; color: var(--text-stron
 .choice-help { display: block; }
 .linkbtn { color: var(--link); text-decoration: underline; padding: 0; }
 #ucron { font-family: var(--mono); }
+
+/* log history, crash reports */
+.logbar input[type='datetime-local'] { width: auto; padding: 4px 6px; margin-left: 4px; }
+.logbar .btn { text-decoration: none; }
+.loginfo { margin: -4px 0 8px; }
+.logrow mark { background: color-mix(in srgb, var(--yellow) 40%, transparent); color: inherit; border-radius: 2px; }
+.logbox.crashlog { flex: none; min-height: 0; max-height: 420px; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--bg-hover); }
+td.msg { max-width: 0; width: 100%; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crash-actions { margin-bottom: 10px; }
+pre.stack-trace { margin: 0; padding: 10px 12px; background: var(--bg-0); border: 1px solid var(--line); border-radius: var(--radius); font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; }

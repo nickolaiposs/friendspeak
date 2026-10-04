@@ -40,7 +40,8 @@ There is **no automated test suite**. See "Verifying changes" below.
 server.js              friendspeak server; exports startServer(opts) (used by the CLI and Docker)
 updater.js             server self-update: GitHub Releases check, cron maintenance window, Watchtower trigger (D29)
 admin.js               admin dashboard backend: local rule, admin keys, sessions, rate limit, audit log, JSON API + event stream (D34)
-logbuffer.js           ring buffer of the server's console output, for the dashboard's log view
+logbuffer.js           the server's console output (D49): a ring buffer for the dashboard's live view, JSON lines in data/logs for history, secrets scrubbed
+crashlog.js            crash reports in data/crashes (D49): uncaught errors, failed starts, unclean exits
 admin-ui/              the admin dashboard, served at /admin (plain ES modules, no build step); one module per view in js/views/
 public/                the client UI, bundled into the desktop app (no bundler; files load as-is)
   js/main.js           UI, app state (object S), socket handlers, settings, game view
@@ -55,12 +56,14 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/denoise-worklet.js  the mic's noise suppression (D47): runs DeepFilterNet on the audio thread; denoise-shim.js is its TextDecoder stand-in
   js/gate-worklet.js   the mic's noise gate (D48), on the audio thread; reports the mic's level for the bar in Settings
   vendor/deepfilternet/  the DeepFilterNet wasm, its glue and the model (MIT / Apache 2.0; see its README)
+  js/log.js            page errors, console.warn/error and a few explicit events → the desktop app's log (D49)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30); UI size → window zoom (D40)
   js/gogh.js           data: 50 terminal color schemes from Gogh
   js/util.js           h() DOM helper, markdown renderer, avatars, address parsing. Also served to the admin dashboard as /admin/js/util.js, so keep it import-free and safe under the dashboard's CSP
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)
+desktop/logs.js        the app's log and crash reports (D49): files in userData, scrubbed, never uploaded
 native/                the media sidecar (Rust, D45): captures a screen, window or camera, encodes H.264 and sends it to viewers over standard WebRTC; see ARCHITECTURE.md → Native streaming
   src/engine.rs        streams, layers (one encoder per rung of the ladder), viewers (str0m), the run loop
   src/source/          captures per OS, and a test pattern
@@ -91,7 +94,8 @@ Dockerfile, docker-compose.yaml, docker/   production server image and stack (D2
 5. **The client has no build step.** `public/` is plain ES modules loaded by the browser. Don't introduce a bundler, TypeScript or a framework without an explicit decision (D1).
 6. **Treat user content as hostile HTML.** All message text goes through `formatText()` (`public/js/util.js`), which escapes first. Build DOM with `h()`. Only use `innerHTML` with strings you built from escaped input.
 7. **The server validates every payload.** Use the `str()`, `cleanProfile()` and `isDataImage()` helpers in `server.js`. Socket handlers registered with `on()` in `attach()` already reject unauthenticated sockets.
-8. **The trust model is "friends", with roles on top.** A server is open (anyone who knows the address and password can do everything) until someone holds an admin role. From then on roles and channel overrides decide (D43). The server checks every permission itself: `permsOf()` in `server.js` is the one resolver, and the client only hides what it's told it can't do. Profile IDs are client-generated, but a server pins the key that first signs `hello` for an id, and only that key can use it after (D42; the profile file carries the key). Ids that only pre-D42 apps use are still spoofable. Don't add half-measures that imply more security than exists.
+8. **Logs say who did what, never what was said (D49).** No message text, DM or mail blobs, passwords, keys, friend codes, file names or image data in `console.*` on the server or `log.*` in the client. Tag server lines (`[auth]`, `[mod]`, `[files]`, …). Anything that can carry chat text goes to `console.debug`, which is never stored.
+9. **The trust model is "friends", with roles on top.** A server is open (anyone who knows the address and password can do everything) until someone holds an admin role. From then on roles and channel overrides decide (D43). The server checks every permission itself: `permsOf()` in `server.js` is the one resolver, and the client only hides what it's told it can't do. Profile IDs are client-generated, but a server pins the key that first signs `hello` for an id, and only that key can use it after (D42; the profile file carries the key). Ids that only pre-D42 apps use are still spoofable. Don't add half-measures that imply more security than exists.
 
 ## Common tasks
 
@@ -123,7 +127,8 @@ There are no unit tests. Verification so far has been scripted with **puppeteer-
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
 - **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
 - **Media sidecar (D45):** two layers. (1) The sidecar alone: a Node script that spawns `native/target/release/friendspeak-media`, sends `start` with `source: { type: 'test' }` (a moving pattern; `audio: true` adds a tone) and `viewer`, and relays `signal` events to a page in the system Chrome (puppeteer-core) that answers on a plain `RTCPeerConnection`; assert on the page's `inbound-rtp` stats (frames decoded, size, `audioLevel` with an unmuted element) and on the sidecar's `stats` events. `type: 'camera'` uses the real camera. (2) In the app: run the Electron instances with `FRIENDSPEAK_FAKE_CAPTURE=1` so every native source is the test pattern; get the `VoiceClient` by wrapping `VoiceClient.prototype.join` from `import('friendspeak://app/js/voice.js')` (modules are singletons), call `setNativeMedia` on one and `watch` on the other, and check `mediaOf`, `videoStats` and `peers.get(sid).nin`. Set `peer.noStream.screen = true` on the viewer to act as an older app. Real screen capture needs the Screen Recording permission, which macOS refuses to a process started from a terminal. Windows code can be type-checked from a Mac in a container (`rust` image, `mingw-w64`, `nasm`, target `x86_64-pc-windows-gnu`); it can only be run on Windows.
-- **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`.
+- **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`. `FRIENDSPEAK_TEST_NO_DIALOGS=1` skips the crash dialogs and reloads a crashed window at once (crash a page with CDP `Page.crash`).
+- **Logs and crash reports (D49):** run the server as a child process on a scratch `DATA_DIR` and read `logs/server-*.log` and `crashes/*.json`; `kill -9` then a restart gives an `unclean-exit` report. `startServer({ crashReports: true })` in a script that throws gives an `uncaughtException` one.
 
 Always syntax-check after edits, rebuild the game after touching `game/*/src`, and rebuild the sidecar (`cargo build --release` in `native/`) after touching `native/src`.
 

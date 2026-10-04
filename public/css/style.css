@@ -821,3 +821,23 @@ select.tri { width: auto; min-width: 100px; }
 .perm-col { font-size: calc(12px * var(--font-scale)); font-weight: 600; color: var(--muted); }
 .perm-table select { width: 100%; }
 @media (max-width: 700px) { .roles-page { flex-direction: column; } .roles-list { width: 100%; } }
+
+/* ---------------- Settings → About: the log viewer */
+.log-view { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+.log-view .row { flex: none; flex-wrap: nowrap; }
+.log-view .row select { width: auto; }
+.log-view .row input { flex: 1; min-width: 120px; }
+.log-view h4 { margin: 4px 0; color: var(--text-strong); }
+.log-crashes { flex: none; max-height: 120px; overflow-y: auto; }
+.log-crash, .log-line { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.log-crash { color: var(--red-text); }
+.log-lines { flex: 1; min-height: 0; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: calc(12px * var(--font-scale)); }
+.log-time, .log-source { color: var(--muted); flex: none; }
+.log-level { flex: none; width: 3.5em; text-transform: uppercase; font-weight: 700; }
+.log-line.warn .log-level { color: var(--yellow); }
+.log-line.error .log-level, .log-line.error .log-text { color: var(--red-text); }
+.log-text { flex: 1 1 24em; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.log-line details { flex-basis: 100%; }
+.log-line summary { cursor: pointer; color: var(--muted); }
+.log-line pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.log-more { padding: 6px 8px; text-align: center; }

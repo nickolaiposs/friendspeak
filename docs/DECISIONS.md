@@ -662,3 +662,29 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - Verified with a fake mic: the track reports `echoCancellation: true` (and `false` during a mic test); offline, a −20 dBFS tone passes unchanged, −60 dBFS around it is silenced (−95 dB and below) after the 250 ms hold, and with the gate off the output equals the input.
 
 **Alternatives:** an echo canceller of our own in the worklet (D35: a large job without Chromium's playout timing); the operating system's canceller (worse for fidelity); a gate switch next to the slider (asked not to); an automatic threshold (D35 had one; more to explain); the gate on the main thread from an analyser (timer jitter, throttled in a hidden window); the gate after the mic volume (the threshold would move with the volume slider).
+
+## D49: Logs are kept on disk and scrubbed, crashes leave a report, and nothing is sent anywhere · Active
+**Context:** The dashboard's log was a ring in memory (D34), gone at every restart, which is exactly when it is wanted. The server logged little beyond the game and the dashboard, and a crash left nothing behind. The app logged nothing at all, so a friend's "it broke" came with no evidence (#50, #51).
+
+**Decision:**
+- **The server's log is stored** as JSON lines under `DATA_DIR/logs`, by day, for `LOG_RETENTION_DAYS` (14) and up to `LOG_MAX_SIZE` (50 MB). The dashboard searches and pages through it on the server, by text, level, source and date, and exports it. `console.*` stays the way to log: a leading `[tag]` is the source.
+- **Logs say who did what, never what was said.** No message text, DM or mail blobs, passwords, keys, file names or image data. People are a name and the first 8 characters of their id; an address appears only on a refused password. Every line also passes a scrubber (registered secrets, admin keys, data URIs, bearer tokens, `password=`-style values) before it is kept, as a net under the rule and not instead of it.
+- **`debug` is never stored.** It is for what is too noisy or could carry content: voice joins and the game's `GAME_DEBUG` packet dump, which holds chat text and was moved to `console.debug` for that reason.
+- **A crash leaves a report**: the error, version, system and the last 200 log lines, in `DATA_DIR/crashes`, shown in a dashboard view of its own. An uncaught exception saves the state, flushes the log and exits 1, so Docker's restart policy brings the server back. An unhandled rejection is reported and the server keeps running. A marker file tells the next boot that the last run never shut down (killed, out of memory, power loss), which nothing else can record.
+- **The app does the same on the user's computer**: a log (errors, console warnings, connection events by host) and crash reports for the main process, the page and child processes, 14 days, scrubbed, with the home folder's name removed. Settings → About & updates shows them and saves or copies one report.
+- **Nothing is sent.** No upload, no crash reporting service, no report to the server someone is connected to. The user hands a report over themselves.
+
+**Why not send reports:** there are no accounts and no central service, by design. A report sent to "the server" would go to whoever hosts it, who isn't the one fixing the app, and a client's log is nobody else's business.
+
+**Consequences:**
+- The log now holds names, id prefixes and, for refused passwords, addresses, for 14 days. It sits behind the same gate as the dashboard, which already shows addresses; the files are mode 0600.
+- A server keeps running after an unhandled rejection, where Node alone would have exited. Its state may be off in whatever that promise was doing; the report says so.
+- Failed saves of `state.json` and the mailboxes are logged (once a minute) and no longer take the process down from a timer.
+- The scrubber only covers what is kept. The process's own stdout (`docker logs`) is unchanged, so the rule above is what protects it.
+- A short server password (under 6 characters) isn't registered with the scrubber: replacing it everywhere would mangle ordinary text. Nothing logs it.
+- Minidumps of native crashes aren't collected: without symbols they tell the user nothing, and the reason and exit code are in the report.
+- Up to 50 MB more in the data volume, and 10 MB in the app's data folder.
+- `FRIENDSPEAK_TEST_NO_DIALOGS=1` exists only so automated runs aren't stopped by the crash dialogs.
+- **Not exercised:** a full disk while logging, the app's main-process exception and child-process paths, its Save and Open folder dialogs, and anything on Windows.
+
+**Alternatives:** SQLite for the log (`node:sqlite` is there, but plain files can be read with any tool when the server won't start, which is when they matter); a logging library (a dependency for what `console` plus a tag already does); exiting on unhandled rejections (Node's default; a friends' server going down mid-call for a failed lookup costs more than it protects); Electron's `crashReporter` with an upload URL (needs a service); sending client reports to the connected server (see above).
