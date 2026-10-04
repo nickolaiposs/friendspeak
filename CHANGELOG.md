@@ -5,6 +5,30 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.6 - 2026-10-04
+
+- Admin dashboard: it moves from `/admin` to a random path, printed when the
+  server starts, and signing in with a key takes a code from an authenticator
+  app, set up at the first sign-in. **Updating:** `/admin` stops working from
+  another machine. Read the new address from the server's output, and expect
+  the QR code at your next sign-in. `ADMIN_PATH=off` and `ADMIN_MFA=off` keep
+  things as they were
+- Search in channels and DMs, with `from:`, `in:`, `has:`, `before:`, `after:`
+  and `on:` filters; picking a result jumps to the message
+- `#channel` links that follow renames, with a pick list in the composer, and
+  **Copy message link**, which shows a preview to people who can read the
+  message
+- Streams: hovering a voice channel or a person who is streaming opens a card
+  with Start watching, which joins the channel first when needed
+- Banned people, and people who remove the server from their list, need an
+  invite to come back
+- A Docker stack for a domain in `deploy/`: friendspeak behind Caddy with real
+  HTTPS, and an install script. `PUBLIC_URL` makes the server print the
+  addresses people use
+- DMs: a message sent just before yours and delivered after it no longer shows
+  under your name
+- Shorter descriptions in the app and the dashboard
+
 ## 1.1.5 - 2026-10-03
 
 - Invites replace the server password: people join with an invite token, made
