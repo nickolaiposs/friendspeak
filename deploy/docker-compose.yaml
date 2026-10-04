@@ -1,0 +1,149 @@
+# friendspeak on a domain, with real HTTPS (D53): friendspeak behind Caddy, which
+# gets and renews a Let's Encrypt certificate by itself. For a VPS/droplet, or a
+# machine at home with ports 80 and 443 forwarded to it.
+#
+# The quick way is deploy/install.sh, which asks for the domain, writes .env and
+# starts this. By hand:
+#   1. Point the domain at this machine (README → Deploy on a domain).
+#   2. Put this file and Caddyfile in one folder, with a .env next to them
+#      (deploy/.env.example); DOMAIN is the only setting it must have.
+#   3. docker compose up -d && docker compose logs friendspeak
+#
+# Friends connect to https://DOMAIN with the desktop app. The admin dashboard is
+# at https://DOMAIN/admin-<random>: the log prints its address at every start,
+# and the admin key and the first invite once, on the first start.
+#
+# No domain? Use the docker-compose.yaml in the repo's root instead: it serves a
+# self-signed certificate on port 3000 that the app pins.
+
+name: friendspeak
+
+services:
+  friendspeak:
+    # Published by the release workflow on every push to `prod`. Keep :latest
+    # for auto-updates; pin a version (e.g. :1.1.0) to stay on it.
+    image: ${FRIENDSPEAK_IMAGE:-ghcr.io/nickolaiposs/friendspeak:latest}
+    restart: unless-stopped
+    init: true
+    # Not published: only Caddy reaches it, on the stack's own network
+    expose:
+      - "3000"
+    environment:
+      # Plain HTTP inside the stack; Caddy does TLS
+      HTTPS: "0"
+      # The address the log prints for friends and for the dashboard
+      PUBLIC_URL: https://${DOMAIN:?Set DOMAIN in .env to the domain that points at this machine, e.g. chat.example.com}
+      SERVER_NAME: ${SERVER_NAME:-friendspeak}
+      GIPHY_API_KEY: ${GIPHY_API_KEY:-}
+      # Total space for files uploaded to channels (stored in the data volume)
+      MAX_STORAGE: ${MAX_STORAGE:-2GB}
+      # Log history kept in the data volume (admin dashboard → Logs): days (0 = memory only) and size cap
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-14}
+      LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
+      # off = only members can pass direct messages through this server
+      DM_GUESTS: ${DM_GUESTS:-on}
+      # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
+      # and printed once in the container log on first start.
+      ADMIN_KEY: ${ADMIN_KEY:-}
+      # The dashboard's path. Empty = a random one, made on the first start and printed at every
+      # start. off = the plain /admin. Or a path of your own, such as /backoffice
+      ADMIN_PATH: ${ADMIN_PATH:-}
+      # off = an admin key alone signs in (no code from an authenticator app)
+      ADMIN_MFA: ${ADMIN_MFA:-on}
+      # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
+      GAME: ${GAME:-on}
+      GAME_WORLD: ${GAME_WORLD:-Blizzard}
+      GAME_MAX_USERS: ${GAME_MAX_USERS:-300}
+      # off | notify (tell users a new version exists) | on (install it in the window)
+      AUTO_UPDATE: ${AUTO_UPDATE:-on}
+      # minute hour day-of-month month day-of-week, in TZ
+      MAINTENANCE_CRON: ${MAINTENANCE_CRON:-0 6 * * 0}
+      # How long before the window users see the (closeable) warning
+      MAINTENANCE_WARN: ${MAINTENANCE_WARN:-24h}
+      TZ: ${TZ:-UTC}
+      # Needed while the GitHub repo is private: a token that can read its releases
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      WATCHTOWER_URL: http://watchtower:8080
+      WATCHTOWER_TOKEN: ${WATCHTOWER_TOKEN:-}
+    labels:
+      # Watchtower only touches containers with this label
+      com.centurylinklabs.watchtower.enable: "true"
+    volumes:
+      # Chat history, uploaded files, emojis, penguins (game.sqlite) and secrets. Back this volume up.
+      - friendspeak-data:/data
+      # Game assets (optional; not shipped in the image). Empty folders are
+      # fine; the game then reports its assets as missing.
+      - ${GAME_ASSETS_PATH:-./assets-pack}:/app/game/assets-pack:ro
+      - ${GAME_EXTRA_ASSETS_PATH:-./assets-extra}:/app/game/assets-extra:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # The only service the internet reaches. 80 is for Let's Encrypt and for
+  # forwarding http:// to https://; 443/udp is HTTP/3; 3000 is the port the app
+  # tries for an address typed without https:// (see Caddyfile).
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - friendspeak
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "3000:3000"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The certificates and their keys. Keep this volume: Let's Encrypt limits
+      # how often a domain can get new ones.
+      - caddy-data:/data
+      - caddy-config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Replaces the friendspeak container when friendspeak asks it to (HTTP API
+  # only: it never polls on its own). It's the only service with the Docker
+  # socket. Runs only with COMPOSE_PROFILES=autoupdate (README → Automatic updates).
+  watchtower:
+    image: nickfedor/watchtower:latest
+    profiles: [autoupdate]
+    restart: unless-stopped
+    command: --http-api-update --label-enable --cleanup
+    environment:
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN:-}  # required: watchtower exits without it (friendspeak keeps running)
+      # Needed while the image on GHCR is private: your GitHub user and a token with read:packages
+      REPO_USER: ${GHCR_USER:-}
+      REPO_PASS: ${GHCR_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  friendspeak-data:
+  caddy-data:
+  caddy-config:
