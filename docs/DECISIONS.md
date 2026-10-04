@@ -752,3 +752,22 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - Scripts that sign in (see AGENTS.md → Verifying changes) compute the code or run with `ADMIN_MFA=off`.
 
 **Alternatives:** WebAuthn/passkeys (need a stable HTTPS origin, which a self-signed LAN server on an IP doesn't have); one TOTP secret for the whole server (can't reset one admin); printing the secret in the server output at first boot (ties setup to shell access and puts a lasting secret in `docker logs`); requiring both with no switch (breaks hosts behind an access proxy with path rules, and automation); a QR library (a dependency and a vendored file for one screen); recovery codes (another secret to store; the reset and the host's own access cover it).
+
+## D53: A second compose stack puts Caddy in front, for hosts with a domain · Active
+**Context:** issue #83. D20/D21 cover a host without a domain: a self-signed certificate that the app pins. A host on a rented server with a domain had to put a proxy together from a paragraph in the README, and the admin dashboard is the part that most needs a real certificate: it is opened in a browser, where a self-signed one is a warning to click through.
+
+**Decision:**
+- **`deploy/`** holds a stack of its own: `docker-compose.yaml` (friendspeak with `HTTPS=0` and no published port, Caddy on 80/443, the same optional Watchtower), a `Caddyfile`, `.env.example` and `install.sh`. The stack in the repo's root stays as it is, for LANs, Portainer and hosts with a proxy of their own. Same image, same data volume and project name, so a host can move from one to the other.
+- **Caddy**, because it gets and renews Let's Encrypt certificates with no setup, passes `Host`, sets `X-Forwarded-Proto` and proxies WebSockets by default, which is everything D34 and D42 ask of a proxy. The whole proxy config is one `reverse_proxy` line. The official `caddy:2` image, no plugins.
+- **Caddy also listens on 3000** with the same certificate. The app reads an address typed without a scheme as port 3000 (D20), and that can't change for apps already installed, so `chat.example.com` would fail where `https://chat.example.com` works.
+- **`install.sh`** is plain bash: it installs Docker with Docker's own script after asking, asks for the domain, writes `.env` (mode 0600) and starts the stack. It never overwrites an existing `.env` or `Caddyfile`. It checks where the domain points and only warns, because a home server or a DNS proxy looks wrong from the machine itself. It doesn't touch firewalls.
+- **`PUBLIC_URL`** is read by the CLI only, to print the addresses people actually use. The server doesn't need to know its own address, and nothing trusts the value.
+- **No setting for a certificate email.** Let's Encrypt stopped sending expiry emails in 2025, and an empty value is a Caddyfile error.
+
+**Consequences:**
+- friendspeak still doesn't trust `X-Forwarded-For` (D34): behind Caddy every peer address is Caddy's. The audit log and user list show it, sign-in lockouts are shared, and IP bans fall back to the profile. The random path (D52) keeps strangers from the sign-in page, which is what makes the shared lockout acceptable.
+- Caddy isn't labeled for Watchtower: `caddy:2` is updated with `docker compose pull`.
+- The compose file is the second copy of friendspeak's environment list. A new server variable that Docker hosts need goes in both, and in both `.env.example` files.
+- It needs ports 80 and 443 reachable. A host whose provider blocks them needs a tunnel or a DNS challenge, which takes a Caddy build with a DNS plugin; neither is set up here.
+
+**Alternatives:** a `caddy` profile in the root compose file (the friendspeak service would need `HTTPS` and `ports` to differ per profile, which compose can't express); `extends` from the root file (Portainer's web editor can't follow it); the Caddyfile inline in the compose file (`configs.content` needs a recent compose, and a file is easier to edit); nginx or Traefik with certbot/ACME setup (more moving parts for the same result); ACME inside `server.js` (a dependency and port 80, against the one-port rule); trusting `X-Forwarded-For` from the bundled proxy (changes D34's rule; left for its own decision).
