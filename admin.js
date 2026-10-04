@@ -43,6 +43,7 @@ const HEADERS = {
 
 function createAdmin(ctx) {
   const { app, express, dataDir, logs, options = {} } = ctx;
+  const crashes = ctx.crashes || { list: () => [], get: () => null, remove: () => false, clear: () => 0 };
   const KEYS_FILE = path.join(dataDir, 'admin.json');
   const AUDIT_FILE = path.join(dataDir, 'admin-audit.log');
   const UI_DIR = path.join(__dirname, 'admin-ui');
@@ -372,18 +373,78 @@ function createAdmin(ctx) {
       docker: !!ctx.inDocker,
       https: !!ctx.https,
       fingerprint: ctx.fingerprint(),
-      password: !!ctx.passwordSet,
+      inviteOnly: st.inviteOnly !== false,
+      invites: st.invites.filter((v) => !v.revoked && !(v.expires && v.expires <= Date.now()) && !(v.maxUses && v.uses >= v.maxUses)).length, // the ones that still work
       adminLocal: localAllowed,
       counts: { online: ctx.users.size, profiles: Object.keys(st.profiles).length, bans: st.bans.length, channels: st.channels.length },
       storage: ctx.usage(),
       game: ctx.gameInfo(),
       update: ctx.updater.status(),
+      crashes: crashesSummary(),
+      logs: logs.info(),
     });
   });
 
-  api.get('/logs', (req, res) => {
-    const before = req.query.before !== undefined && Number.isFinite(Number(req.query.before)) ? Number(req.query.before) : undefined;
-    res.json(logs.lines({ before, limit: clampInt(req.query.limit, 500, 2000) }));
+  // ---------- logs and crash reports (#50, #51) ----------
+
+  const crashesSummary = () => {
+    const list = crashes.list();
+    return { count: list.length, last: list.length ? list[0].ts : null };
+  };
+  // Express 5 forwards a rejected promise to the error handler; this answers it as JSON
+  const guard = (fn) => (req, res) =>
+    Promise.resolve(fn(req, res)).catch((err) => {
+      console.error(`[admin] ${req.method} ${req.path} failed:`, err && err.message);
+      if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    });
+  const msOrUndef = (v) => (typeof v === 'string' && v !== '' && Number.isFinite(Number(v)) ? Number(v) : undefined);
+  // The filters of /logs and /logs/export, from the query string
+  const logFilters = (q) => {
+    const levels = typeof q.level === 'string' && q.level ? q.level.split(',').map((x) => x.trim()).filter((x) => ['debug', 'info', 'warn', 'error'].includes(x)) : undefined;
+    return {
+      before: msOrUndef(q.before),
+      from: msOrUndef(q.from),
+      to: msOrUndef(q.to),
+      levels: levels && levels.length ? levels : undefined,
+      source: typeof q.source === 'string' && q.source ? (q.source === '-' ? '' : q.source.slice(0, 32).toLowerCase()) : undefined,
+      q: typeof q.q === 'string' ? q.q.slice(0, 200) : undefined,
+    };
+  };
+
+  api.get('/logs', guard(async (req, res) => {
+    res.json(await logs.query({ ...logFilters(req.query), limit: clampInt(req.query.limit, 500, 2000) }));
+  }));
+
+  api.get('/logs/info', (_req, res) => res.json(logs.info()));
+
+  api.get('/logs/export', guard(async (req, res) => {
+    const f = logFilters(req.query);
+    const { lines } = await logs.query({ ...f, limit: clampInt(req.query.limit, 20000, 100000) });
+    const now = new Date();
+    const stamp = now.toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15);
+    const filters = [f.q && `text contains "${f.q.replace(/[\u0000-\u001f\u007f]/g, ' ')}"`, f.levels && `levels ${f.levels.join(',')}`, f.source !== undefined && `source ${f.source || '(none)'}`, f.from !== undefined && `from ${new Date(f.from).toISOString()}`, f.to !== undefined && `to ${new Date(f.to).toISOString()}`, f.before !== undefined && `before id ${f.before}`].filter(Boolean);
+    const head = [`friendspeak server log: ${ctx.state().name.replace(/[\u0000-\u001f\u007f]/g, ' ')}`, `version ${ctx.version}`, `exported ${now.toISOString()}`, `filters: ${filters.join('; ') || 'none'}`, `${lines.length} lines`, ''];
+    res.set({ 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': `attachment; filename="friendspeak-log-${stamp}.txt"` });
+    res.send(head.join('\n') + '\n' + lines.map((l) => `${new Date(l.ts).toISOString()} ${l.level.toUpperCase().padEnd(5)} ${l.text}`).join('\n') + (lines.length ? '\n' : ''));
+  }));
+
+  api.get('/crashes', (_req, res) => res.json({ crashes: crashes.list() }));
+  api.get('/crashes/:id', (req, res) => {
+    const r = crashes.get(req.params.id);
+    if (!r) return res.status(404).json({ error: 'No such crash report' });
+    res.json(r);
+  });
+  api.delete('/crashes/:id', (req, res) => {
+    if (!crashes.remove(req.params.id)) return res.status(404).json({ error: 'No such crash report' });
+    audit(req.admin.actor, peerOf(req), 'crash.delete', req.params.id);
+    notify('crashes');
+    res.json({ ok: true });
+  });
+  api.delete('/crashes', (req, res) => {
+    const removed = crashes.clear();
+    audit(req.admin.actor, peerOf(req), 'crash.clear', `${removed} reports`);
+    notify('crashes');
+    res.json({ ok: true, removed });
   });
 
   api.get('/events', (req, res) => {
@@ -436,6 +497,8 @@ function createAdmin(ctx) {
 
   const BY = 'Admin dashboard';
   const actions = ctx.actions;
+  // The actor of everything below: it may do anything that is valid (`label` is for the log)
+  const dash = (req) => ({ dashboard: true, label: req.admin.actor });
   const rolesOf = (st, pid) => (Object.hasOwn(st.memberRoles, pid) ? st.memberRoles[pid] : []);
   const roleNames = (st, ids) => (ids.length ? ids.map((x) => st.roles.find((r) => r.id === x)?.name || '?').join(', ') : 'none');
   // A short fingerprint of the key a profile id is pinned to (D42), or null
@@ -450,7 +513,8 @@ function createAdmin(ctx) {
   const logAction = (req, action, detail) => {
     detail = String(detail).replace(/[\u0000-\u001f\u007f]/g, ' '); // names are user input
     audit(req.admin.actor, peerOf(req), action, detail);
-    console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
+    // What the shared actions do is logged by server.js ([mod], [server]), with this actor
+    if (!/^(user|ban|role|perms|server|invite)\./.test(action)) console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
   };
 
   api.get('/users', (req, res) => {
@@ -490,36 +554,62 @@ function createAdmin(ctx) {
   api.post('/users/:profileId/remove', (req, res) => {
     const pid = urlId(req.params.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
-    answer(res, actions.removeMember({ profileId: pid }), () => logAction(req, 'user.remove', name));
+    answer(res, actions.removeMember(dash(req), { profileId: pid }), () => logAction(req, 'user.remove', name));
   });
 
   api.post('/users/:profileId/reset-key', (req, res) => {
     const pid = urlId(req.params.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : pid;
-    answer(res, actions.resetKey(pid), () => logAction(req, 'user.key.reset', name));
+    answer(res, actions.resetKey(pid, dash(req)), () => logAction(req, 'user.key.reset', name));
   });
 
   api.post('/bans', (req, res) => {
     const pid = urlId(req.body?.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
     const ip = req.body?.ip === true;
-    answer(res, actions.ban({ profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
+    answer(res, actions.ban(dash(req), { profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
   });
 
   api.delete('/bans/:id', (req, res) => {
     const ban = ctx.state().bans.find((b) => b.id === req.params.id);
-    answer(res, actions.unban(req.params.id), () => ban && logAction(req, 'ban.remove', ban.name));
+    answer(res, actions.unban(dash(req), req.params.id), () => ban && logAction(req, 'ban.remove', ban.name));
   });
 
   api.get('/roles', (req, res) => {
     const st = ctx.state();
     const profiles = Object.create(null);
     for (const [pid, p] of Object.entries(st.profiles)) profiles[pid] = { name: p.name, color: p.color, avatar: p.avatar };
-    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles });
+    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn });
+  });
+
+  // Permissions: what everybody gets, and whether they apply yet (open mode until someone is an administrator)
+  const permsView = () => {
+    const st = ctx.state();
+    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn, roles: st.roles };
+  };
+  api.get('/permissions', (_req, res) => res.json(permsView()));
+
+  api.put('/permissions', (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    const patch = {};
+    if (b.perms !== undefined) patch.perms = b.perms;
+    if (b.grantable !== undefined) patch.grantable = b.grantable;
+    if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
+    const was = { ...ctx.state().defaultPerms };
+    answer(res, actions.setDefaultPerms(dash(req), patch), () => {
+      const now = ctx.state().defaultPerms;
+      const what = Object.keys(now).filter((k) => now[k] !== was[k]).map((k) => `${k} ${now[k] ? 'on' : 'off'}`);
+      if (patch.grantable !== undefined) what.push('grantable roles');
+      logAction(req, 'perms.default', what.join(', ') || 'no change');
+    });
   });
 
   api.post('/roles', (req, res) => {
-    answer(res, actions.createRole({ name: req.body?.name, color: req.body?.color }), (r) => logAction(req, 'role.create', r.role.name));
+    const b = req.body || {};
+    const role = { name: b.name, color: b.color };
+    if (b.perms !== undefined) role.perms = b.perms;
+    if (b.grantable !== undefined) role.grantable = b.grantable;
+    answer(res, actions.createRole(dash(req), role), (r) => logAction(req, 'role.create', r.role.name + (Object.keys(r.role.perms).length ? ' (with permissions)' : '')));
   });
 
   api.patch('/roles/:id', (req, res) => {
@@ -527,9 +617,9 @@ function createAdmin(ctx) {
     const old = ctx.state().roles.find((r) => r.id === id);
     const b = req.body || {};
     const patch = {};
-    for (const k of ['name', 'color', 'position']) if (b[k] !== undefined) patch[k] = b[k];
-    answer(res, actions.updateRole(id, patch), (r) => {
-      const what = Object.keys(patch).map((k) => (k === 'name' ? `renamed to ${r.role.name}` : k === 'color' ? 'color' : `moved to ${patch.position + 1}`));
+    for (const k of ['name', 'color', 'position', 'perms', 'grantable']) if (b[k] !== undefined) patch[k] = b[k];
+    answer(res, actions.updateRole(dash(req), id, patch), (r) => {
+      const what = [...new Set(Object.keys(patch).map((k) => (k === 'name' ? `renamed to ${r.role.name}` : k === 'color' ? 'color' : k === 'position' ? `moved to ${patch.position + 1}` : 'permissions')))];
       logAction(req, 'role.update', `${old.name}${what.length ? ': ' + what.join(', ') : ''}`);
     });
   });
@@ -537,12 +627,12 @@ function createAdmin(ctx) {
   api.delete('/roles/:id', (req, res) => {
     const id = urlId(req.params.id);
     const old = ctx.state().roles.find((r) => r.id === id);
-    answer(res, actions.deleteRole(id), () => logAction(req, 'role.delete', old.name));
+    answer(res, actions.deleteRole(dash(req), id), () => logAction(req, 'role.delete', old.name));
   });
 
   api.put('/users/:profileId/roles', (req, res) => {
     const pid = urlId(req.params.profileId);
-    answer(res, actions.setMemberRoles(pid, req.body?.roles), (r) => {
+    answer(res, actions.setMemberRoles(dash(req), pid, req.body?.roles), (r) => {
       const st = ctx.state();
       logAction(req, 'role.assign', `${st.profiles[pid].name}: ${roleNames(st, r.roles)}`);
     });
@@ -605,7 +695,9 @@ function createAdmin(ctx) {
       c.bytes += f.size;
       c.count++;
     }
+    const dirBytes = (dir) => fs.promises.readdir(dir).then((names) => Promise.all(names.map((n) => fs.promises.stat(path.join(dir, n)).then((s) => (s.isFile() ? s.size : 0), () => 0))).then((a) => a.reduce((x, y) => x + y, 0)), () => 0);
     const data = await Promise.all(DATA_FILES.map((name) => fs.promises.stat(path.join(dataDir, name)).then((s) => ({ name, bytes: s.size }), () => ({ name, bytes: 0 }))));
+    for (const name of ['logs', 'crashes']) data.push({ name: name + '/', bytes: await dirBytes(path.join(dataDir, name)) });
     res.json({
       ...ctx.usage(),
       count: files.length,
@@ -637,9 +729,9 @@ function createAdmin(ctx) {
   });
 
   const serverView = () => {
-    const { name, icon } = ctx.state();
+    const { name, icon, inviteOnly } = ctx.state();
     const { available, enabled, reason, world } = ctx.gameInfo();
-    return { name, icon, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
+    return { name, icon, inviteOnly, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
   };
   api.get('/server', (_req, res) => res.json(serverView()));
 
@@ -650,18 +742,36 @@ function createAdmin(ctx) {
     if (b.icon !== undefined) patch.icon = b.icon;
     if (b.game !== undefined) patch.game = b.game;
     if (b.audioQuality !== undefined) patch.audioQuality = b.audioQuality;
+    if (b.inviteOnly !== undefined) patch.inviteOnly = b.inviteOnly;
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
     if (patch.name !== undefined && typeof patch.name !== 'string') return res.status(400).json({ error: 'Server name required' });
     if (patch.icon !== undefined && typeof patch.icon !== 'string') return res.status(400).json({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
     if (patch.game !== undefined && typeof patch.game !== 'boolean') return res.status(400).json({ error: 'game must be true or false' });
-    answer(res, actions.updateServer(patch), () => {
+    answer(res, actions.updateServer(dash(req), patch), () => {
       const what = [];
       if (patch.name !== undefined) what.push(`name "${ctx.state().name}"`);
       if (patch.icon !== undefined) what.push(patch.icon ? 'icon' : 'icon removed');
       if (patch.game !== undefined) what.push(patch.game ? 'game on' : 'game off');
       if (patch.audioQuality !== undefined) what.push(`voice quality ${patch.audioQuality}`);
+      if (patch.inviteOnly !== undefined) what.push(patch.inviteOnly ? 'invites required' : 'invites not required');
       logAction(req, 'server.update', what.join(', '));
     });
+  });
+
+  // Invites (D51): the tokens people join with. The dashboard is sent the token of every working invite.
+  api.get('/invites', (req, res) => answer(res, actions.listInvites(dash(req))));
+
+  api.post('/invites', (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    answer(res, actions.createInvite(dash(req), { label: b.label, maxUses: b.maxUses ?? null, expiresIn: b.expiresIn ?? null }), (r) =>
+      logAction(req, 'invite.create', `${r.invite.id.slice(0, 8)} ${r.invite.label}`.trim())
+    );
+  });
+
+  api.delete('/invites/:id', (req, res) => {
+    const inviteId = urlId(req.params.id);
+    const label = ctx.state().invites.find((v) => v.id === inviteId)?.label || '';
+    answer(res, actions.removeInvite(dash(req), inviteId), (r) => logAction(req, r.revoked ? 'invite.revoke' : 'invite.remove', `${inviteId.slice(0, 8)} ${label}`.trim()));
   });
 
   api.use((_req, res) => res.status(404).json({ error: 'No such admin API route' }));

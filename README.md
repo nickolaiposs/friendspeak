@@ -7,20 +7,23 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Direct messages:** peer to peer and end-to-end encrypted, separate from any server. Click anyone in a member list (or right-click them) and choose **Message**, or swap **friend codes** (the **+** under **DMs**) to message someone you share no server with. Conversations show up in their own collapsible **DMs** group at the top of the left rail, above your servers, and opening one doesn't disconnect you from the server or its voice channel. Text, images (up to 4 per message, 10 MB each), GIFs, replies, edits and reactions. Messages are stored only on your two devices. If your friend is offline, the message waits, still encrypted, in their mailbox on a server they use, and arrives the next time they open the app. Images come straight from your friend's device, so the full picture loads once you're both online (a small preview arrives with the message).
 - **Notifications:** DMs, calls and @mentions (`@name`, `@role`, `@everyone`, or a reply to you) notify you, even for servers you aren't looking at. Ordinary server messages never do, they only mark the channel unread. Typing `@` in a server shows a pick list. Right-click a person or a server to mute its notifications, and choose which sounds play in **Settings → Notifications**.
 - **Calls in DMs:** the phone and camera buttons at the top of a conversation start a voice or video call with that friend. During a call you can mute, turn on your camera, share your screen (with audio) and use the soundboard, like in a voice channel. Calls are peer to peer, like the messages. You can keep browsing servers and other conversations while you're in one; joining a voice channel hangs up, and starting or accepting a call leaves the voice channel.
-- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible). Roles the host sets in the admin dashboard show as small tags next to names.
-- **Remove from server:** right-click someone in the member list → **Remove from server…** to disconnect them and take them off the list. They can come back.
-- **Bans:** right-click someone in the member list → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Settings → Server**. Like channels, anyone on the server can ban or unban.
-- **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. Anyone can delete any file. The host caps total storage with `MAX_STORAGE` (default 2 GB).
+- **Member list:** everyone online, plus an **Offline** section with everyone who has been on the server before (collapsible). Roles show as small tags next to names.
+- **Roles and permissions:** Discord-style roles with a color and permissions: administrator, see channels, send messages and join voice, mention roles, mention @everyone, remove, kick from voice, ban, force mute, manage roles, channels, emojis and files, and delete other people's messages. Every role starts from the default permissions (see, send and mention), and the highest role that sets something wins. Each channel can override see, send/join and manage per role, from its right-click **Permissions…**; people who can't see a channel don't get it at all. Give someone a role from **Server settings → Members** or by right-clicking their name anywhere. Moderators with **Manage roles** can only hand out roles without permissions; anything with permissions is for admins. A server stays open, with everyone allowed everything as before, until the host makes someone an admin in the [admin dashboard](#admin-dashboard).
+- **Remove from server:** right-click someone → **Remove from server…** to disconnect them and take them off the list. They can come back.
+- **Bans:** right-click someone → **Ban…** to disconnect them and keep their profile (and optionally their IP) out. Unban in **Server settings → Bans**.
+- **Moderation in voice:** right-click someone in a voice channel → **Kick from voice** or **Force mute**. A force mute can be lifted, but it never unmutes someone who muted themselves.
+- **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. You can delete your own files, and people with **Manage files** anyone's. The host caps total storage with `MAX_STORAGE` (default 2 GB).
 - **Embeds:** links to YouTube, Vimeo, Streamable, Spotify, SoundCloud and direct image/video/audio files embed a player under the message. Wrap a link in `<angle brackets>` to post it without an embed.
-- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen (with optional shortcuts), push-to-talk, a master volume, per-user volume (0–300%) and mute, speaking indicators, device selection, noise suppression, a mic test that plays your mic back to you (and silences everyone else), and the highest Opus quality (stereo, up to 510 kbps; a server can lower it in Settings → Server). The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
-- **Screen sharing:** share an entire screen or a single window, with audio, at up to 1440p 60 fps, from the monitor button in the voice panel. Friends click the red **LIVE** badge to watch. Video is only sent to people who are watching.
-- **Cameras:** the camera button next to it turns on your webcam (up to 1080p 60 fps). Right-click it, or go to **Settings → Voice & video**, to pick a device. Before the camera goes on you get a preview, where you can blur your background (with a strength slider) or replace it with a picture: one that comes with the app, or your own. Right-click the camera button to change it mid-call. The background is replaced on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
+- **Voice channels:** peer-to-peer WebRTC voice with mute, deafen (with optional shortcuts), push-to-talk, a master volume, per-user volume (0–300%) and mute, speaking indicators, device selection (switchable mid-call: right-click mute), automatic gain, echo cancellation, noise suppression that runs on your device (DeepFilterNet, with a strength slider), a noise gate with a level bar, a mic test that plays your mic back to you (and silences everyone else), and the highest Opus quality (stereo, up to 510 kbps; a server can lower it in Settings → Server). The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
+- **Screen sharing:** share an entire screen or a single window, with audio, at up to 1440p 60 fps, from the monitor button in the voice panel. Friends click the red **LIVE** badge to watch. Video is only sent to people who are watching. In the desktop app on macOS and Windows the share is captured and encoded by a native helper (on the graphics card when it can), and encoded once however many friends watch.
+- **Cameras:** the camera button next to it turns on your webcam (up to 1440p 60 fps in the desktop app on macOS and Windows, 1080p 60 fps otherwise or with a background). Right-click it, or go to **Settings → Voice & video**, to pick a device. Before the camera goes on you get a preview, where you can blur your background (with a strength slider) or replace it with a picture: one that comes with the app, or your own. Right-click the camera button to change it mid-call. The background is replaced on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching.
 - **Emojis:** a full searchable emoji picker, plus **custom server emojis** that you upload and use as `:name:`. Channel names can have emojis too: use the emoji button in the create/rename dialog.
 - **GIFs:** GIPHY search built into the composer.
-- **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON.
+- **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON. Each profile is its own account: it has its own server list and direct messages, and joins every server (password included) itself.
 - **Themes:** **Settings → Appearance** has dark, light and high-contrast themes, 50 popular color schemes (Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, … from the [Gogh](https://github.com/Gogh-Co/Gogh) collection) with a preview of each, and a color picker for every color in the UI. You can also change the font, text size, density and the size of the whole UI. It's stored on your device and nobody else sees it.
-- **Connect by IP:** save any number of servers in the left rail, with optional passwords.
-- **Server name and icon:** click the server name (or **Settings → Server**). Anyone can set the icon from any image (it's resized for you), an animated GIF, a GIPHY GIF or an https link. Everyone on the server sees it, like Discord.
+- **Connect by IP:** save any number of servers in the left rail.
+- **Invites:** joining a server takes an invite token (`K7QF-29XM-PA3T-Z6WH`), entered once. An invite can work until it is revoked, once, a set number of times, or for a set time. The server lists who made each invite, how often it was used, how long it has left and who joined with it, and administrators can copy a working invite again. Friends paste it into the **Invite** field of **Connect to a server**.
+- **Server settings:** click the server name, or right-click the server → **Server settings…**, for the overview (name, icon, voice quality, game), roles, members, emojis and bans. Only admins and moderators (anyone whose roles let them moderate or manage something) can open it, and everyone while the server is still open. Admins can set the icon from any image (it's resized for you), an animated GIF, a GIPHY GIF or an https link. Everyone on the server sees it, like Discord.
 - **Soundboard:** add your own audio files (drag and drop works). They're stored locally, and when you play one it's mixed into your voice stream so everyone in the channel hears it, even while you're muted. Each sound can have its own emoji, volume and hotkey.
 - **Desktop app:** an Electron app for macOS, Windows and Linux. The mic always works, soundboard hotkeys work from other apps, and it connects to any friendspeak server. (It doesn't host one; run the server separately.) It tells you when a new version is out, links to the release notes, and updates itself on Windows and Linux.
 - **Server auto-updates (Docker):** the server installs new releases in a maintenance window you choose (cron format, default Sunday 06:00). Everyone on the server gets a closeable warning ahead of time.
@@ -39,7 +42,7 @@ The server only hosts: it has no chat web UI. Everyone, including the host, uses
 
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
-  Friends connect:   192.168.1.20:3000
+  Friends connect:   http://192.168.1.20:3000
   Admin dashboard:   http://localhost:3000/admin  (no key needed from this machine)
 ```
 
@@ -75,11 +78,15 @@ The game art is never included in these files (see [Game assets](#game-assets-ho
 - **Updates:** the app checks [GitHub Releases](https://github.com/nickolaiposs/friendspeak/releases) at launch and every few hours, and shows a banner with a **What's new** link (also in **Settings → About & updates**). On Windows (installer) and Linux (AppImage), **Update** downloads it and **Restart now** installs it. macOS builds aren't signed with an Apple Developer ID, so they can't replace themselves: **Download** opens the release page. Neither can the Windows portable exe.
 - Profiles, sounds and trusted certificates are stored in the app's data folder. To run two copies side by side, e.g. for testing, set `FRIENDSPEAK_USER_DATA=/some/folder`.
 
+### Logs and crash reports
+
+The app keeps a log of errors and connection events, and a report for each crash, on your computer only. Nothing is sent anywhere. **Settings → About & updates → Logs and crash reports** shows them and can save or copy a report to send to whoever is helping you. The log never holds your messages, and passwords, keys and your home folder's name are removed from it. It is kept for 14 days.
+
 ## Virtual penguin world
 
 The game is built into every friendspeak server. Click the 🐧 game under *Games* in the channel list.
 
-Anyone on the server can turn it on or off in **Settings → Server → Games**. When it's off, or the server doesn't have the game assets, the *Games* section doesn't appear at all.
+An admin can turn it on or off in **Server settings → Overview**. When it's off, or the server doesn't have the game assets, the *Games* section doesn't appear at all.
 
 - You're logged straight in. Your penguin is created from your friendspeak profile the first time you play: its name comes from your display name, and its color is the closest penguin color to your profile color. It's saved on that server. If you change your display name, your penguin is renamed the next time you open the game.
 - Everyone on the server shares the same world (default name *Blizzard*), and the member list shows who's playing.
@@ -104,9 +111,9 @@ Then restart the server. The startup log shows `Penguin game: ready`. The game s
 
 ## How friends connect (read this for voice to work)
 
-The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's `IP:port`. Plain `http://` works, and the microphone always works in the app.
+The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's address. An address without a scheme means `https://` (port 3000 unless one is given), so for a plain HTTP server (`npm start`) type `http://IP:port`. The microphone works in the app either way.
 
-For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `https://HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
+For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
 To play over the internet instead of a LAN, forward the TCP port on the host's router. Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
 
@@ -116,10 +123,11 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 |-----------------|---------------|----------------------------------------------------------------|
 | `PORT`          | `3000`        | Port to listen on                                              |
 | `SERVER_NAME`   | `friendspeak` | Initial server name (first start only; afterwards rename it in Settings → Server) |
-| `PASSWORD`      | none          | Require a password to join                                     |
 | `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key                |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
-| `DM_GUESTS`     | on            | `off` = only people with the password can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without the password; they see nothing else |
+| `LOG_RETENTION_DAYS` | `14`     | How many days of the server's log are kept on disk (`data/logs/`) for the admin dashboard. `0` = keep the log in memory only |
+| `LOG_MAX_SIZE`  | `50MB`        | Most disk space the log history may use; the oldest days are deleted first |
+| `DM_GUESTS`     | on            | `off` = only members can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without having joined; they see nothing else |
 | `HTTPS`         | off           | `1` = serve over HTTPS with an auto-generated self-signed cert |
 | `DATA_DIR`      | `./data`      | Where channels, history, emojis, certs and the game database are stored |
 | `GAME`          | on            | `off` = disable the game entirely (not served, not started, can't be turned on in Settings) |
@@ -136,7 +144,19 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `ADMIN_LOCAL`   | on (off in Docker) | `off` = even a request from the server's own machine needs a key |
 | `ADMIN`         | on            | `off` = no admin dashboard at all |
 
-Example: `SERVER_NAME="Game Night" PASSWORD=hunter2 npm start`
+Example: `SERVER_NAME="Game Night" npm start`
+
+### Invites
+
+Joining takes an invite. The first start prints one that never expires on the console (in Docker: `docker compose logs friendspeak`). A friend pastes it into the **Invite** field of **Connect to a server**. It is not kept in the log the dashboard shows; find it again under **Invites** in the dashboard.
+
+Make more in the admin dashboard under **Invites**, or in the app under **Server settings → Invites**: one that never expires (until it is revoked), one use, a number of uses, or one that expires after a time. The list shows each working invite's token with a **Copy** button, who made it, its uses, the time it has left and who joined with it. The server keeps the tokens of working invites (in `state.json`), so they can be copied again at any time: the dashboard and administrators see all of them, other people with the permission the ones they made.
+
+In the app only people with the **Create invites** permission see that page or any invite. The permission is off by default: give it to a role (or to everyone) under Roles. Until someone is an administrator, invites are made in the dashboard. Someone with the permission can revoke their own invites; administrators and the dashboard can revoke any.
+
+An invite is needed once. After that the server knows a member by their profile's key, so losing or revoking an invite doesn't lock anyone out. A member who is removed needs a new invite to come back. **Require an invite to join** can be switched off in the dashboard or by an administrator in the app; then anyone who knows the address can join.
+
+A server updated from a version with `PASSWORD`: the variable is ignored, everyone already on the server stays, and the first start after the update prints an invite as above.
 
 ## Admin dashboard
 
@@ -144,18 +164,19 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 
 - **Overview:** version, uptime, memory, how it is hosted, who is online, storage used, the game and update status.
 - **Users:** who is online (with their IP, since when, and what they are doing), everyone who has been on the server before (last seen, last IP) and the bans (with the real IP). You can remove someone, ban them (and their IP) and unban them.
-- **Roles:** create labels such as *Founder* or *Mod*, give them a color, order them, and assign them to people. Roles are labels shown next to names in the app. They are **not** a security feature and grant nothing: anyone who copies someone's profile id shows their roles, and everyone on the server can still manage channels, emojis and bans in the app.
+- **Roles:** create, edit, order and delete roles, set their permissions and the default permissions, and assign them to anyone. Make someone an admin here to switch the server from open (everyone can do everything) to permissions. Roles with permissions need a profile with a key (any current app), since older apps' profile ids can be copied.
 - **Channels:** each channel's message and file counts, and who is in each voice channel. Read-only: manage channels in the app.
 - **Storage:** space used against `MAX_STORAGE`, usage by channel, the largest files and the size of the data files. Read-only.
 - **Penguin game:** whether the game is available and on, the world, and how many players are in it.
 - **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now**, and settings for the update mode and the maintenance window (see [Automatic updates](#automatic-updates)).
-- **Server settings:** the server's name, icon and the game switch, like **Settings → Server** in the app.
-- **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
+- **Server settings:** the server's name, icon and the game switch, like **Server settings** in the app.
+- **Server log:** a live tail of the server's own output, and its history: the log is kept on disk for `LOG_RETENTION_DAYS` (14 by default), so it survives restarts. Filter by level and source (`[auth]`, `[mod]`, `[game]`, `[update]`), search the whole history, jump to a date range, and export what you see as a text file. The log records who did what (connections, refused sign-ins, moderation, failed uploads, errors), never message text, and secrets such as the server password and admin keys are removed before a line is stored.
+- **Crash reports:** one report each time the server crashes, fails to start, or stops without shutting down (killed, out of memory, power loss), with the error, the version and the last log lines before it. Copy or download a report to send with a bug report.
 - **Admin keys:** create a named key for each admin and revoke it.
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
 
-**Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from `PASSWORD`, which every friend knows. The dashboard doesn't change what friends can do in the app: they can still manage channels, emojis and bans there.
+**Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from the invites friends join with. The dashboard ignores roles: it can do everything, whatever the app's permissions say.
 
 ### Getting in
 
@@ -210,7 +231,6 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `COMPOSE_PROFILES` + `WATCHTOWER_TOKEN` | none | Optional. `autoupdate` + a secret (`openssl rand -hex 32`) to install updates automatically |
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
-| `PASSWORD` | none | **Set this** if the port is reachable from the internet |
 | `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
 | `HTTPS` | `1` | `1` = self-signed HTTPS on the port. `0` = plain HTTP for use behind a TLS reverse proxy |
 | `GAME_ASSETS_PATH` / `GAME_EXTRA_ASSETS_PATH` | `/opt/friendspeak/assets-*` | Absolute host paths of the game asset packs, mounted read-only |
@@ -253,11 +273,11 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 
 - Right-click a channel to rename or delete it. Right-click a server icon to edit or remove it.
 - Click someone in a voice channel to change their volume just for you, up to 300% for quiet friends, or to mute them. Double-click the slider to go back to 100%.
-- Sharing audio: Chrome/Edge share system audio when you share an entire screen on Windows, and tab or window audio elsewhere. The desktop app shares system audio on Windows and macOS 13+ (grant Screen Recording permission on macOS). Use headphones while sharing system audio from the desktop app, or friends may hear themselves.
+- Sharing audio: Chrome/Edge share system audio when you share an entire screen on Windows, and tab or window audio elsewhere. The desktop app shares system audio on Windows and macOS 13+ (grant Screen Recording permission on macOS). With native streaming (the default, **Settings → Voice & video → Streaming**) friendspeak's own sound is left out of it, so friends don't hear themselves; without it, use headphones while sharing system audio.
 - Press ↑ in an empty composer to edit your last message. Shift-click the trash icon to delete without confirming (messages and files).
-- File links are unguessable but not password-protected: anyone you give a file's URL to can download it, like Discord attachments.
+- File links are unguessable but not behind an invite: anyone you give a file's URL to can download it, like Discord attachments.
 - To edit a sound, right-click it or use the pencil icon. Hotkeys and push-to-talk only work while the friendspeak window is focused (a browser limitation).
-- Your profiles, saved servers, settings and sounds live in your browser's storage. Use **Settings → My profile → Export** to move a profile to another computer. The file holds the profile's keys: servers only let a profile in with the key they first saw for it, so keep the file private and don't lose it (a server admin can reset a lost key under **Users** in the admin dashboard).
+- Your profiles, saved servers, settings and sounds live in the app's storage on your computer. Each profile has its own saved servers and direct messages; settings and sounds are shared. Use **Settings → My profile → Export** to move a profile to another computer. The file holds the profile's keys: servers only let a profile in with the key they first saw for it, so keep the file private and don't lose it (a server admin can reset a lost key under **Users** in the admin dashboard).
 
 ## Documentation for contributors
 
@@ -272,7 +292,8 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 server.js           Express + Socket.IO server: channels, history, emojis, voice signaling
 updater.js          Release check and maintenance-window updates
 admin.js            Admin dashboard: access, sessions, JSON API and event stream
-logbuffer.js        Keeps the last console lines in memory for the dashboard
+logbuffer.js        The server's log: in memory for the live view, on disk (data/logs) for history, secrets removed
+crashlog.js         Crash reports (data/crashes)
 admin-ui/           The admin dashboard's pages (plain ES modules, served at /admin)
 public/index.html   App shell
 public/css/         Styles
@@ -282,13 +303,15 @@ public/js/dm.js     Peer-to-peer direct messages (WebRTC data channels, server m
 public/js/identity.js  Per-profile key pairs, end-to-end sealing, friend codes
 public/js/call.js   Calls in direct messages (voice, camera, screen share)
 public/js/background.js  Camera backgrounds (blur and pictures), with MediaPipe person segmentation
-public/js/audio.js  Web Audio graph: mic, mute/PTT gate, mic test, soundboard mixing, levels
+public/js/audio.js  Web Audio graph: mic, noise gate, mute/PTT gate, mic test, soundboard mixing, levels
 public/js/store.js  Local profiles, servers, settings (localStorage), sounds, DMs and camera background pictures (IndexedDB)
 public/js/theme.js  Themes, fonts, text size, density and UI size
 public/js/gogh.js   The 50 bundled color schemes
 public/js/util.js   Helpers: markdown, avatars, formatting
 desktop/main.js     Electron main process: secure app origin, certificate pinning, global hotkeys
 desktop/preload.js  window.friendspeakDesktop bridge
+desktop/logs.js     The app's own log and crash reports, kept on this computer
+public/js/log.js    Sends the page's errors and a few events to that log
 game/index.js       Serves the game, starts the Yukon worlds, creates penguins for profiles
 game/client/        Vendored Yukon client (wizguin/yukon @ 2f47b90, MIT) + friendspeak patches
 game/server/        Vendored Yukon server (wizguin/yukon-server @ fead5f7, MIT) + friendspeak patches

@@ -5,6 +5,31 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.5 - 2026-10-03
+
+- Invites replace the server password: people join with an invite token, made
+  in the admin dashboard or in Server settings → Invites (never expiring, one
+  use, a number of uses, or expiring after a time), and revoked there. Members
+  come back without one. **Updating:** `PASSWORD` is ignored; members stay, and
+  new people need an invite. The first invite is printed when the server starts
+  and listed in the dashboard. A server that had no password becomes
+  invite-only: switch **Require an invite to join** off to keep it open
+- Roles carry permissions, with per-channel overrides and a Server settings
+  window (Overview, Roles, Members, Emojis, Bans, Invites). A server stays open
+  until the host makes someone an admin in the dashboard. Only admins and
+  moderators can open Server settings once it isn't
+- Screen, window and camera shares can be captured, encoded and sent by a
+  native media program, with a hardware acceleration switch
+- Voice: noise suppression is DeepFilterNet with a strength slider, echo
+  cancellation and a noise gate with a level bar are on by default, the mic is
+  sent mono at full level with automatic gain, and the mic can be switched
+  mid-call. The soundboard is fixed
+- Logs: the dashboard keeps the server log's history with search and shows
+  crash reports; the app keeps its own log and crash reports. Nothing is sent
+  anywhere
+- Profiles: each has its own server list, last server and unread mentions
+- Connect: addresses default to https
+
 ## 1.1.4 - 2026-10-03
 
 - Notifications: only DMs, incoming DM calls and mentions notify. Mentions

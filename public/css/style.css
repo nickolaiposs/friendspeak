@@ -407,9 +407,25 @@ body.game-visible #main { display: none; }
 .profile-row { display: flex; gap: 10px; align-items: center; padding: 6px 8px; background: var(--bg-1); border-radius: 6px; }
 .meter { flex: 1; height: 8px; background: var(--bg-0); border-radius: 4px; overflow: hidden; min-width: 150px; }
 .meter-fill { height: 100%; width: 0; background: var(--green); transition: width .06s; }
+/* Noise gate: a level bar (--lvl) with the threshold slider (--thr) on top of it */
+.gate { position: relative; height: 24px; --thr: 0%; --lvl: 0%; }
+.gate-track, .gate-level { position: absolute; left: 4px; right: 4px; top: 8px; height: 8px; border-radius: 4px; }
+.gate-track { background: linear-gradient(to right, color-mix(in srgb, var(--yellow) 30%, var(--bg-0)) var(--thr), color-mix(in srgb, var(--green) 30%, var(--bg-0)) var(--thr)); }
+.gate-level { background: linear-gradient(to right, var(--yellow) var(--thr), var(--green) var(--thr)); clip-path: inset(0 calc(100% - var(--lvl)) 0 0); transition: clip-path .06s; }
+.gate.closed .gate-level { opacity: .55; }
+.gate input[type='range'] { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; appearance: none; cursor: pointer; }
+.gate input[type='range']::-webkit-slider-runnable-track { height: 24px; background: none; }
+.gate input[type='range']::-webkit-slider-thumb { appearance: none; width: 8px; height: 22px; margin-top: 1px; border-radius: 4px; background: var(--text-strong); box-shadow: 0 0 0 1px var(--bg-0); }
 .emoji-list { display: flex; flex-direction: column; gap: 4px; }
 .emoji-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; background: var(--bg-1); border-radius: 6px; }
 .emoji-row img { width: 32px; height: 32px; object-fit: contain; }
+.invite-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: var(--bg-1); border-radius: 6px; }
+.invite-row details > div { padding: 2px 0 0 14px; }
+.invite-status { font-size: calc(11px * var(--font-scale)); font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--bg-3, var(--bg-2)); color: var(--muted); }
+.invite-status.active { background: var(--accent); color: var(--on-accent); }
+.invite-form { align-items: flex-end; }
+.invite-form .field { margin-bottom: 0; }
+.invite-token { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(18px * var(--font-scale)); letter-spacing: .06em; user-select: all; color: var(--text-strong); }
 .server-overview { align-items: flex-start; }
 .server-icon-edit { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .server-icon-preview {
@@ -782,3 +798,53 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .cr-text { display: flex; flex-direction: column; min-width: 0; margin-right: 6px; }
 .cr-text strong { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
 .msg.note .msg-text { color: var(--muted); }
+
+/* Roles and permissions */
+.voice-user .state.forced, .icon-btn.forced { color: var(--yellow, #d99a1c); }
+.channel.voice.locked { opacity: .55; cursor: not-allowed; }
+.channel .icon.lock { width: 14px; height: 14px; }
+.composer.locked { opacity: .6; }
+.composer.locked textarea { cursor: not-allowed; }
+.roles-pop { padding: 8px 10px; min-width: 200px; max-height: 320px; overflow-y: auto; }
+.roles-pop .check-row { margin: 6px 0; }
+.banner-note { margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--text); font-size: calc(13px * var(--font-scale)); }
+.roles-page { display: flex; gap: 16px; align-items: flex-start; }
+.roles-list { display: flex; flex-direction: column; gap: 2px; width: 180px; flex: none; margin-top: 12px; }
+.roles-item { display: flex; align-items: center; gap: 8px; text-align: left; padding: 6px 10px; border-radius: 6px; color: var(--muted); }
+.roles-item:hover { background: var(--bg-hover); color: var(--text); }
+.roles-item.active { background: var(--accent-soft); color: var(--text-strong); }
+.roles-item .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.roles-list .btn { margin-top: 8px; align-self: flex-start; }
+.role-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.roles-edit { flex: 1; min-width: 0; }
+.roles-edit h3:first-child { margin-top: 12px; }
+.perm-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; padding: 4px 0; }
+.perm-row > span { min-width: 0; }
+select.tri { width: auto; min-width: 100px; }
+.grant-list { display: flex; flex-direction: column; margin-bottom: 8px; }
+.member-role-tags { margin-top: 0; }
+.admin-tag { color: var(--accent-text); border-color: var(--accent-text); }
+.perm-table { display: grid; grid-template-columns: minmax(80px, auto) repeat(3, 1fr); gap: 8px 10px; align-items: center; margin-top: 8px; }
+.perm-col { font-size: calc(12px * var(--font-scale)); font-weight: 600; color: var(--muted); }
+.perm-table select { width: 100%; }
+@media (max-width: 700px) { .roles-page { flex-direction: column; } .roles-list { width: 100%; } }
+
+/* ---------------- Settings → About: the log viewer */
+.log-view { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; }
+.log-view .row { flex: none; flex-wrap: nowrap; }
+.log-view .row select { width: auto; }
+.log-view .row input { flex: 1; min-width: 120px; }
+.log-view h4 { margin: 4px 0; color: var(--text-strong); }
+.log-crashes { flex: none; max-height: 120px; overflow-y: auto; }
+.log-crash, .log-line { display: flex; flex-wrap: wrap; gap: 4px 10px; padding: 3px 8px; border-bottom: 1px solid var(--line); }
+.log-crash { color: var(--red-text); }
+.log-lines { flex: 1; min-height: 0; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; font-size: calc(12px * var(--font-scale)); }
+.log-time, .log-source { color: var(--muted); flex: none; }
+.log-level { flex: none; width: 3.5em; text-transform: uppercase; font-weight: 700; }
+.log-line.warn .log-level { color: var(--yellow); }
+.log-line.error .log-level, .log-line.error .log-text { color: var(--red-text); }
+.log-text { flex: 1 1 24em; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.log-line details { flex-basis: 100%; }
+.log-line summary { cursor: pointer; color: var(--muted); }
+.log-line pre { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.log-more { padding: 6px 8px; text-align: center; }

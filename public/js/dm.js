@@ -28,6 +28,7 @@
 // Applying one twice is harmless: the last few hundred ids are remembered.
 // A mailbox blob is JSON { v: 1, card, d }: the sender's card and one sealed
 // op, which also carries `r`, the sender's relays.
+import { log } from './log.js';
 import { dmStore } from './store.js';
 import { uid, isImage } from './util.js';
 import { ICE } from './voice.js';
@@ -128,6 +129,14 @@ export class DirectMessages {
     this.on.presence();
   }
 
+  // A bookmarked server turned us away before we had joined it (D51) and we gave up on it: knock again
+  retry(address) {
+    const s = this.servers.get(address);
+    if (!s || s.guest || s.socket.active) return;
+    this.servers.delete(address);
+    this.syncServers();
+  }
+
   connectServer(address, { password, guest }) {
     // forceNew: its own connection, so it never shares reconnect settings with the chat socket
     const socket = io(address + '/dm', {
@@ -167,8 +176,8 @@ export class DirectMessages {
       }
       this.on.presence();
     });
-    // Banned, wrong password, or a server that takes no guests: don't keep knocking
-    socket.on('connect_error', (err) => /banned|password/i.test(err.message) && socket.disconnect());
+    // Banned, not a member (or a wrong password, before invites), or a server that takes no guests: don't keep knocking
+    socket.on('connect_error', (err) => /banned|password|member/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
     // Servers with mailboxes (D32) ask who we are: prove it with the profile's key
     socket.on('challenge', async ({ nonce } = {}) => {
@@ -274,7 +283,10 @@ export class DirectMessages {
         await pc.setLocalDescription();
         peer.via.emit('signal', { to: peerId, data: { sdp: pc.localDescription } });
       });
-    pc.onconnectionstatechange = () => ['failed', 'closed'].includes(pc.connectionState) && this.lost(peerId, pc);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed') log.warn('DM link failed'); // not who with
+      if (['failed', 'closed'].includes(pc.connectionState)) this.lost(peerId, pc);
+    };
     // A connection can sit in "new" forever without failing (a freshly started
     // app sometimes gathers no ICE candidates for its first one), and nothing
     // would ever retry it. Give up on it and try again if something is waiting.

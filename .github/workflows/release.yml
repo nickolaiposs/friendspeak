@@ -1,7 +1,8 @@
 # Every push to `prod` releases the version in package.json (D29):
 #   1. a draft GitHub Release v<version> with the CHANGELOG.md section as notes
 #   2. desktop installers for macOS, Windows and Linux uploaded to it, with the
-#      latest*.yml files the app's updater reads
+#      latest*.yml files the app's updater reads. Each is built on its own OS,
+#      with the native media sidecar for that OS inside (scripts/build-media.js)
 #   3. the server image ghcr.io/<repo>:<version> (amd64 + arm64)
 #   4. once everything built: the release is published and the image tagged
 #      :latest. Only then do apps and servers see the update.
@@ -75,6 +76,13 @@ jobs:
           cache: npm
       # --ignore-scripts: the installers don't include the game, so skip its build
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      # The native media sidecar (D45), built on the OS it is for; on macOS for both chips. Linux has none yet.
+      - if: runner.os == 'macOS'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build the media sidecar
+        run: node scripts/build-media.js
+        env:
+          AWS_LC_SYS_PREBUILT_NASM: 1 # Windows: the crypto library's assembly, without installing NASM
       - name: Build and upload installers
         run: npx electron-builder ${{ matrix.args }} --publish always
         env:

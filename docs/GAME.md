@@ -82,6 +82,7 @@ Every change to vendored code. Keep this list current. Search for `friendspeak` 
 | `src/database/sqliteDriver.js` | **New.** sqlite3-compatible driver over `node:sqlite`. It rewrites numbered bind params to named ones, maps error codes, and silences the experimental warning. |
 | `schema.sqlite.sql` | **New.** SQLite port of `yukon.sql`: tables, indexes, the `trigger_users_insert` trigger, `username COLLATE NOCASE`. |
 | `src/objects/user/User.js`, `GameUser.js` | Ban expiry `[Op.gt]: new Date()` (was `Date.now()`). |
+| `src/handlers/BaseHandler.js` | The `GAME_DEBUG` packet dump uses `console.debug`, so it is never written to the server's log history (packets can hold chat text, D49). |
 | `.babelrc` | Alias `bcrypt` → `bcryptjs`. |
 | `data/rooms.json` | Added 15 extra rooms (122, 318, 330, 340, 410, 411, 420–423, 804, 808, 813–815). Added game rooms 905 and 906 (in the asset pack, but missing upstream), plus 910, 930 and 955. |
 | `package.json` | Replaced with a metadata stub. `ecosystem.config.js` and `package-lock.json` removed. |

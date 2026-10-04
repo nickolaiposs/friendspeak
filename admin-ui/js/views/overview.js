@@ -46,7 +46,7 @@ function render(o, uptimeEl) {
       card('Access', kv([
         ['HTTPS', yn(o.https, 'On', 'Off')],
         o.fingerprint && ['Fingerprint', h('span', { class: 'mono small' }, o.fingerprint)],
-        ['Server password', yn(o.password, 'Set', 'Not set')],
+        ['Joining', o.inviteOnly ? `Needs an invite (${o.invites} working)` : 'Open to anyone with the address'],
         ['Local admin access', yn(o.adminLocal, 'On', 'Off')],
       ])),
       card('Counts', kv([
@@ -62,6 +62,10 @@ function render(o, uptimeEl) {
         g.world && ['World', g.world],
         g.reason && ['Note', g.reason],
       ])),
+      o.crashes?.count > 0 && card('Crash reports', kv([
+        ['Reports', o.crashes.count],
+        o.crashes.last && ['Last', fmtTime(o.crashes.last)],
+      ]), h('p', { class: 'small' }, h('a', { href: '#/crashes' }, 'View crash reports'))),
       card('Updates', kv(updateSummary(o.update || {})), h('p', { class: 'small' }, h('a', { href: '#/updates' }, 'Manage updates')))));
 }
 

@@ -1,6 +1,10 @@
 // Everything a user "owns" lives on their own device: profiles, their keys,
 // server bookmarks, settings (localStorage), soundboard files, direct
 // messages and camera background pictures (IndexedDB).
+//
+// A profile is its own account (D50): server bookmarks, the last server and
+// unread mentions are kept per profile, as DMs already were. Settings, sounds
+// and camera backgrounds belong to the device.
 import { uid } from './util.js';
 
 const read = (k, d) => {
@@ -12,6 +16,9 @@ const read = (k, d) => {
   }
 };
 const write = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+// The active profile's copy of a per-profile key: "fs.servers:<profile id>"
+const PER_PROFILE = ['fs.servers', 'fs.lastServer', 'fs.mentionUnread'];
+const mine = (k) => `${k}:${read('fs.activeProfile', '')}`;
 
 const COLORS = ['#8b6cf6', '#e06fb8', '#2fb36d', '#d99a1c', '#e5484d', '#f0835a', '#4aa3f0', '#b866e0', '#22b8a6', '#e88a2a'];
 export const randomColor = () => COLORS[Math.floor(Math.random() * COLORS.length)];
@@ -39,11 +46,30 @@ export const profiles = {
     this.setActive(p.id);
     return p;
   },
+  // Its server list goes with it. Its DMs stay in IndexedDB, for a later import of the same profile.
   remove(id) {
     write('fs.profiles', this.all().filter((p) => p.id !== id));
     identities.remove(id);
+    for (const k of PER_PROFILE) localStorage.removeItem(`${k}:${id}`);
   },
 };
+
+// Before D50 every profile shared one server list. Each profile that exists
+// gets a copy (with the same bookmark ids, which settings refer to), so nobody
+// loses a server they were using; the unread mentions go to the active one.
+(function splitByProfile() {
+  const list = profiles.all();
+  if (localStorage.getItem('fs.servers') === null || !list.length) return;
+  const active = profiles.active().id;
+  write('fs.activeProfile', active);
+  for (const p of list) {
+    if (localStorage.getItem(`fs.servers:${p.id}`) !== null) continue;
+    write(`fs.servers:${p.id}`, read('fs.servers', []));
+    write(`fs.lastServer:${p.id}`, read('fs.lastServer', null));
+  }
+  if (localStorage.getItem(`fs.mentionUnread:${active}`) === null) write(`fs.mentionUnread:${active}`, read('fs.mentionUnread', {}));
+  for (const k of PER_PROFILE) localStorage.removeItem(k);
+})();
 
 // The key pairs behind each profile (identity.js, D32). They live apart from
 // the profile itself, because the whole profile object is sent to servers.
@@ -56,11 +82,11 @@ export const identities = {
   },
 };
 
-// ---------- server bookmarks ----------
+// ---------- server bookmarks (the active profile's) ----------
 
 export const servers = {
-  all: () => read('fs.servers', []),
-  saveAll: (list) => write('fs.servers', list),
+  all: () => read(mine('fs.servers'), []),
+  saveAll: (list) => write(mine('fs.servers'), list),
   upsert(entry) {
     const list = this.all();
     const i = list.findIndex((s) => s.id === entry.id);
@@ -72,9 +98,9 @@ export const servers = {
   remove(id) {
     this.saveAll(this.all().filter((s) => s.id !== id));
   },
-  get: (id) => read('fs.servers', []).find((s) => s.id === id),
-  last: () => read('fs.lastServer', null),
-  setLast: (id) => write('fs.lastServer', id),
+  get: (id) => read(mine('fs.servers'), []).find((s) => s.id === id),
+  last: () => read(mine('fs.lastServer'), null),
+  setLast: (id) => write(mine('fs.lastServer'), id),
 };
 
 // ---------- settings ----------
@@ -95,7 +121,11 @@ const DEFAULT_SETTINGS = {
   soundboardMonitor: true, // hear your own soundboard
   ptt: false,
   pttKey: 'Backquote',
-  noiseSuppression: true, // the browser's (WebRTC's) own; the only mic processing there is (D38)
+  noiseSuppression: true, // DeepFilterNet, in a worklet (D47)
+  noiseSuppressionLimit: 100, // dB the noise is turned down by at most; 100 is no limit (DENOISE_LIMIT in audio.js)
+  autoGain: true, // the browser's automatic gain: levels a quiet or loud mic (D44)
+  echoCancellation: true, // the browser's echo canceller: keeps what the speakers play out of the mic (D48)
+  micGate: -50, // dB the noise gate opens at; GATE.min (audio.js) and below is no gate (D48)
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)
@@ -104,6 +134,7 @@ const DEFAULT_SETTINGS = {
   showMembers: true,
   shareTier: 'auto', // screen share quality ceiling: a key of TIERS (voice.js)
   shareMode: 'smooth', // 'smooth' (games, video) | 'sharp' (text, code)
+  nativeStreaming: true, // desktop app: shares go through the native media sidecar when it can carry them (D45)
   hideOffline: false, // collapse the member list's Offline section
   railDmsHidden: false, // collapsed groups in the left rail
   railServersHidden: false,
@@ -142,14 +173,14 @@ export const settings = {
   },
 };
 
-// Unread mentions per server and channel, so the red badges survive a restart:
+// The active profile's unread mentions per server and channel, so the red badges survive a restart:
 // { [serverId]: { [channelId]: count } }
 export const mentionUnread = {
-  all: () => read('fs.mentionUnread', {}),
+  all: () => read(mine('fs.mentionUnread'), {}),
   add(serverId, channelId) {
     const all = this.all();
     all[serverId] = { ...all[serverId], [channelId]: (all[serverId]?.[channelId] || 0) + 1 };
-    write('fs.mentionUnread', all);
+    write(mine('fs.mentionUnread'), all);
   },
   // One channel, or the whole server when no channel is given
   clear(serverId, channelId) {
@@ -160,12 +191,12 @@ export const mentionUnread = {
       delete all[serverId][channelId];
       if (!Object.keys(all[serverId]).length) delete all[serverId];
     } else delete all[serverId];
-    write('fs.mentionUnread', all);
+    write(mine('fs.mentionUnread'), all);
     return true;
   },
-  channel: (serverId, channelId) => read('fs.mentionUnread', {})[serverId]?.[channelId] || 0,
-  server: (serverId) => Object.values(read('fs.mentionUnread', {})[serverId] || {}).reduce((n, c) => n + c, 0),
-  total: () => Object.values(read('fs.mentionUnread', {})).reduce((n, ch) => n + Object.values(ch).reduce((a, c) => a + c, 0), 0),
+  channel: (serverId, channelId) => read(mine('fs.mentionUnread'), {})[serverId]?.[channelId] || 0,
+  server: (serverId) => Object.values(read(mine('fs.mentionUnread'), {})[serverId] || {}).reduce((n, c) => n + c, 0),
+  total: () => Object.values(read(mine('fs.mentionUnread'), {})).reduce((n, ch) => n + Object.values(ch).reduce((a, c) => a + c, 0), 0),
 };
 
 // ---------- IndexedDB: soundboard and direct messages ----------

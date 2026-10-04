@@ -1,8 +1,10 @@
+import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME, CUES } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
+import { nativeMedia } from './native.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
@@ -48,6 +50,10 @@ const S = {
   get users() {
     return this.conn?.users || [];
   },
+  // What we may do there (see "permissions"); null on a server from before permissions
+  get perms() {
+    return this.conn?.perms || null;
+  },
   // The call, whichever server it is on
   get voice() {
     return this.call?.voice || null;
@@ -59,7 +65,7 @@ const S = {
 
 // Present when running inside the desktop app (see desktop/preload.js)
 const desktop = window.friendspeakDesktop || null;
-// Name a bookmark by the server's own name (set in Settings → Server)
+// Name a bookmark by the server's own name (set in Server settings)
 const serverLabel = (s) => s.serverName || s.address.replace(/^https?:\/\//, '');
 const initials = (label) =>
   label
@@ -94,6 +100,60 @@ function chatById(id) {
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
 
+// ---------------------------------------------------------------- permissions
+
+// What we may do on a server comes from the server (hello, then a `perms` event) and is only used to hide what would be
+// refused anyway: the server checks everything again. A server from before permissions sends none, so everything shows.
+const hasPerms = (c = S.conn) => !!c?.perms;
+const can = (key, c = S.conn) => !c?.perms || !!c.perms[key];
+// A channel's own settings beat the server-wide ones
+const canCh = (channelId, key, c = S.conn) => {
+  const p = c?.perms;
+  if (!p) return true;
+  const ch = p.channels?.[channelId];
+  return ch ? !!ch[key] : !!p[key === 'manage' ? 'manageChannels' : key];
+};
+// Server name, icon, voice quality, the game: administrators only (everyone while permissions are off)
+const canServerSettings = (c = S.conn) => !c?.perms || c.perms.admin || c.perms.open;
+// The Server settings window: administrators and moderators (anyone a role or the defaults let moderate or
+// manage something) only. Everyone while permissions are off, since then everyone can do those things.
+const SETTINGS_PERMS = ['kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages', 'createInvites'];
+const canSeeServerSettings = (c = S.conn) => !c?.perms || !!c.perms.open || !!c.perms.admin || SETTINGS_PERMS.some((k) => c.perms[k]);
+// Roles without permissions of their own are only labels: people who manage roles may hand those out
+const isAesthetic = (r) => !Object.keys(r.perms || {}).length && !r.grantable?.length;
+function isAdminPid(pid, sv = S.server) {
+  if (!sv?.permissionsOn) return false;
+  if (sv.defaultPerms?.admin) return true;
+  const have = sv.memberRoles?.[pid];
+  return Array.isArray(have) && !!sv.roles?.some((r) => have.includes(r.id) && r.perms?.admin);
+}
+// Nobody but an administrator can act on one
+const canActOn = (pid) => pid !== me().id && (can('admin') || !isAdminPid(pid));
+// The roles we may add to or take off someone
+function grantableRoles(pid) {
+  const p = S.conn?.perms;
+  const roles = Array.isArray(S.server?.roles) ? S.server.roles : [];
+  if (!p || p.open) return [];
+  if (p.admin) return roles;
+  if (!p.manageRoles || (pid !== me().id && isAdminPid(pid))) return [];
+  return roles.filter((r) => p.grantable?.includes(r.id) && isAesthetic(r));
+}
+const NOPE = 'You don’t have permission to send messages here';
+// Did the server mute us (and we can't lift it)? Then the mic stays shut whatever the mute button says.
+const forcedMute = (c = S.call) => !!c?.perms && !c.perms.forceMute && !!c.users.find((u) => u.sid === c.sid)?.forceMuted;
+// Force-mute changed (or the right to lift it): the mic gate and what friends are told follow
+function syncForced(c) {
+  const f = forcedMute(c);
+  if (f === !!c.forced) return;
+  c.forced = f;
+  if (S.call === c) syncVoiceState();
+}
+const doAct = async (event, payload) => {
+  const r = await S.socket.emitWithAck(event, payload);
+  if (r?.error) toast(r.error, 'error');
+  return r;
+};
+
 // ---------------------------------------------------------------- icons
 
 const I = {
@@ -103,6 +163,7 @@ const I = {
   headOff: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.4"/></svg>',
   gear: '<svg viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2.4h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>',
   hash: '<svg viewBox="0 0 24 24"><path d="M5.88 21 6.6 17H3l.35-2h3.6l1.06-6H4.4l.35-2h3.6l.72-4h2l-.72 4h6l.72-4h2l-.72 4H22l-.35 2h-3.6l-1.06 6h3.61l-.35 2h-3.6l-.72 4h-2l.72-4h-6l-.72 4h-2zm4.13-12-1.06 6h6l1.06-6h-6z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24"><path d="M18 8h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z"/></svg>',
   speakerOff: '<svg viewBox="0 0 24 24"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg>',
   speaker: '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6z"/></svg>',
@@ -454,7 +515,7 @@ const DMCALL = new DmCalls(DM, {
 // Whichever is live, the DM call or the voice channel's call (S.call): its VoiceClient takes the camera and the screen share
 const liveVoice = () => DMCALL.voice || (S.voiceChannel ? S.voice : null);
 // What friends are told about our mic. The mic test (Settings) keeps it from them, so it counts as muted.
-const micOff = () => S.muted || audio.micTest;
+const micOff = () => S.muted || audio.micTest || forcedMute();
 
 // A watched stream's sound plays through its <video>, outside the audio graph
 // (audio.js), so the master volume and the output device are set on each one.
@@ -505,9 +566,9 @@ function dmCallButtons(c, compact) {
   if (c.state === 'ringing') return [h('button', { class: 'icon-btn accept', title: 'Accept', onclick: acceptDmCall }, icon('phone')), hangup('Decline')];
   if (c.state === 'calling') return [hangup('Cancel')];
   const v = c.voice;
-  const off = S.muted || S.deafened;
+  const off = S.muted || S.deafened || forcedMute();
   const all = [
-    compact ? null : h('button', { class: 'icon-btn' + (off ? ' off' : ''), title: off ? 'Unmute' : 'Mute', onclick: toggleMute }, icon(off ? 'micOff' : 'mic')),
+    compact ? null : h('button', { class: 'icon-btn' + (off ? ' off' : ''), title: (forcedMute() ? 'Muted by a moderator' : off ? 'Unmute' : 'Mute') + MIC_HINT, onclick: toggleMute, oncontextmenu: micMenu }, icon(off ? 'micOff' : 'mic')),
     h(
       'button',
       {
@@ -983,7 +1044,7 @@ function profileCardHead(p, extra) {
   );
 }
 
-// Role labels (set by the host in the admin dashboard; they grant nothing). The server's order is the display order.
+// Role tags (roles and what they allow are set in Server settings or the admin dashboard). The server's order is the display order.
 // Everything here is server-supplied, so shapes are checked and names only ever become text nodes.
 // The text color is pulled toward the theme's text color, so a dark role stays readable on a dark theme.
 const MAX_ROLES = 10;
@@ -1021,8 +1082,8 @@ function profilePopover(anchor, u, align = 'right') {
             'div',
             { class: 'pc-actions' },
             h('button', { class: 'btn small', onclick: () => (pop.close(), openDm(p.id)) }, 'Message'),
-            h('button', { class: 'btn small ghost', onclick: () => (pop.close(), removePrompt(p.id)) }, 'Remove'),
-            !isBanned(p.id) && h('button', { class: 'btn small ghost danger', onclick: () => (pop.close(), banPrompt(p.id)) }, 'Ban')
+            can('kick') && canActOn(p.id) && h('button', { class: 'btn small ghost', onclick: () => (pop.close(), removePrompt(p.id)) }, 'Remove'),
+            can('ban') && canActOn(p.id) && !isBanned(p.id) && h('button', { class: 'btn small ghost danger', onclick: () => (pop.close(), banPrompt(p.id)) }, 'Ban')
           )
         : null
     ),
@@ -1217,7 +1278,7 @@ function renderRail() {
             contextMenu(e, [
               { label: muted ? 'Unmute notifications' : 'Mute notifications', run: () => toggleServerMute(s.id) },
               { label: 'Edit', run: () => serverDialog(s) },
-              active && S.connected && { label: 'Server name & icon…', run: () => openSettings('server') },
+              active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
               calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
               { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
@@ -1235,12 +1296,14 @@ function renderRail() {
 }
 
 function serverDialog(existing) {
-  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^http:\/\//, '') || '' });
-  const pass = h('input', { type: 'password', placeholder: 'optional', value: existing?.password || '' });
+  // https is the default, so it is left out when the port says the rest ("https://host" alone means port 443)
+  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^https:\/\/(?=[^/]+:\d+$)/, '') || '' });
+  // The bookmark's `password` holds the invite (D51) until it has been used, or an older server's password
+  const pass = h('input', { placeholder: 'XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', value: existing?.password || '' });
   const save = (close) => {
     const address = normalizeAddress(addr.value);
     if (!address) return toast('Enter an IP or hostname', 'error');
-    const entry = servers.upsert({ ...(existing || {}), address, password: pass.value });
+    const entry = servers.upsert({ ...(existing || {}), address, password: pass.value.trim() });
     close();
     DM.setServers(servers.all()); // every bookmarked server is also a place to meet for DMs
     renderRail();
@@ -1252,8 +1315,7 @@ function serverDialog(existing) {
       'div',
       { onkeydown: (e) => e.key === 'Enter' && save(close) },
       h('label', { class: 'field' }, h('span', {}, 'Server IP / address'), addr),
-      h('label', { class: 'field' }, h('span', {}, 'Password'), pass),
-      h('p', { class: 'muted small' }, 'Port defaults to 3000.')
+      h('label', { class: 'field' }, h('span', {}, 'Invite'), pass)
     ),
     { actions: [(c) => h('button', { class: 'btn', onclick: () => save(c) }, existing ? 'Save & connect' : 'Connect')] }
   );
@@ -1337,7 +1399,17 @@ function showServer(c) {
   checkAppAgainstServer();
 }
 
+const hostOf = (address) => {
+  try {
+    return new URL(address).host;
+  } catch {
+    return 'unknown';
+  }
+};
+
 function openSocket(entry, rejoinVoice = null) {
+  const host = hostOf(entry.address); // the only thing about a server that is logged
+  log.info(`connecting to ${host}`);
   const socket = io(entry.address, { transports: ['websocket', 'polling'], reconnectionDelayMax: 5000 });
   const c = (S.conn = { entry, socket, voice: null, sid: null, connected: false, server: null, users: [], voiceChannel: null, rejoinVoice });
   // Every handler keeps `c` up to date; only the server in view is drawn
@@ -1352,25 +1424,36 @@ function openSocket(entry, rejoinVoice = null) {
     },
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
+  c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
 
   socket.on('connect', async () => {
     const identity = await identityFor(me()).catch(() => null);
     const res = await socket.emitWithAck('hello', {
       profile: { ...me(), card: identity?.card },
-      password: entry.password || '',
+      invite: entry.password || '',
+      password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
     });
     if (res.error) {
+      log.warn(`${host} refused hello: ${res.error}`);
       toast(res.error, 'error');
       if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
       if (!viewed()) return;
       socket.disconnect();
       renderMain(res.error);
-      if (/password/i.test(res.error)) serverDialog(entry);
+      if (res.invite || /password/i.test(res.error)) serverDialog(entry);
       return;
     }
-    Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true });
+    // We're a member now, known by the profile's key: the invite has done its job, so don't keep it
+    if (typeof res.server?.inviteOnly === 'boolean' && entry.password) {
+      entry.password = '';
+      servers.upsert({ id: entry.id, password: '' });
+      DM.setServers(servers.all());
+    }
+    DM.retry(entry.address); // its DM socket was refused if it got there before we had joined
+    Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
+    log.info(`connected to ${host}`);
     rememberServerLook(c);
     pruneMentions(c);
     if (viewed()) showServer(c);
@@ -1385,7 +1468,9 @@ function openSocket(entry, rejoinVoice = null) {
     }
   });
 
+  let errLogged = false;
   socket.on('connect_error', (err) => {
+    if (!errLogged) ((errLogged = true), log.warn(`connect_error ${host}: ${err.message}`)); // once: it retries every few seconds
     if (viewed() && !c.connected) renderMain(`Can't reach ${entry.address} (${err.message}). Retrying…`);
   });
 
@@ -1399,6 +1484,8 @@ function openSocket(entry, rejoinVoice = null) {
   socket.on('removed', () => (removed = true));
 
   socket.on('disconnect', (reason) => {
+    log.info(`disconnected from ${host}: ${reason}`);
+    errLogged = false;
     if (calling()) closeStage();
     const here = viewed();
     if (replaced || banned || removed || reason === 'io server disconnect') {
@@ -1438,8 +1525,9 @@ function openSocket(entry, rejoinVoice = null) {
     if (c.voiceChannel) {
       const was = new Set(prev.filter((u) => u.voice === c.voiceChannel).map((u) => u.sid));
       const now = new Set(users.filter((u) => u.voice === c.voiceChannel).map((u) => u.sid));
-      for (const sid of now) if (!was.has(sid) && sid !== c.sid) c.voice.applyVolume(sid);
+      for (const sid of now) if (sid !== c.sid && (!was.has(sid) || !!prev.find((u) => u.sid === sid)?.forceMuted !== !!users.find((u) => u.sid === sid)?.forceMuted)) c.voice.applyVolume(sid);
     }
+    syncForced(c);
     if (calling()) syncStage();
     if (!viewed()) return calling() && renderVoicePanel(); // its video button follows who is sharing
     renderChannels();
@@ -1469,16 +1557,37 @@ function openSocket(entry, rejoinVoice = null) {
 
   socket.on('roles', (msg) => {
     if (!c.server) return;
-    const { roles, memberRoles } = msg && typeof msg === 'object' ? msg : {};
+    const { roles, memberRoles, defaultPerms, defaultGrantable, permissionsOn } = msg && typeof msg === 'object' ? msg : {};
     c.server.roles = Array.isArray(roles) ? roles : [];
     c.server.memberRoles = memberRoles && typeof memberRoles === 'object' && !Array.isArray(memberRoles) ? memberRoles : {};
+    if (defaultPerms && typeof defaultPerms === 'object') c.server.defaultPerms = defaultPerms;
+    if (Array.isArray(defaultGrantable)) c.server.defaultGrantable = defaultGrantable;
+    if (typeof permissionsOn === 'boolean') c.server.permissionsOn = permissionsOn;
     if (!viewed()) return;
     renderMembers();
     if (S.channelId && !inDmView()) renderMessages(true); // role mentions read with the new names
   });
 
-  socket.on('server', ({ name, icon, game, audioQuality }) => {
+  // Our rights changed (after `roles`, and with a filtered `channels`)
+  socket.on('perms', (perms) => {
+    if (!perms || typeof perms !== 'object') return;
+    c.perms = perms;
+    syncForced(c);
+    if (calling()) renderVoicePanel();
+    if (!viewed()) return;
+    renderHeader();
+    renderChannels();
+    renderMembers();
+    syncComposer();
+  });
+
+  socket.on('voice:forcemuted', ({ muted, by } = {}) => {
+    toast(muted ? `${by || 'A moderator'} muted you` : `${by || 'A moderator'} lifted your mute`, muted ? 'error' : 'info');
+  });
+
+  socket.on('server', ({ name, icon, game, audioQuality, inviteOnly }) => {
     Object.assign(c.server, { name, icon });
+    if (typeof inviteOnly === 'boolean') c.server.inviteOnly = inviteOnly;
     if (audioQuality) c.voice.setAudioQuality((c.server.audioQuality = audioQuality));
     if (game) {
       const wasOn = c.server.game?.enabled;
@@ -1506,9 +1615,10 @@ function openSocket(entry, rejoinVoice = null) {
     pruneMentions(c);
     if (calling()) renderVoicePanel();
     if (!viewed()) return;
-    if (!chatById(S.channelId)) {
+    if (!chatById(S.channelId) && !inDmView()) {
       const first = channels.find((ch) => ch.type === 'text');
       if (first) selectChannel(first.id);
+      else ((S.channelId = null), renderMain());
     }
     renderChannels();
     renderHeader();
@@ -1595,14 +1705,14 @@ function openSocket(entry, rejoinVoice = null) {
     if (channelId === S.channelId) renderTyping();
   });
 
-  socket.on('voice:kicked', () => {
+  socket.on('voice:kicked', ({ reason, by } = {}) => {
     c.voice.leave(true);
     c.voiceChannel = null;
     if (calling()) endCall(true);
     renderRail();
     renderChannels();
     renderVoicePanel();
-    toast('Voice channel was deleted');
+    toast(reason === 'kicked' ? `${by || 'A moderator'} removed you from voice` : reason === 'perms' ? 'You can no longer use that voice channel' : 'Voice channel was deleted', reason === 'deleted' || !reason ? 'info' : 'error');
   });
 }
 
@@ -1627,9 +1737,11 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   if (S.call !== c) endCall(); // one call at a time: hang up the one on another server
   if (DMCALL.cur && DMCALL.cur.state !== 'ringing') DMCALL.hangup(); // one microphone: a DM call or a voice channel, not both
   audio.ensure();
+  log.info('joining voice');
   try {
     await c.voice.join(channelId);
   } catch (e) {
+    log.error('voice join failed', e);
     c.rejoinVoice = null;
     if (S.call === c && !c.voiceChannel) (endCall(), renderVoicePanel());
     renderRail();
@@ -1639,6 +1751,7 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   c.rejoinVoice = null;
   S.call = c;
   if (c.voice.micError) {
+    log.warn(`microphone unavailable: ${c.voice.micError.name}: ${c.voice.micError.message}`);
     toast(
       window.isSecureContext
         ? `No microphone (${c.voice.micError.message}). You joined listen-only — soundboard still works.`
@@ -1647,7 +1760,7 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
       7000
     );
   }
-  audio.setMuted(S.muted || S.deafened);
+  audio.setMuted(S.muted || S.deafened || forcedMute());
   c.voice.setDeafened(S.deafened);
   c.socket.emit('voice:state', { muted: micOff(), deafened: S.deafened });
   if (!silent) audio.cue('join');
@@ -1661,6 +1774,7 @@ function endCall(silent = false) {
   const c = S.call;
   if (!c) return;
   closeStage();
+  log.info('left voice');
   c.voice.leave(silent);
   c.voiceChannel = c.rejoinVoice = null;
   S.call = null;
@@ -1677,6 +1791,7 @@ function leaveVoice() {
 }
 
 function toggleMute() {
+  if (forcedMute()) return toast('You were muted by a moderator', 'error');
   if (S.deafened) {
     S.deafened = false;
     S.muted = false;
@@ -1692,7 +1807,7 @@ function toggleDeafen() {
 }
 
 function syncVoiceState() {
-  audio.setMuted(S.muted || S.deafened);
+  audio.setMuted(S.muted || S.deafened || forcedMute());
   audio.setMonitor(!S.deafened && settings.get().soundboardMonitor);
   S.voice?.setDeafened(S.deafened);
   DMCALL.sync(micOff(), S.deafened);
@@ -1721,9 +1836,9 @@ function renderHeader() {
       'button',
       {
         class: 'server-title',
-        title: S.connected ? 'Server settings: name, icon, emojis' : '',
-        disabled: !S.connected,
-        onclick: () => openSettings('server'),
+        title: S.connected && canSeeServerSettings() ? 'Server settings' : '',
+        disabled: !S.connected || !canSeeServerSettings(),
+        onclick: () => openServerSettings(),
       },
       S.server?.icon ? h('img', { class: 'header-icon', src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : null,
       h('span', {}, S.server?.name || S.entry.serverName || S.entry.address)
@@ -1739,28 +1854,32 @@ function renderChannels() {
   if (!S.server) return box.replaceChildren();
   const text = S.server.channels.filter((c) => c.type === 'text');
   const voice = S.server.channels.filter((c) => c.type === 'voice');
-  const chMenu = (ch) => (e) =>
-    contextMenu(e, [
+  const chMenu = (ch) => (e) => {
+    const items = [
       ch.type === 'text' && S.server.storage && { label: 'Browse files', run: () => openFileBrowser(ch.id) },
-      {
+      canCh(ch.id, 'manage') && {
         label: 'Rename',
         run: async () => {
           const n = await channelDialog('Rename channel', ch.name);
-          if (n) S.socket.emit('channel:rename', { id: ch.id, name: n });
+          if (n) doAct('channel:rename', { id: ch.id, name: n });
         },
       },
-      {
+      canCh(ch.id, 'manage') && hasPerms() && { label: 'Permissions…', run: () => channelPermsDialog(ch) },
+      canCh(ch.id, 'manage') && {
         label: 'Delete',
         danger: true,
-        run: async () => (await confirmModal('Delete channel', `Delete "${ch.name}" and its history?`)) && S.socket.emit('channel:delete', { id: ch.id }),
+        run: async () => (await confirmModal('Delete channel', `Delete "${ch.name}" and its history?`)) && doAct('channel:delete', { id: ch.id }),
       },
-    ]);
+    ];
+    if (items.some(Boolean)) contextMenu(e, items);
+    else e.preventDefault();
+  };
   const cat = (label, type) =>
     h(
       'div',
       { class: 'cat' },
       h('span', {}, label),
-      h(
+      !can('manageChannels') ? null : h(
         'button',
         {
           class: 'icon-btn tiny',
@@ -1768,7 +1887,7 @@ function renderChannels() {
           onclick: async () => {
             const name = await channelDialog(`New ${type} channel`);
             if (!name) return;
-            const r = await S.socket.emitWithAck('channel:create', { name, type });
+            const r = await doAct('channel:create', { name, type });
             if (r.ok && type === 'text') selectChannel(r.channel.id);
           },
         },
@@ -1798,12 +1917,13 @@ function renderChannels() {
         h(
           'div',
           {
-            class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : ''),
-            onclick: () => joinVoice(ch.id),
+            class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : '') + (canCh(ch.id, 'send') ? '' : ' locked'),
+            onclick: () => (canCh(ch.id, 'send') ? joinVoice(ch.id) : toast('You don’t have permission to join this voice channel', 'error')),
             oncontextmenu: chMenu(ch),
           },
           icon('speaker'),
           channelNameEl(ch.name, S.server.emojis),
+          canCh(ch.id, 'send') ? null : h('span', { class: 'icon lock', title: 'You can’t join this channel', html: I.lock }),
           video
             ? h(
                 'button',
@@ -1853,8 +1973,7 @@ function dmSidebar() {
 async function removePrompt(profileId) {
   const name = profileOf(profileId).name;
   if (!(await confirmModal(`Remove ${name}`, `Disconnect ${name} and take them off the member list? They can come back unless you ban them.`, 'Remove'))) return;
-  const r = await S.socket.emitWithAck('member:remove', { profileId });
-  if (r.error) toast(r.error, 'error');
+  await doAct('member:remove', { profileId });
 }
 
 async function banPrompt(profileId) {
@@ -1867,7 +1986,7 @@ async function banPrompt(profileId) {
       h(
         'div',
         {},
-        h('p', {}, `${name} will be disconnected and can't come back with this profile. Anyone on the server can lift the ban in Settings → Server.`),
+        h('p', {}, `${name} will be disconnected and can't come back with this profile. People who can ban can lift it in Server settings → Bans.`),
         h('label', { class: 'field inline' }, withIp, h('span', {}, 'Also ban their IP address')),
         h('p', { class: 'muted small' }, 'There are no accounts, so a new profile gets around a profile ban. The IP ban is skipped when they share your network.')
       ),
@@ -1959,8 +2078,8 @@ function voiceUserEl(u) {
       onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
       oncontextmenu: (e) => {
         const el = e.currentTarget;
-        if (isMe) return e.preventDefault();
-        contextMenu(e, [together && { label: 'Volume…', run: () => userVolumePopover(el, u) }, userMuteItem(u.id, u.name)]);
+        if (isMe && !memberItems(u.id, el).length) return e.preventDefault();
+        contextMenu(e, [...(isMe ? [] : [together && { label: 'Volume…', run: () => userVolumePopover(el, u) }, userMuteItem(u.id, u.name)]), ...memberItems(u.id, el)]);
       },
     },
     avatarEl(u, 24),
@@ -1995,6 +2114,7 @@ function voiceUserEl(u) {
           icon('cam')
         )
       : null,
+    u.forceMuted ? h('span', { class: 'icon state forced', title: 'Muted by a moderator', html: I.lock }) : null,
     u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null,
     isMe ? null : userVolumeBadge(u)
   );
@@ -2123,7 +2243,11 @@ function renderUserPanel() {
       h('div', { class: 'voice-user self', 'data-sid': S.call?.sid || S.sid || '' }, avatarEl(p, 32)),
       h('div', { class: 'up-names' }, h('div', { class: 'up-name' }, p.name), h('div', { class: 'up-status' }, p.status || (S.connected ? 'Online' : 'Offline')))
     ),
-    h('button', { class: 'icon-btn' + (S.muted || S.deafened ? ' off' : ''), title: 'Mute', onclick: toggleMute }, icon(S.muted || S.deafened ? 'micOff' : 'mic')),
+    h(
+      'button',
+      { class: 'icon-btn' + (S.muted || S.deafened || forcedMute() ? ' off' : '') + (forcedMute() ? ' forced' : ''), title: (forcedMute() ? 'Muted by a moderator' : 'Mute') + MIC_HINT, onclick: toggleMute, oncontextmenu: micMenu },
+      icon(S.muted || S.deafened || forcedMute() ? 'micOff' : 'mic')
+    ),
     h('button', { class: 'icon-btn' + (S.deafened ? ' off' : ''), title: 'Deafen', onclick: toggleDeafen }, icon(S.deafened ? 'headOff' : 'head')),
     h('button', { class: 'icon-btn', title: 'Soundboard', onclick: (e) => openSoundboard(e.currentTarget) }, icon('board')),
     h('button', { class: 'icon-btn', title: 'Settings', onclick: () => openSettings() }, icon('gear'))
@@ -2167,21 +2291,19 @@ function profileSwitcher(anchor) {
   );
 }
 
+// A profile is its own account (D50): leave the previous one's servers and
+// call, then open this one's DMs, server list and the server it was last on.
 function switchProfile(id) {
-  profiles.setActive(id);
-  if (inDmView()) S.channelId = null; // those DMs belong to the previous profile
   DMCALL.stop();
-  DM.start(me(), servers.all());
-  renderUserPanel();
-  // Servers identify you by profile id, so reconnect as the new one. A call on
-  // the server in view is rejoined; one on another server ends.
-  const rejoinVoice = S.call === S.conn ? S.voiceChannel : null;
   endCall();
-  if (S.entry) {
-    const entry = S.entry;
-    disconnect();
-    connectTo(entry, { rejoinVoice });
-  } else renderAll();
+  S.channelId = null; // a DM in view belongs to the previous profile
+  disconnect();
+  S.entry = null;
+  profiles.setActive(id);
+  DM.start(me(), servers.all());
+  renderAll();
+  const last = servers.get(servers.last());
+  if (last) connectTo(last);
 }
 
 // ---------------------------------------------------------------- members
@@ -2194,7 +2316,7 @@ function renderMembers() {
   const byName = (a, b) => a.name.localeCompare(b.name);
   const inVoice = S.users.filter((u) => u.voice).sort(byName);
   const rest = S.users.filter((u) => !u.voice).sort(byName);
-  // Everyone who has been here before and isn't now (banned people are listed in Settings → Server)
+  // Everyone who has been here before and isn't now (banned people are listed in Server settings)
   const offline = Object.entries(S.server.profiles || {})
     .filter(([pid]) => !isOnline(pid) && !isBanned(pid))
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
@@ -2202,13 +2324,12 @@ function renderMembers() {
   const hideOffline = settings.get().hideOffline;
   const menu = (u) => (e) => {
     const el = e.currentTarget;
-    if (u.id === me().id) return;
+    const mine = u.id === me().id;
+    const rest = memberItems(u.id, el, 'left');
+    if (mine && !rest.length) return;
     contextMenu(e, [
-      inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') },
-      { label: 'Message', run: () => openDm(u.id) },
-      userMuteItem(u.id, u.name),
-      { label: 'Remove from server…', danger: true, run: () => removePrompt(u.id) },
-      !isBanned(u.id) && { label: 'Ban…', danger: true, run: () => banPrompt(u.id) },
+      ...(mine ? [] : [inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') }, { label: 'Message', run: () => openDm(u.id) }, userMuteItem(u.id, u.name)]),
+      ...rest,
     ]);
   };
   const row = (u) => {
@@ -2301,6 +2422,7 @@ function renderMain(error) {
     id: 'composer-input',
     rows: 1,
     placeholder: dm ? `Message @${ch.name}` : `Message #${ch.name}`,
+    disabled: !dm && !canCh(ch.id, 'send'),
     onkeydown: onComposerKey,
     oninput: onComposerInput,
     onclick: (e) => updateMentionMenu(e.target),
@@ -2374,7 +2496,19 @@ function renderMain(error) {
   renderReplyBar();
   renderAttachTray();
   renderDmCall();
+  syncComposer();
   ta.focus();
+}
+
+// The composer follows the channel's send permission (without rebuilding it, so a draft stays)
+function syncComposer() {
+  const ch = chatById(S.channelId);
+  const ta = $('#composer-input');
+  if (!ch || !ta || ch.type === 'dm') return;
+  const ok = canCh(ch.id, 'send');
+  ta.disabled = !ok;
+  ta.placeholder = ok ? `Message #${ch.name}` : NOPE;
+  ta.closest('.composer')?.classList.toggle('locked', !ok);
 }
 
 // Whether a DM can be delivered right now
@@ -2409,7 +2543,8 @@ function refreshChatTitle() {
   const conflict = head.querySelector('.dm-conflict');
   if (conflict && ch.type === 'dm') conflict.hidden = !DM.contacts.get(ch.with)?.conflict;
   const ta = $('#composer-input');
-  if (ta) ta.placeholder = ch.type === 'dm' ? `Message @${ch.name}` : `Message #${ch.name}`;
+  if (ta && ch.type === 'dm') ta.placeholder = `Message @${ch.name}`;
+  syncComposer();
 }
 
 async function selectChannel(id) {
@@ -2457,7 +2592,7 @@ function messageEl(m, prev) {
   const replied = m.replyTo && S.messages.get(S.channelId)?.find((x) => x.id === m.replyTo);
 
   const reactions = Object.entries(m.reactions || {});
-  const authorMenu = (e) => !m.note && !mine && contextMenu(e, [userMuteItem(m.author, author.name)]);
+  const authorMenu = (e) => !m.note && !mine && contextMenu(e, [userMuteItem(m.author, author.name), ...memberItems(m.author, e.currentTarget)]);
   return h(
     'div',
     {
@@ -2532,7 +2667,7 @@ function messageEl(m, prev) {
       m.note ? null : h('button', { title: 'Add reaction', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'react', messageId: m.id }) }, icon('addReact')),
       m.note ? null : h('button', { title: 'Reply', onclick: () => setReply(m) }, icon('reply')),
       mine && m.text && !m.note ? h('button', { title: 'Edit', onclick: () => editMessage(m) }, icon('edit')) : null,
-      mine || m.note
+      mine || m.note || (hasPerms() && !inDmView() && can('manageMessages'))
         ? h(
             'button',
             {
@@ -2540,7 +2675,7 @@ function messageEl(m, prev) {
               class: 'danger',
               onclick: async (e) =>
                 (e.shiftKey || (await confirmModal('Delete message', 'Delete this message? (Tip: shift-click to skip this)'))) &&
-                (inDmView() ? DM.deleteMessage(peerOf(S.channelId), m.id) : S.socket.emit('msg:delete', { channelId: S.channelId, messageId: m.id })),
+                (inDmView() ? DM.deleteMessage(peerOf(S.channelId), m.id) : doAct('msg:delete', { channelId: S.channelId, messageId: m.id })),
             },
             icon('trash')
           )
@@ -2703,8 +2838,8 @@ function updateMentionMenu(ta) {
     .filter((c) => !c.tagged)
     .map((c) => (c.kind === 'user' && nameTag(c.id, c.name, dup) ? { ...c, tag: mentionTag(c.id), name: `${c.name}#${mentionTag(c.id)}` } : c));
   const items = [
-    ...all.filter((c) => c.kind === 'everyone' && match(c)),
-    ...all.filter((c) => c.kind === 'role' && match(c)).sort(rank),
+    ...all.filter((c) => c.kind === 'everyone' && can('mentionEveryone') && match(c)),
+    ...all.filter((c) => c.kind === 'role' && can('mentionRoles') && match(c)).sort(rank),
     ...all.filter((c) => c.kind === 'user' && c.id !== me().id && !isBanned(c.id) && match(c)).sort((a, b) => rank(a, b) || online(b) - online(a) || a.name.localeCompare(b.name)),
   ].slice(0, 60);
   if (!items.length) return closeMentionMenu();
@@ -2811,6 +2946,7 @@ async function sendMessage(text, gif) {
     lastTyping = 0;
     return renderReplyBar();
   }
+  if (!canCh(cid, 'send')) return toast(NOPE, 'error'), false;
   const pending = gif ? [] : [...(S.attachments.get(cid) || [])];
   if ((!text && !gif && !pending.length) || !S.connected) return;
   let files;
@@ -2882,11 +3018,14 @@ function downloadFile(f) {
   h('a', { href: url, download: f.name }).click(); // the server answers with Content-Disposition: attachment
 }
 
+// Your own files, or anyone's with Manage files
+const canDeleteFile = (f) => f.by === me().id || can('manageFiles');
+
 async function deleteFilesPrompt(files, skipConfirm) {
   if (!files.length) return;
   const what = files.length === 1 ? `"${files[0].name}"` : `${files.length} files`;
   if (!skipConfirm && !(await confirmModal('Delete file' + (files.length > 1 ? 's' : ''), `Permanently delete ${what} for everyone? This can't be undone.`))) return;
-  await S.socket.emitWithAck('file:delete', { ids: files.map((f) => f.id) });
+  await doAct('file:delete', { ids: files.map((f) => f.id) });
 }
 
 function addAttachments(files) {
@@ -2998,7 +3137,7 @@ function uploadFile(a, channelId) {
 function attachmentEl(f) {
   const url = fileUrl(f);
   const kind = fileKind(f.type);
-  const del = h('button', { class: 'attach-del', title: 'Delete file (shift-click skips the prompt)', onclick: (e) => (e.stopPropagation(), deleteFilesPrompt([f], e.shiftKey)) }, icon('trash'));
+  const del = !canDeleteFile(f) ? null : h('button', { class: 'attach-del', title: 'Delete file (shift-click skips the prompt)', onclick: (e) => (e.stopPropagation(), deleteFilesPrompt([f], e.shiftKey)) }, icon('trash'));
   const card = () =>
     h(
       'div',
@@ -3157,7 +3296,7 @@ function openFileBrowser(channelId = '') {
     );
     const list = shown();
     for (const fid of view.selected) if (!view.files.some((f) => f.id === fid)) view.selected.delete(fid);
-    const sel = view.files.filter((f) => view.selected.has(f.id));
+    const sel = view.files.filter((f) => view.selected.has(f.id) && canDeleteFile(f));
     const all = h('input', {
       type: 'checkbox',
       title: 'Select all',
@@ -3209,7 +3348,7 @@ function openFileBrowser(channelId = '') {
                 { class: 'c-act' },
                 h('button', { class: 'icon-btn', title: 'Show in chat', onclick: () => (close(), jumpToMessage(f.channelId, f.messageId)) }, icon('jump')),
                 h('button', { class: 'icon-btn', title: 'Download', onclick: () => downloadFile(f) }, icon('download')),
-                h('button', { class: 'icon-btn danger', title: 'Delete (shift-click skips the prompt)', onclick: (e) => deleteFilesPrompt([f], e.shiftKey) }, icon('trash'))
+                canDeleteFile(f) ? h('button', { class: 'icon-btn danger', title: 'Delete (shift-click skips the prompt)', onclick: (e) => deleteFilesPrompt([f], e.shiftKey) }, icon('trash')) : null
               )
             );
           })
@@ -3736,7 +3875,7 @@ async function captureScreen({ surface, sourceId, withAudio, quality }) {
     });
   };
   let stream;
-  const fail = (e) => (toast('Could not share screen: ' + e.message, 'error'), null);
+  const fail = (e) => (log.warn(`screen share failed: ${e.name}: ${e.message}`), toast('Could not share screen: ' + e.message, 'error'), null);
   try {
     stream = await capture(withAudio);
   } catch (e) {
@@ -3755,25 +3894,81 @@ async function captureScreen({ surface, sourceId, withAudio, quality }) {
   return stream;
 }
 
+// What the media sidecar should capture for a picker choice (D45), or null when this share
+// has to go through the browser engine: no sidecar, the setting is off, or audio it can't capture.
+function nativeShareSource(opts) {
+  const type = opts.sourceId?.startsWith('window:') ? 'window' : 'screen';
+  if (!opts.sourceId || !nativeMedia.can(type)) return null;
+  if (opts.withAudio && !nativeMedia.caps.audio) return null;
+  return { type, id: opts.sourceId, audio: !!opts.withAudio };
+}
+
+// Start the share natively. False (after a console note) when it didn't work, so the caller shares the old way.
+async function shareNative(v, opts) {
+  const source = nativeShareSource(opts);
+  if (!source) return false;
+  try {
+    await v.setNativeMedia('screen', source, opts.quality);
+    return true;
+  } catch (e) {
+    console.warn('native share', e);
+    return false;
+  }
+}
+
 async function startShare(opts) {
-  const stream = await captureScreen(opts);
-  if (!stream) return;
+  await nativeMedia.load();
+  const v = liveVoice();
+  if (!v) return;
+  if (!(await shareNative(v, opts))) {
+    const stream = await captureScreen(opts);
+    if (!stream) return;
+    liveVoice().setMedia('screen', stream, opts.quality);
+  }
+  log.info('screen share started');
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
-  liveVoice().setMedia('screen', stream, opts.quality);
   audio.cue('join');
   renderVoicePanel();
 }
 
 async function switchShare(opts) {
-  const stream = await captureScreen(opts);
-  if (!stream) return;
+  await nativeMedia.load();
   const v = liveVoice();
+  if (!v) return;
+  if (nativeShareSource(opts)) {
+    // The sidecar opens the new source; everyone watching is moved over to it
+    let ok = false;
+    await v.restart('screen', async () => (ok = await shareNative(v, opts)));
+    if (!ok) return startShare({ ...opts, sourceId: opts.sourceId });
+  } else {
+    const stream = await captureScreen(opts);
+    if (!stream) return;
+    await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
+    reattachOwn(v, 'screen');
+  }
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
-  await v.replaceMedia('screen', stream, opts.quality); // starts a new share if it ended while the picker was open
-  reattachOwn(v, 'screen');
   renderVoicePanel();
   toast('Switched what you’re sharing', 'info', 3000);
 }
+
+// A native share's fallbacks (voice.js). A viewer on an app from before native
+// streams gets the browser engine's capture of the same source…
+VoiceClient.legacyCapture = (kind, source) => (kind === 'screen' ? captureScreen({ sourceId: source.id, withAudio: source.audio, quality: shareQuality() }) : openCamera());
+// …and if the sidecar's share ends by itself, the browser engine takes it over for everyone watching
+VoiceClient.onNativeLost = (v, kind, source, reason, viewers) => {
+  console.warn('native', kind, 'ended:', reason);
+  if (liveVoice() !== v) return v.emitMedia();
+  toast(kind === 'screen' ? 'Your share moved to the standard pipeline' : 'Your camera moved to the standard pipeline', 'info', 5000);
+  v.restart(
+    kind,
+    async () => {
+      const stream = await VoiceClient.legacyCapture(kind, source);
+      if (stream && liveVoice() === v) v.setMedia(kind, stream, kind === 'screen' ? shareQuality() : undefined);
+      else stream?.getTracks().forEach((t) => t.stop());
+    },
+    viewers
+  ).then(renderVoicePanel);
+};
 
 // After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
 function reattachOwn(v, kind) {
@@ -3818,12 +4013,32 @@ async function openCamera() {
       return await capture(false);
     }
   } catch (e) {
+    log.warn(`camera failed: ${e.name}: ${e.message}`);
     return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000), null;
   }
 }
 
 // Put the camera on the call: `stream` from the preview, or a new capture
 async function startCamera(stream) {
+  // A plain camera goes through the media sidecar where it can (D45): the camera's own best mode up to 1440p60.
+  // With a background the browser engine keeps it, since that is where the background is made (D37).
+  await nativeMedia.load();
+  const v = liveVoice();
+  if (v && nativeMedia.can('camera')) {
+    if (!stream) setBackground(await loadBackground());
+    if (!BACKGROUNDS[activeBackground().type]) {
+      const id = settings.get().videoDevice;
+      const name = stream?.getVideoTracks()[0]?.label || (id && (await navigator.mediaDevices.enumerateDevices().catch(() => [])).find((d) => d.deviceId === id)?.label) || '';
+      stream?.getTracks().forEach((t) => t.stop()); // the sidecar opens the camera itself
+      stream = null;
+      try {
+        await v.setNativeMedia('camera', { type: 'camera', name });
+        return renderVoicePanel();
+      } catch (e) {
+        console.warn('native camera', e);
+      }
+    }
+  }
   stream ||= liveVoice() && (await openCamera());
   if (!stream) return;
   if (!liveVoice()) return stream.getTracks().forEach((t) => t.stop());
@@ -3855,6 +4070,8 @@ function setCameraBackground(patch) {
       if (was === !!BACKGROUNDS[bg.type]) return false;
       const v = liveVoice();
       if (!v?.local.camera) return true;
+      // Back to no background: the camera may go (back) to the media sidecar
+      if (!BACKGROUNDS[bg.type] && nativeMedia.can('camera')) return await v.restart('camera', () => startCamera()), true;
       const stream = await openCamera();
       if (!stream) return true;
       if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop()), true;
@@ -4035,6 +4252,40 @@ function cameraDialog() {
     }
   );
   preview.show();
+}
+
+// Switch microphones; in a call (or a mic test) the new one is live at once.
+// A listen-only call (no mic when it started) gets its mic this way too.
+async function switchMic(deviceId) {
+  try {
+    await audio.setInputDevice(deviceId, !!(liveVoice() || audio.micStream));
+    if (liveVoice()?.micError) (liveVoice().micError = null), renderVoicePanel();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// Right-click on a mute button: pick the microphone
+const MIC_HINT = ' (right-click for microphones)';
+const micMenu = (e) => (e.preventDefault(), micPopover(e.currentTarget));
+async function micPopover(anchor) {
+  const devs = (await navigator.mediaDevices?.enumerateDevices().catch(() => [])) || [];
+  const mics = devs.filter((d) => d.kind === 'audioinput');
+  const cur = settings.get().inputDevice;
+  const pick = (id) => (closePopover(), switchMic(id));
+  popover(
+    anchor,
+    h(
+      'div',
+      { class: 'menu' },
+      h('div', { class: 'menu-label' }, 'Microphone'),
+      [{ deviceId: '', label: 'Default' }, ...mics].map((d, i) =>
+        h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Microphone ${i}`))
+      ),
+      h('div', { class: 'menu-sep' }),
+      h('button', { class: 'menu-item', onclick: () => (closePopover(), openSettings('voice')) }, 'Voice settings…')
+    )
+  );
 }
 
 async function cameraPopover(anchor) {
@@ -4707,9 +4958,20 @@ function appUpdateBanner() {
   return banner('info', text, { link: githubLink(u.url), action, onClose: () => dismiss('app:' + u.version) });
 }
 
+// A crash the user hasn't seen yet (desktop.logs.summary().unseen): opening the About tab or dismissing it marks it seen
+let unseenCrashes = 0;
+function crashBanner() {
+  if (!unseenCrashes) return null;
+  const seen = () => ((unseenCrashes = 0), desktop.logs.seen().catch(() => {}));
+  return banner('warn', 'friendspeak ran into a problem last time. You can save a report from Settings → About & updates.', {
+    action: h('button', { class: 'btn small', onclick: () => (seen(), renderBanners(), openSettings('about')) }, 'Open'),
+    onClose: seen,
+  });
+}
+
 function renderBanners() {
   clearTimeout(bannerTimer);
-  $('#banners').replaceChildren(...[maintenanceBanner(), appUpdateBanner()].filter(Boolean));
+  $('#banners').replaceChildren(...[crashBanner(), maintenanceBanner(), appUpdateBanner()].filter(Boolean));
   // Keep the countdown fresh, and show the warning when its time comes
   if (S.server?.update?.at) bannerTimer = setTimeout(renderBanners, 30e3);
 }
@@ -4723,12 +4985,16 @@ function checkAppAgainstServer() {
 async function startAppUpdates() {
   if (!desktop?.updateState) return;
   appUpdate = await desktop.updateState();
+  log.info(`app started, version ${appUpdate.current}`);
   desktop.onUpdate((u) => {
     appUpdate = u;
     renderBanners();
     aboutRefresh?.();
   });
   renderBanners();
+  // A crash the user hasn't seen: say so once; the About tab (or the notice) marks it seen
+  unseenCrashes = (await desktop.logs?.summary().catch(() => null))?.unseen || 0;
+  if (unseenCrashes) renderBanners();
 }
 
 // ---------------------------------------------------------------- settings
@@ -4741,7 +5007,6 @@ function openSettings(tab = 'profile') {
     voice: ['Voice & video', settingsVoice],
     notifications: ['Notifications', settingsNotifications],
     integrations: ['Integrations', settingsIntegrations],
-    server: ['Server', settingsServer],
     about: ['About & updates', settingsAbout],
   };
   let cleanup = null;
@@ -4793,7 +5058,7 @@ function settingsProfile(body) {
       }, 'Save profile')
     ),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Each has its own servers and direct messages. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
     h(
       'div',
       { class: 'profile-list' },
@@ -4811,7 +5076,7 @@ function settingsProfile(body) {
                 {
                   class: 'btn small ghost danger',
                   onclick: async () => {
-                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
+                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys and its server list go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
                     profiles.remove(x.id);
                     if (x.id === p.id) switchProfile(profiles.all()[0].id);
                     settingsProfile(body.replaceChildren() || body);
@@ -4937,7 +5202,7 @@ function settingsAppearance(body) {
 
 function settingsVoice(body) {
   const st = settings.get();
-  const inSel = h('select', { onchange: (e) => (settings.set({ inputDevice: e.target.value }), restartMic()) }, h('option', { value: '' }, 'Default'));
+  const inSel = h('select', { onchange: async (e) => ((busy = true), await switchMic(e.target.value), (busy = false)) }, h('option', { value: '' }, 'Default'));
   const outSel = h('select', { onchange: (e) => (settings.set({ outputDevice: e.target.value }), applyOutputDevice(e.target.value)) }, h('option', { value: '' }, 'Default'));
   const camSel = h(
     'select',
@@ -4998,35 +5263,70 @@ function settingsVoice(body) {
   const testBtn = h('button', { class: 'btn small ghost' }, 'Test mic');
   const setTest = (on) => {
     testing = on;
-    audio.setMicTest(on);
+    const done = audio.setMicTest(on); // restarts a running mic when the test changes its echo cancellation
     testBtn.textContent = on ? 'Stop test' : 'Test mic';
     syncVoiceState();
+    return done;
   };
   const stopTest = () => {
-    setTest(false);
     if (!liveVoice()) audio.stopMic(); // the test started it
+    setTest(false).catch((e) => toast(e.message, 'error'));
   };
   testBtn.onclick = async () => {
     if (testing) return stopTest();
     if (busy) return;
     busy = true;
     try {
-      if (!audio.micStream) await audio.startMic();
-      if (closed) !liveVoice() && audio.stopMic();
-      else setTest(true);
+      await setTest(true); // first, so a mic that starts here starts the way the test wants it
+      if (testing && !audio.micStream) await audio.startMic(); // not if it was stopped meanwhile
     } catch (e) {
+      stopTest();
       toast(e.message, 'error');
     }
     busy = false;
   };
   const micNote = h('p', { class: 'muted small', hidden: true });
+  // Noise gate, like Discord's input sensitivity: the bar is the mic's level
+  // before the gate, and the slider on it is the level the gate opens at. At
+  // the slider's bottom there is no gate.
+  const gatePct = (db) => Math.min(100, Math.max(0, ((db - GATE.min) / (GATE.max - GATE.min)) * 100)) + '%';
+  const gateVal = h('span', {});
+  const gateSlider = h('input', {
+    type: 'range',
+    ...GATE,
+    step: 1,
+    value: Math.max(GATE.min, Math.min(GATE.max, st.micGate)),
+    'aria-label': 'Noise gate threshold',
+    oninput: (e) => (settings.set({ micGate: +e.target.value }), audio.micStream && audio.applyGate(), syncGate()), // a mic that starts later applies it itself
+  });
+  const gateBox = h('div', { class: 'gate' }, h('div', { class: 'gate-track' }), h('div', { class: 'gate-level' }), gateSlider);
+  const syncGate = () => {
+    const threshold = +gateSlider.value;
+    const on = threshold > GATE.min;
+    const live = audio.micStream ? audio.micGate.live : null;
+    gateBox.classList.toggle('closed', !!live && !live.open);
+    gateBox.style.setProperty('--thr', gatePct(threshold));
+    gateBox.style.setProperty('--lvl', live ? gatePct(live.level) : '0%');
+    const text = on ? `opens above ${threshold} dB`.replace('-', '−') : 'off';
+    if (gateVal.textContent !== text) gateVal.textContent = text;
+  };
+  syncGate();
+  let denoiseOn = st.noiseSuppression;
+  const applyDenoise = () => audio.micStream && audio.applyDenoise(); // live; a mic that starts later applies it itself
   const iv = setInterval(() => {
     const lvl = audio.micStream ? Level(audio.micAnalyser) : 0;
     meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
+    syncGate();
     if (testing && !busy && !audio.micStream) setTest(false); // the call it ran in ended, and took the mic with it
-    // A device or OS can refuse a constraint without an error
+    // A device or OS can refuse a constraint without an error, and noise suppression may not run here
     const info = audio.micInfo;
-    const note = info?.want.noiseSuppression && info.got.noiseSuppression === false ? 'This microphone or system didn’t apply noise suppression.' : '';
+    const note = [
+      info?.want.autoGainControl && info.got.autoGainControl === false && 'This microphone or system didn’t apply automatic gain.',
+      info?.want.echoCancellation && info.got.echoCancellation === false && 'This microphone or system didn’t apply echo cancellation.',
+      denoiseOn && audio.denoise.state === 'failed' && `Noise suppression can’t run here (${audio.denoise.error}), so your mic is sent as it is.`,
+    ]
+      .filter(Boolean)
+      .join(' ');
     if (micNote.textContent !== note) micNote.textContent = note;
     micNote.hidden = !note;
   }, 60);
@@ -5082,6 +5382,27 @@ function settingsVoice(body) {
       h('input', { type: 'range', min: 0, max, step: 0.01, value: st[key], oninput: (e) => (settings.set({ [key]: +e.target.value }), (val.textContent = Math.round(e.target.value * 100) + '%'), after(+e.target.value)) })
     );
   };
+  // Noise suppression strength: the most the noise is turned down by. The top of the slider is no limit.
+  const limitText = (v) => (v > DENOISE_LIMIT.max ? 'maximum' : `up to ${v} dB quieter`);
+  const limitVal = h('span', {}, limitText(st.noiseSuppressionLimit));
+  const denoiseLimit = h(
+    'label',
+    { class: 'field' },
+    h('span', {}, 'Strength: ', limitVal),
+    h('input', {
+      type: 'range',
+      min: DENOISE_LIMIT.min,
+      max: DENOISE_LIMIT.max + DENOISE_LIMIT.step,
+      step: DENOISE_LIMIT.step,
+      value: Math.min(st.noiseSuppressionLimit, DENOISE_LIMIT.max + DENOISE_LIMIT.step),
+      oninput: (e) => {
+        const v = +e.target.value > DENOISE_LIMIT.max ? DENOISE_LIMIT.none : +e.target.value;
+        settings.set({ noiseSuppressionLimit: v });
+        limitVal.textContent = limitText(v);
+        applyDenoise();
+      },
+    })
+  );
 
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
@@ -5097,14 +5418,30 @@ function settingsVoice(body) {
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
     h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
+    ...streamingSettings(check),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
-    slider('voiceVolume', 'Voices', 1, (v) => audio.setVoiceVolume(v)),
+    slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
     h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
     h('h3', {}, 'Microphone'),
-    slider('micVolume', 'Mic volume', 2, (v) => audio.setMicVolume(v)),
-    check('noiseSuppression', 'Noise suppression', restartMic),
-    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. Nothing else is done to your voice. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
+    slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
+    check('autoGain', 'Automatic gain', restartMic),
+    h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
+    check('echoCancellation', 'Echo cancellation', restartMic),
+    h('p', { class: 'muted small' }, 'Keeps what your speakers play out of your mic, so friends don’t hear themselves. With headphones on you can turn it off: your voice is then sent untouched while others talk.'),
+    check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
+    denoiseLimit,
+    h(
+      'p',
+      { class: 'muted small' },
+      'Takes keyboards, fans and other background noise out of your mic, on this device. Turn the strength down if it cuts sounds you want heard.'
+    ),
+    h('div', { class: 'field' }, h('span', {}, 'Noise gate: ', gateVal), gateBox),
+    h(
+      'p',
+      { class: 'muted small' },
+      'Silences your mic while it is quieter than the marker. The bar shows how loud your mic is, in a call or a mic test: set the marker above your background noise and below your voice, or all the way left for no gate.'
+    ),
     micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
@@ -5128,6 +5465,39 @@ function settingsVoice(body) {
     picker.dispose();
     if (testing) stopTest();
   };
+}
+
+// Settings → Voice & Video → Streaming (desktop app): the native media sidecar
+// (D45) and hardware acceleration (D46). `check` is settingsVoice's checkbox row.
+function streamingSettings(check) {
+  if (!desktop?.media) return [];
+  const status = h('p', { class: 'muted small' }, 'Checking what this computer can do…');
+  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak for the change to reach the app’s own drawing and video playback. Your next share already uses it.');
+  const hwBox = h('input', { type: 'checkbox', checked: true });
+  const describe = (caps, prefs) => {
+    const hw = prefs.hardwareAcceleration;
+    const enc = caps ? (hw && caps.hardware.length ? `${caps.hardware.join(', ')} (hardware H.264)` : 'OpenH264 (software H.264)') : null;
+    const gpu = prefs.gpu || {};
+    const on = (x) => /^enabled/.test(x || '');
+    status.textContent =
+      (caps ? `Native streaming is available: shares are encoded with ${enc}.` : 'Native streaming isn’t available on this computer, so shares use the standard pipeline.') +
+      ` This run: video decoding on the ${on(gpu.video_decode) ? 'GPU' : 'CPU'}, drawing on the ${on(gpu.gpu_compositing) ? 'GPU' : 'CPU'}.`;
+    restart.hidden = hw === prefs.atStart;
+  };
+  Promise.all([nativeMedia.load(), desktop.prefs()]).then(([caps, prefs]) => {
+    hwBox.checked = prefs.hardwareAcceleration;
+    describe(caps, prefs);
+    hwBox.onchange = async () => describe(caps, await desktop.prefs({ hardwareAcceleration: hwBox.checked }));
+  });
+  return [
+    h('h3', {}, 'Streaming'),
+    check('nativeStreaming', 'Native streaming'),
+    h('p', { class: 'muted small' }, 'Screen shares and the camera are captured and encoded outside the browser engine: more frames, sharper, and encoded once however many friends watch. A camera with a background, and anything this can’t capture, uses the standard pipeline.'),
+    h('label', { class: 'check-row' }, hwBox, h('span', {}, 'Hardware acceleration')),
+    h('p', { class: 'muted small' }, 'Use the graphics card to encode your streams, play video and draw the app. Turn it off if streams or the window show glitches; everything then runs on the processor.'),
+    status,
+    restart,
+  ];
 }
 
 function settingsNotifications(body) {
@@ -5246,15 +5616,16 @@ function settingsAbout(body) {
               ? `Version ${su.latest.version} installs ${windowTime(su.at)} (in ${countdown(su.at - Date.now())}). The server is offline for a minute or two.`
               : `Version ${su.latest.version} is available. The host can update it.`);
 
-    body.replaceChildren(
+    body.replaceChildren(...[
       h('h3', {}, 'friendspeak app'),
       h('div', { class: 'about-row' }, h('strong', {}, u ? `Version ${u.current}` : 'Version unknown'), action),
       h('p', { class: 'muted small' }, status),
       desktop?.openReleases && h('p', {}, h('a', { href: '#', onclick: (e) => (e.preventDefault(), desktop.openReleases()) }, 'Release notes and downloads')),
       S.connected && h('h3', {}, 'This server'),
       S.connected && h('div', { class: 'about-row' }, h('strong', {}, `${S.server.name}: version ${su?.version || 'unknown (older than 1.1)'}`)),
-      serverStatus && h('p', { class: 'muted small' }, serverStatus)
-    );
+      serverStatus && h('p', { class: 'muted small' }, serverStatus),
+      desktop?.logs && logsSection(),
+    ].filter(Boolean));
   };
   draw();
   aboutRefresh = draw;
@@ -5262,37 +5633,310 @@ function settingsAbout(body) {
   return () => ((aboutRefresh = null), S.socket?.off('server:update', draw));
 }
 
+// Settings → About & updates → Logs and crash reports (issue #51). Log text is untrusted (it can quote
+// servers and web pages), so it only ever goes in through textContent.
+function logsSection() {
+  const logs = desktop.logs;
+  const status = h('p', { class: 'muted small' }, '…');
+  const when = (ts) => new Date(ts).toLocaleString();
+  const draw = async () => {
+    const s = await logs.summary().catch(() => null);
+    if (!s) return status.replaceChildren('Logs are not available.');
+    const crash = s.crashes[0];
+    status.textContent =
+      (s.errors ? `${s.errors} error${s.errors === 1 ? '' : 's'} in the last 7 days.` : 'No errors in the last 7 days.') +
+      (crash ? ` Last crash: ${when(crash.ts)}.` : '') +
+      ` (${fmtBytes(s.bytes)} on disk)`;
+  };
+  const run = (fn) => async () => {
+    try {
+      await fn();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  logs.seen().catch(() => {}); // looking at it counts
+  draw();
+  return h(
+    'div',
+    { class: 'logs-section' },
+    h('h3', {}, 'Logs and crash reports'),
+    h('p', { class: 'muted small' }, 'Logs record errors and connection events on this computer only, never your messages. Nothing is sent anywhere unless you share a report yourself.'),
+    status,
+    h(
+      'div',
+      { class: 'about-row' },
+      h('button', { class: 'btn small', onclick: () => viewLogs() }, 'View log'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        const r = await logs.save();
+        if (r.error) toast('Could not save the report: ' + r.error, 'error');
+        else if (r.saved) toast('Report saved');
+      }) }, 'Save report…'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        await navigator.clipboard.writeText(await logs.report());
+        toast('Report copied');
+      }) }, 'Copy report'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        const r = await logs.reveal();
+        if (r?.error) toast(r.error, 'error');
+      }) }, 'Open folder'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        if (!(await confirmModal('Clear logs', 'Delete all logs and crash reports from this computer?', 'Clear'))) return;
+        await logs.clear();
+        toast('Logs cleared');
+        draw();
+      }) }, 'Clear')
+    )
+  );
+}
+
+// The log in a window: crash reports on top, then the lines, newest at the bottom
+function viewLogs() {
+  const logs = desktop.logs;
+  const RANK = { debug: 0, info: 1, warn: 2, error: 3 };
+  let lines = [];
+  let more = false;
+  const level = h('select', { onchange: () => draw() }, h('option', { value: '3' }, 'Errors'), h('option', { value: '2' }, 'Warnings and errors'), h('option', { value: '0' }, 'Everything'));
+  level.value = '2';
+  const find = h('input', { type: 'search', placeholder: 'Filter', oninput: () => draw() });
+  const crashBox = h('div', { class: 'log-crashes' });
+  const box = h('div', { class: 'log-lines' });
+  const olderBtn = h('button', { class: 'btn small ghost', onclick: () => load(true) }, 'Load older');
+  const draw = () => {
+    const min = Number(level.value);
+    const q = find.value.trim().toLowerCase();
+    const shown = lines.filter((l) => RANK[l.level] >= min && (!q || `${l.source} ${l.text} ${l.stack || ''}`.toLowerCase().includes(q)));
+    box.replaceChildren(
+      ...[more && h('div', { class: 'log-more' }, olderBtn)].filter(Boolean),
+      ...shown.map((l) =>
+        h(
+          'div',
+          { class: 'log-line ' + l.level },
+          h('span', { class: 'log-time' }, new Date(l.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })),
+          h('span', { class: 'log-level' }, l.level),
+          h('span', { class: 'log-source' }, l.source),
+          h('span', { class: 'log-text' }, l.text),
+          l.stack && h('details', {}, h('summary', {}, 'stack'), h('pre', {}, l.stack))
+        )
+      ),
+      ...(shown.length ? [] : [h('p', { class: 'muted small' }, lines.length ? 'Nothing matches.' : 'The log is empty.')])
+    );
+  };
+  const load = async (older) => {
+    const r = await logs.read({ limit: 500, before: older ? lines[0]?.id : undefined }).catch(() => null);
+    if (!r) return;
+    lines = older ? [...r.lines, ...lines] : r.lines;
+    more = r.more;
+    draw();
+    if (!older) box.scrollTop = box.scrollHeight;
+  };
+  logs.summary().then((s) =>
+    crashBox.replaceChildren(
+      ...(s?.crashes.length
+        ? [h('h4', {}, 'Crash reports'), ...s.crashes.map((c) => h('div', { class: 'log-crash' }, h('span', { class: 'log-time' }, new Date(c.ts).toLocaleString()), h('span', { class: 'log-source' }, c.kind), h('span', { class: 'log-text' }, c.message)))]
+        : [])
+    )
+  );
+  load();
+  modal('Log', h('div', { class: 'log-view' }, h('div', { class: 'row' }, level, find), crashBox, box), { wide: true });
+}
+
 const VOICE_QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', standard: 'Standard (64 kbps)', low: 'Low (32 kbps)' };
 
-function settingsServer(body) {
-  if (!S.connected) return body.append(h('p', { class: 'muted' }, 'Connect to a server to manage it.'));
-  const nameIn = h('input', { placeholder: 'party_parrot', maxlength: 32 });
-  const fileIn = h('input', { type: 'file', accept: 'image/*' });
-  const list = h('div', { class: 'emoji-list' });
-  const draw = () =>
-    list.replaceChildren(
-      ...(S.server.emojis.length
-        ? S.server.emojis.map((e) =>
-            h(
-              'div',
-              { class: 'emoji-row' },
-              h('img', { src: e.url, alt: e.name }),
-              h('code', {}, `:${e.name}:`),
-              h('span', { class: 'muted small grow' }, e.by ? `by ${e.by}` : ''),
-              h('button', { class: 'btn small ghost danger', onclick: () => S.socket.emit('emoji:remove', { name: e.name }) }, 'Remove')
-            )
-          )
-        : [h('p', { class: 'muted small' }, 'No custom emojis yet.')])
-    );
-  draw();
-  const onEmojis = () => draw();
-  S.socket.on('emojis', onEmojis);
+// ---------------------------------------------------------------- members and roles: who may do what
 
-  // Name and icon are shared: everyone on the server sees them
-  const serverName = h('input', { maxlength: 40, value: S.server.name });
+// The server's permission keys, in its order: key, label, what it lets someone do
+const PERM_INFO = [
+  ['admin', 'Administrator', 'Everything. Ignores every other setting and every channel’s own settings.'],
+  ['view', 'See channels', 'Read messages and files in this server’s channels.'],
+  ['send', 'Send messages and join voice', 'Message in text channels and join voice channels.'],
+  ['mentionRoles', 'Mention roles', '@role mentions notify people.'],
+  ['mentionEveryone', 'Mention @everyone', '@everyone notifies everyone.'],
+  ['kick', 'Remove members', 'Disconnect people and take them off the member list.'],
+  ['voiceKick', 'Kick from voice', 'Take people out of a voice channel.'],
+  ['ban', 'Ban members', 'Ban and unban people.'],
+  ['forceMute', 'Force mute', 'Mute people in voice so they can’t unmute themselves.'],
+  ['manageRoles', 'Manage roles', 'Create and delete roles without permissions, and hand them out.'],
+  ['manageChannels', 'Manage channels', 'Create channels, and rename or delete them unless a channel says otherwise.'],
+  ['manageEmojis', 'Manage emojis', 'Add and remove custom emojis.'],
+  ['manageFiles', 'Manage files', 'Delete other people’s files.'],
+  ['manageMessages', 'Delete messages', 'Delete other people’s messages.'],
+  ['createInvites', 'Create invites', 'Make invites for new people, and see the server’s invites and who joined with them.'],
+];
+
+// Inherit / Allow / Deny for a setting that may be unset (true, false or undefined)
+function triSelect(value, onChange, { disabled = false, inherit = 'Inherit' } = {}) {
+  const sel = h(
+    'select',
+    { class: 'tri', disabled, onchange: () => onChange(sel.value === 'allow' ? true : sel.value === 'deny' ? false : undefined) },
+    h('option', { value: 'inherit' }, inherit),
+    h('option', { value: 'allow' }, 'Allow'),
+    h('option', { value: 'deny' }, 'Deny')
+  );
+  sel.value = value === true ? 'allow' : value === false ? 'deny' : 'inherit';
+  return sel;
+}
+
+// A checklist popover for someone's roles: ticks are saved as they're made
+function rolesPopover(anchor, pid, align = 'right') {
+  const name = profileOf(pid).name;
+  const body = h('div', { class: 'roles-pop' });
+  const draw = () => {
+    const may = new Set(grantableRoles(pid).map((r) => r.id));
+    const have = new Set(S.server.memberRoles?.[pid] || []);
+    const roles = S.server.roles || [];
+    body.replaceChildren(
+      h('div', { class: 'cat' }, `Roles for ${name}`),
+      ...roles.map((r) =>
+        h(
+          'label',
+          { class: 'check-row' + (may.has(r.id) ? '' : ' disabled'), title: may.has(r.id) ? '' : 'You can’t change this role' },
+          h('input', {
+            type: 'checkbox',
+            checked: have.has(r.id),
+            disabled: !may.has(r.id),
+            onchange: async (e) => {
+              const now = new Set(S.server.memberRoles?.[pid] || []);
+              e.target.checked ? now.add(r.id) : now.delete(r.id);
+              await doAct('member:roles', { profileId: pid, roles: roles.filter((x) => now.has(x.id)).map((x) => x.id) });
+              draw();
+            },
+          }),
+          roleTag(r)
+        )
+      ),
+      roles.length ? null : h('p', { class: 'muted small' }, 'This server has no roles yet.')
+    );
+  };
+  draw();
+  popover(anchor, body, { align, className: 'roles-popover' });
+}
+
+// What the member menus offer for someone, given what we may do (nothing on a server from before permissions)
+function memberItems(pid, anchor, align = 'right') {
+  if (inDmView() || !S.connected || !S.server?.profiles?.[pid]) return [];
+  const self = pid === me().id;
+  const live = S.users.find((u) => u.id === pid);
+  const items = [];
+  if (hasPerms()) {
+    const fm = live ? !!live.forceMuted : !!S.server.forceMuted?.includes(pid);
+    if (!self && live?.voice && can('voiceKick') && canActOn(pid)) items.push({ label: 'Kick from voice', run: () => doAct('voice:kick', { profileId: pid }) });
+    if (can('forceMute') && (self ? fm : canActOn(pid))) items.push({ label: fm ? 'Lift force mute' : 'Force mute', run: () => doAct('voice:forcemute', { profileId: pid, muted: !fm }) });
+    if (grantableRoles(pid).length) items.push({ label: 'Roles…', run: () => rolesPopover(anchor, pid, align) });
+  }
+  if (!self && can('kick') && canActOn(pid)) items.push({ label: 'Remove from server…', danger: true, run: () => removePrompt(pid) });
+  if (!self && can('ban') && canActOn(pid) && !isBanned(pid)) items.push({ label: 'Ban…', danger: true, run: () => banPrompt(pid) });
+  return items;
+}
+
+// Per-role overrides for one channel: See / Send (Join for voice) / Manage, for everyone and each role
+function channelPermsDialog(ch) {
+  const voice = ch.type === 'voice';
+  const roles = S.server.roles || [];
+  const ov = JSON.parse(JSON.stringify(ch.overrides && typeof ch.overrides === 'object' ? ch.overrides : {}));
+  const set = (who, key, v) => {
+    const o = (ov[who] ||= {});
+    if (v === undefined) delete o[key];
+    else o[key] = v;
+    if (!Object.keys(o).length) delete ov[who];
+  };
+  const cols = [['view', 'See channel'], ['send', voice ? 'Join' : 'Send messages'], ['manage', 'Manage channel']];
+  const rows = [{ id: 'everyone', name: 'everyone' }, ...roles];
+  const close = modal(
+    `Permissions for ${voice ? '' : '#'}${ch.name}`,
+    h(
+      'div',
+      {},
+      h('p', { class: 'muted small' }, 'A channel’s settings beat the server-wide ones, and a role’s beats everyone’s. Inherit keeps the server-wide setting. Administrators always have everything.'),
+      S.conn.perms?.open ? h('p', { class: 'muted small' }, 'Permissions are off on this server, so these only take effect once someone is an administrator.') : null,
+      h(
+        'div',
+        { class: 'perm-table' },
+        h('span', {}),
+        ...cols.map(([, label]) => h('span', { class: 'perm-col' }, label)),
+        ...rows.flatMap((r) => [
+          r.id === 'everyone' ? h('span', { class: 'perm-who' }, 'everyone') : h('span', { class: 'perm-who' }, roleTag(r)),
+          ...cols.map(([key]) => triSelect(ov[r.id]?.[key], (v) => set(r.id, key, v))),
+        ])
+      )
+    ),
+    {
+      actions: [
+        h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'),
+        h(
+          'button',
+          {
+            class: 'btn',
+            onclick: async () => {
+              const r = await doAct('channel:perms', { id: ch.id, overrides: ov });
+              if (r?.ok) close();
+            },
+          },
+          'Save'
+        ),
+      ],
+    }
+  );
+}
+
+// ---------------------------------------------------------------- server settings
+
+// Its own window, apart from app Settings: what this server lets you see and change depends on your roles.
+function openServerSettings(tab = 'overview') {
+  if (!S.connected) return toast('Connect to a server to manage it', 'error');
+  if (!canSeeServerSettings()) return toast('Only administrators and moderators can open Server settings', 'error');
+  const socket = S.socket;
+  const st = { role: null }; // the Roles page's selection survives redraws
+  const body = h('div', { class: 'settings-body' });
+  const pages = {
+    overview: ['Overview', serverOverview],
+    ...(hasPerms() ? { roles: ['Roles', serverRoles] } : {}),
+    members: ['Members', serverMembers],
+    emojis: ['Emojis', serverEmojis],
+    bans: ['Bans', serverBans],
+    // Only for people who may create invites: nobody else is shown any (the server refuses them too)
+    ...(S.conn.perms?.createInvites ? { invites: ['Invites', serverInvites] } : {}),
+  };
+  let cur = pages[tab] ? tab : 'overview';
+  const nav = h('div', { class: 'settings-nav' });
+  const show = (key, keepScroll) => {
+    const top = keepScroll ? body.scrollTop : 0;
+    cur = key;
+    for (const b of nav.children) b.classList.toggle('active', b.dataset.tab === key);
+    body.replaceChildren();
+    pages[key][1](body, { st, redraw: () => show(cur, true) });
+    body.scrollTop = top;
+  };
+  // The server changes under an open window: draw again, unless someone is typing
+  const redraw = () => {
+    if (!canSeeServerSettings()) return close(); // lost the role that let us in
+    const a = document.activeElement;
+    if (body.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !['checkbox', 'button'].includes(a.type)))) return;
+    show(cur, true);
+  };
+  const events = ['roles', 'perms', 'channels', 'emojis', 'bans', 'server'];
+  for (const ev of events) socket.on(ev, redraw);
+  const onInvites = ({ invites } = {}) => Array.isArray(invites) && ((st.invites = invites), cur === 'invites' && redraw());
+  socket.on('invites', onInvites);
+  const gone = () => close();
+  socket.on('disconnect', gone);
+  nav.append(...Object.entries(pages).map(([k, [label]]) => h('button', { 'data-tab': k, onclick: () => show(k) }, label)));
+  const close = modal('Server settings', h('div', { class: 'settings' }, nav, body), {
+    wide: true,
+    onClose: () => {
+      for (const ev of events) socket.off(ev, redraw);
+      socket.off('invites', onInvites);
+      socket.off('disconnect', gone);
+    },
+  });
+  show(cur);
+}
+
+function serverOverview(body) {
+  const ro = !canServerSettings();
+  const serverName = h('input', { maxlength: 40, value: S.server.name, disabled: ro });
   const preview = h('div', { class: 'server-icon-preview' });
-  const drawIcon = () => preview.replaceChildren(S.server.icon ? h('img', { src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : initials(S.server.name));
-  drawIcon();
+  preview.replaceChildren(S.server.icon ? h('img', { src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : initials(S.server.name));
   const update = async (patch) => {
     const r = await S.socket.emitWithAck('server:update', patch);
     if (r.error) toast(r.error, 'error');
@@ -5305,57 +5949,18 @@ function settingsServer(body) {
   };
   serverName.addEventListener('keydown', (e) => e.key === 'Enter' && saveName());
   // Game on/off: can only be switched on when the server has the game assets
-  const gameToggle = h('input', { type: 'checkbox' });
-  const gameNote = h('p', { class: 'muted small' });
-  const drawGame = () => {
-    const g = S.server.game || {};
-    gameToggle.checked = !!g.enabled;
-    gameToggle.disabled = !g.available;
-    gameNote.textContent = g.available
-      ? 'Shows Club Penguin under Games for everyone on this server. Anyone connected can turn it on or off.'
-      : g.reason || 'Club Penguin is not available on this server.';
-  };
-  gameToggle.onchange = async () => {
-    if (!(await update({ game: gameToggle.checked }))) drawGame();
-  };
-  drawGame();
+  const g = S.server.game || {};
+  const gameToggle = h('input', { type: 'checkbox', checked: !!g.enabled, disabled: ro || !g.available });
+  gameToggle.onchange = async () => (await update({ game: gameToggle.checked })) || (gameToggle.checked = !!S.server.game?.enabled);
   // Voice quality: the bitrate everyone sends their voice at in this server's channels
-  const quality = h('select', { onchange: async () => (await update({ audioQuality: quality.value })) || drawQuality() }, Object.entries(VOICE_QUALITIES).map(([k, label]) => h('option', { value: k }, label)));
-  const drawQuality = () => (quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max');
-  drawQuality();
-  const onServer = () => {
-    if (document.activeElement !== serverName) serverName.value = S.server.name;
-    drawIcon();
-    drawGame();
-    drawQuality();
-  };
-  S.socket.on('server', onServer);
-
-  const banList = h('div', { class: 'emoji-list' });
-  const drawBans = () =>
-    banList.replaceChildren(
-      ...(S.server.bans?.length
-        ? S.server.bans.map((b) =>
-            h(
-              'div',
-              { class: 'emoji-row' },
-              avatarEl({ ...profileOf(b.profileId, b.name) }, 28),
-              h('strong', {}, profileOf(b.profileId, b.name).name),
-              h('span', { class: 'muted small grow' }, `by ${b.by} · ${fmtTime(b.ts)}${b.ip ? ' · profile and IP' : ''}`),
-              h('button', { class: 'btn small ghost', onclick: () => S.socket.emit('ban:remove', { id: b.id }) }, 'Unban')
-            )
-          )
-        : [h('p', { class: 'muted small' }, 'Nobody is banned.')])
-    );
-  drawBans();
-  S.socket.on('bans', drawBans);
-
+  const quality = h('select', { disabled: ro, onchange: async () => (await update({ audioQuality: quality.value })) || (quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max') }, Object.entries(VOICE_QUALITIES).map(([k, label]) => h('option', { value: k }, label)));
+  quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max';
   body.append(
     h('h3', {}, 'Overview'),
     h(
       'p',
       { class: 'muted small' },
-      'The server’s name and icon are shown to everyone on it. Anyone connected can change them. The icon can be any image (it’s resized for you), an animated GIF, or a link. ',
+      ro ? 'The server’s name, icon, voice quality and games can only be changed by an administrator. ' : 'The server’s name and icon are shown to everyone on it. The icon can be any image (it’s resized for you), an animated GIF, or a link. ',
       h('span', {}, S.entry.address)
     ),
     h(
@@ -5365,69 +5970,380 @@ function settingsServer(body) {
         'div',
         { class: 'server-icon-edit' },
         preview,
-        h(
-          'div',
-          { class: 'row tight center' },
-          imageChoices({ size: IMG.icon, dropOn: [preview], uploadLabel: 'Upload icon', onPick: (icon) => update({ icon }) }),
-          h('button', { class: 'btn small ghost danger', onclick: () => S.server.icon && update({ icon: '' }) }, 'Remove')
-        )
+        ro
+          ? null
+          : h(
+              'div',
+              { class: 'row tight center' },
+              imageChoices({ size: IMG.icon, dropOn: [preview], uploadLabel: 'Upload icon', onPick: (icon) => update({ icon }) }),
+              h('button', { class: 'btn small ghost danger', onclick: () => S.server.icon && update({ icon: '' }) }, 'Remove')
+            )
       ),
       h('label', { class: 'field grow' }, h('span', {}, 'Server name'), serverName),
-      h('button', { class: 'btn', style: { alignSelf: 'flex-end' }, onclick: saveName }, 'Save')
+      ro ? null : h('button', { class: 'btn', style: { alignSelf: 'flex-end' }, onclick: saveName }, 'Save')
     ),
     h('h3', {}, 'Voice'),
     h('label', { class: 'field' }, h('span', {}, 'Voice quality'), quality),
-    h('p', { class: 'muted small' }, 'How much data everyone’s voice uses in this server’s voice channels. Each person sends their voice to every other person in the channel, so lower it if a big channel strains someone’s upload. Anyone connected can change it.'),
+    h('p', { class: 'muted small' }, 'How much data everyone’s voice uses in this server’s voice channels. Each person sends their voice to every other person in the channel, so lower it if a big channel strains someone’s upload.'),
     h('h3', {}, 'Games'),
     h('label', { class: 'check-row' + (gameToggle.disabled ? ' disabled' : '') }, gameToggle, h('span', {}, 'Club Penguin')),
-    gameNote,
+    h('p', { class: 'muted small' }, g.available ? 'Shows Club Penguin under Games for everyone on this server.' : g.reason || 'Club Penguin is not available on this server.'),
     ...(S.server.storage
       ? [
           h('h3', {}, 'Files'),
           h(
             'div',
             { class: 'row' },
-            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used. Anyone on the server can delete any file. The host sets the limit with MAX_STORAGE.`),
+            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used. ${can('manageFiles') ? 'You can delete anyone’s files.' : 'You can delete your own files.'} The host sets the limit with MAX_STORAGE.`),
             h('button', { class: 'btn small', onclick: () => openFileBrowser() }, 'Browse files')
           ),
         ]
-      : []),
-    h('h3', {}, 'Banned'),
-    h('p', { class: 'muted small' }, 'Ban someone from their name in the member list. Anyone connected can ban or unban (there are no admins).'),
-    banList,
-    h('h3', {}, 'Custom emojis'),
-    h('p', { class: 'muted small' }, 'Everyone on this server can use them as :name:, from the emoji picker, or in channel names. Any image works (it’s resized); GIFs must be under 256KB.'),
+      : [])
+  );
+}
+
+function serverRoles(body, { st, redraw }) {
+  const sv = S.server;
+  const p = S.conn.perms;
+  const roles = Array.isArray(sv.roles) ? sv.roles : [];
+  const open = !!p.open;
+  const admin = !!p.admin;
+  const canMake = !open && (admin || p.manageRoles);
+  if (st.role !== 'default' && !roles.some((r) => r.id === st.role)) st.role = 'default';
+  const pick = (id) => ((st.role = id), redraw());
+  const dot = (r) => h('span', { class: 'role-dot', style: { background: typeof r.color === 'string' && /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : 'var(--muted)' } });
+  const newRole = async () => {
+    const name = await promptModal('New role', 'Name');
+    if (!name) return;
+    const r = await doAct('role:create', { name, color: randomColor() });
+    if (r?.ok && r.role) pick(r.role.id);
+  };
+  const list = h(
+    'div',
+    { class: 'roles-list' },
+    h('button', { class: 'roles-item' + (st.role === 'default' ? ' active' : ''), onclick: () => pick('default') }, 'Default permissions'),
+    h('div', { class: 'cat' }, 'Roles, highest first'),
+    ...roles.map((r) => h('button', { class: 'roles-item' + (st.role === r.id ? ' active' : ''), onclick: () => pick(r.id) }, dot(r), h('span', { class: 'name' }, r.name))),
+    canMake ? h('button', { class: 'btn small', onclick: newRole }, 'New role') : null
+  );
+
+  // Checkboxes for the roles this one (or everybody) may hand out
+  const grantList = (chosen, ro, save) =>
     h(
       'div',
-      { class: 'row' },
-      h('label', { class: 'field grow' }, h('span', {}, 'Name'), nameIn),
-      h('label', { class: 'field grow' }, h('span', {}, 'Image'), fileIn),
-      h(
-        'button',
-        {
-          class: 'btn',
-          style: { alignSelf: 'flex-end' },
-          onclick: async () => {
-            const f = fileIn.files[0];
-            if (!f) return toast('Choose an image', 'error');
-            try {
-              const url = await fileToDataUrl(f, { max: 96, maxBytes: 256 * 1024 });
-              const name = nameIn.value.trim() || f.name.replace(/\.[^.]+$/, '');
-              const r = await S.socket.emitWithAck('emoji:add', { name, url });
-              if (r.error) return toast(r.error, 'error');
-              nameIn.value = '';
-              fileIn.value = '';
-            } catch (e) {
-              toast(e.message, 'error');
-            }
-          },
-        },
-        'Upload'
+      { class: 'grant-list' },
+      roles.length ? null : h('p', { class: 'muted small' }, 'No roles yet.'),
+      ...roles.map((x) =>
+        h(
+          'label',
+          { class: 'check-row' + (ro ? ' disabled' : '') },
+          h('input', {
+            type: 'checkbox',
+            checked: chosen.includes(x.id),
+            disabled: ro,
+            onchange: (e) => save(roles.filter((y) => (y.id === x.id ? e.target.checked : chosen.includes(y.id))).map((y) => y.id)),
+          }),
+          roleTag(x)
+        )
       )
-    ),
-    list
+    );
+  const grantNote = h('p', { class: 'muted small' }, 'Only roles without permissions of their own can be handed out this way, and never to an administrator.');
+
+  let editor;
+  if (st.role === 'default') {
+    const dp = sv.defaultPerms || {};
+    editor = h(
+      'div',
+      { class: 'roles-edit' },
+      h('h3', {}, 'Default permissions'),
+      h('p', { class: 'muted small' }, 'What everyone on the server can do. A role’s own settings win over these, and a channel’s over both.' + (admin || open ? '' : ' Only administrators can change them.')),
+      ...PERM_INFO.map(([key, label, desc]) =>
+        h(
+          'label',
+          { class: 'check-row perm-row' + (!admin ? ' disabled' : '') },
+          h('input', {
+            type: 'checkbox',
+            checked: !!dp[key],
+            disabled: !admin,
+            onchange: async (e) => {
+              const on = e.target.checked;
+              if (key === 'admin' && on && !(await confirmModal('Make everyone an administrator', 'Everyone on this server, including people who join later, would have every permission. Do this only if you mean it.', 'Make everyone an administrator'))) return redraw();
+              const r = await doAct('perms:default', { perms: { [key]: on } });
+              if (r?.error) redraw();
+            },
+          }),
+          h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc))
+        )
+      ),
+      dp.manageRoles ? [h('h3', {}, 'Roles everyone can hand out'), grantNote, grantList(sv.defaultGrantable || [], !admin, (ids) => doAct('perms:default', { grantable: ids }))] : null
+    );
+  } else {
+    const r = roles.find((x) => x.id === st.role);
+    const idx = roles.indexOf(r);
+    const canEdit = !open && (admin || (p.manageRoles && isAesthetic(r)));
+    const name = h('input', { maxlength: 32, value: r.name, disabled: !canEdit });
+    const color = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : '#8b6cf6', disabled: !canEdit });
+    const save = () => name.value.trim() && doAct('role:update', { id: r.id, name: name.value.trim(), color: color.value });
+    name.addEventListener('keydown', (e) => e.key === 'Enter' && save());
+    const setPerms = (key, v) => {
+      const next = { ...(r.perms || {}) };
+      if (v === undefined || (key === 'admin' && !v)) delete next[key];
+      else next[key] = v;
+      return doAct('role:update', { id: r.id, perms: next });
+    };
+    const holders = Object.entries(sv.memberRoles || {}).filter(([, ids]) => Array.isArray(ids) && ids.includes(r.id)).map(([pid]) => profileOf(pid, sv.profiles?.[pid]?.name).name);
+    editor = h(
+      'div',
+      { class: 'roles-edit' },
+      h('h3', {}, 'Role'),
+      h(
+        'div',
+        { class: 'row' },
+        h('label', { class: 'field grow' }, h('span', {}, 'Name'), name),
+        h('label', { class: 'field' }, h('span', {}, 'Color'), color),
+        canEdit ? h('button', { class: 'btn', style: { alignSelf: 'flex-end', marginBottom: '14px' }, onclick: save }, 'Save') : null
+      ),
+      canEdit || admin
+        ? h(
+            'div',
+            { class: 'row' },
+            admin && !open ? h('button', { class: 'btn small ghost', disabled: idx === 0, onclick: () => doAct('role:update', { id: r.id, position: idx - 1 }) }, 'Move up') : null,
+            admin && !open ? h('button', { class: 'btn small ghost', disabled: idx === roles.length - 1, onclick: () => doAct('role:update', { id: r.id, position: idx + 1 }) }, 'Move down') : null,
+            canEdit
+              ? h('button', { class: 'btn small ghost danger', onclick: async () => (await confirmModal('Delete role', `Delete "${r.name}"? Everyone who has it loses it.`)) && doAct('role:delete', { id: r.id }) }, 'Delete role')
+              : null
+          )
+        : h('p', { class: 'muted small' }, 'You can’t edit this role.'),
+      h('p', { class: 'muted small' }, holders.length ? `Held by ${holders.join(', ')}.` : 'Nobody has this role yet. Give it to people from the Members page.'),
+      h('h3', {}, 'Permissions'),
+      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. A person with several roles gets the setting from the highest one that has one. A role with permissions can only be held by people whose profile has a key.' + (admin && !open ? '' : ' Only administrators can change these.')),
+      ...PERM_INFO.map(([key, label, desc]) =>
+        key === 'admin'
+          ? h('label', { class: 'check-row perm-row' + (!admin || open ? ' disabled' : '') }, h('input', { type: 'checkbox', checked: !!r.perms?.admin, disabled: !admin || open, onchange: (e) => setPerms('admin', e.target.checked ? true : undefined) }), h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)))
+          : h('div', { class: 'perm-row' }, h('span', { class: 'grow' }, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)), triSelect(r.perms?.[key], (v) => setPerms(key, v), { disabled: !admin || open }))
+      ),
+      r.perms?.manageRoles === true
+        ? [h('h3', {}, 'Roles this role can hand out'), grantNote, grantList(r.grantable || [], !admin || open, (ids) => doAct('role:update', { id: r.id, grantable: ids }))]
+        : null
+    );
+  }
+  body.append(
+    ...[open ? h('p', { class: 'banner-note' }, 'Permissions are off on this server: everyone can do everything, as before. They start applying once someone holds a role with Administrator, which is set up in the admin dashboard. Until then roles are labels, and this page is read-only.') : null,
+    h('div', { class: 'roles-page' }, list, editor)].filter(Boolean)
   );
-  return () => (S.socket?.off('emojis', onEmojis), S.socket?.off('server', onServer), S.socket?.off('bans', drawBans));
+}
+
+function serverMembers(body) {
+  const sv = S.server;
+  const people = Object.entries(sv.profiles || {})
+    .filter(([pid]) => !isBanned(pid))
+    .map(([pid, p]) => ({ ...p, id: pid }))
+    .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  body.append(
+    h('h3', {}, 'Members'),
+    h('p', { class: 'muted small' }, hasPerms() ? 'Everyone who has joined. Roles you can hand out show a Roles button.' : 'Everyone who has joined.'),
+    h(
+      'div',
+      { class: 'emoji-list' },
+      people.length
+        ? people.map((u) => {
+            const rs = rolesOf(u.id);
+            return h(
+              'div',
+              { class: 'emoji-row' },
+              avatarEl(u, 28),
+              h('strong', {}, u.name),
+              isAdminPid(u.id) ? h('span', { class: 'role-tag admin-tag' }, 'Administrator') : null,
+              h('span', { class: 'role-tags grow member-role-tags' }, rs.map(roleTag)),
+              grantableRoles(u.id).length ? h('button', { class: 'btn small ghost', onclick: (e) => rolesPopover(e.currentTarget, u.id) }, 'Roles…') : null
+            );
+          })
+        : h('p', { class: 'muted small' }, 'Nobody yet.')
+    )
+  );
+}
+
+function serverEmojis(body) {
+  const ok = can('manageEmojis');
+  const nameIn = h('input', { placeholder: 'party_parrot', maxlength: 32 });
+  const fileIn = h('input', { type: 'file', accept: 'image/*' });
+  body.append(
+    ...[h('h3', {}, 'Custom emojis'),
+    h('p', { class: 'muted small' }, 'Everyone on this server can use them as :name:, from the emoji picker, or in channel names.' + (ok ? ' Any image works (it’s resized); GIFs must be under 256KB.' : ' Adding and removing them needs the Manage emojis permission.')),
+    ok
+      ? h(
+          'div',
+          { class: 'row' },
+          h('label', { class: 'field grow' }, h('span', {}, 'Name'), nameIn),
+          h('label', { class: 'field grow' }, h('span', {}, 'Image'), fileIn),
+          h(
+            'button',
+            {
+              class: 'btn',
+              style: { alignSelf: 'flex-end' },
+              onclick: async () => {
+                const f = fileIn.files[0];
+                if (!f) return toast('Choose an image', 'error');
+                try {
+                  const url = await fileToDataUrl(f, { max: 96, maxBytes: 256 * 1024 });
+                  const name = nameIn.value.trim() || f.name.replace(/\.[^.]+$/, '');
+                  const r = await S.socket.emitWithAck('emoji:add', { name, url });
+                  if (r.error) return toast(r.error, 'error');
+                  nameIn.value = '';
+                  fileIn.value = '';
+                } catch (e) {
+                  toast(e.message, 'error');
+                }
+              },
+            },
+            'Upload'
+          )
+        )
+      : null,
+    h(
+      'div',
+      { class: 'emoji-list' },
+      S.server.emojis.length
+        ? S.server.emojis.map((e) =>
+            h(
+              'div',
+              { class: 'emoji-row' },
+              h('img', { src: e.url, alt: e.name }),
+              h('code', {}, `:${e.name}:`),
+              h('span', { class: 'muted small grow' }, e.by ? `by ${e.by}` : ''),
+              ok ? h('button', { class: 'btn small ghost danger', onclick: () => doAct('emoji:remove', { name: e.name }) }, 'Remove') : null
+            )
+          )
+        : [h('p', { class: 'muted small' }, 'No custom emojis yet.')]
+    )].filter(Boolean)
+  );
+}
+
+function serverBans(body) {
+  const ok = can('ban');
+  body.append(
+    h('h3', {}, 'Banned'),
+    h('p', { class: 'muted small' }, ok ? 'Ban someone from their name in the member list.' : 'Banning and unbanning needs the Ban members permission.'),
+    h(
+      'div',
+      { class: 'emoji-list' },
+      S.server.bans?.length
+        ? S.server.bans.map((b) =>
+            h(
+              'div',
+              { class: 'emoji-row' },
+              avatarEl({ ...profileOf(b.profileId, b.name) }, 28),
+              h('strong', {}, profileOf(b.profileId, b.name).name),
+              h('span', { class: 'muted small grow' }, `by ${b.by} · ${fmtTime(b.ts)}${b.ip ? ' · profile and IP' : ''}`),
+              ok ? h('button', { class: 'btn small ghost', onclick: () => doAct('ban:remove', { id: b.id }) }, 'Unban') : null
+            )
+          )
+        : [h('p', { class: 'muted small' }, 'Nobody is banned.')]
+    )
+  );
+}
+
+// Invites (D51): the tokens new people join with. Only people with Create invites get this page.
+function serverInvites(body, { st, redraw }) {
+  const p = S.conn.perms || {};
+  const socket = S.socket;
+  if (!st.invites) {
+    st.invites = [];
+    socket.emitWithAck('invite:list', {}).then((r) => {
+      if (r.error) st.invitesError = r.error;
+      else st.invites = r.invites;
+      redraw();
+    });
+  }
+  const copy = (text, what) => navigator.clipboard.writeText(text).then(() => toast(what + ' copied'), () => toast('Could not copy', 'error'));
+
+  // Whether joining takes an invite at all: administrators
+  const required = h('input', { type: 'checkbox', checked: S.server.inviteOnly !== false, disabled: !p.admin });
+  required.onchange = async () => {
+    const r = await socket.emitWithAck('server:update', { inviteOnly: required.checked });
+    if (r.error) (toast(r.error, 'error'), (required.checked = S.server.inviteOnly !== false));
+  };
+
+  // A new invite
+  st.inviteType ||= 'permanent';
+  const note = h('input', { maxlength: 40, placeholder: 'Who it is for (optional)', value: st.inviteNote || '', oninput: () => (st.inviteNote = note.value) });
+  const type = h('select', { onchange: () => ((st.inviteType = type.value), redraw()) }, INVITE_TYPES.map(([k, label]) => h('option', { value: k }, label)));
+  type.value = st.inviteType;
+  const uses = h('input', { type: 'number', min: 2, max: 10000, value: st.inviteUses || 5, oninput: () => (st.inviteUses = uses.value) });
+  const lasts = h('select', { onchange: () => (st.inviteLasts = lasts.value) }, INVITE_DURATIONS.map(([ms, label]) => h('option', { value: ms }, label)));
+  lasts.value = st.inviteLasts || 864e5;
+  const create = async () => {
+    const payload = { label: note.value.trim() };
+    if (type.value === 'single') payload.maxUses = 1;
+    if (type.value === 'multi') payload.maxUses = Math.round(Number(uses.value));
+    if (type.value === 'timed') payload.expiresIn = Number(lasts.value);
+    const r = await socket.emitWithAck('invite:create', payload);
+    if (r.error) return toast(r.error, 'error');
+    st.inviteNote = '';
+    toast('Invite created');
+    redraw();
+  };
+  const remove = async (v) => {
+    const active = inviteStatus(v) === 'active';
+    if (active && !(await confirmModal('Revoke invite', 'Nobody can join with it any more. People who already joined with it stay.', 'Revoke'))) return;
+    doAct('invite:remove', { id: v.id });
+  };
+
+  const row = (v) => {
+    const i = inviteInfo(v);
+    const active = i.status === 'Active';
+    const mine = p.admin || v.by.id === me().id;
+    return h(
+      'div',
+      { class: 'invite-row' },
+      h(
+        'div',
+        { class: 'row' },
+        h('strong', {}, v.label || 'Invite'),
+        h('span', { class: 'invite-status' + (active ? ' active' : ''), title: v.revoked ? `Revoked by ${v.revoked.by}, ${fmtTime(v.revoked.ts)}` : null }, i.status),
+        h('span', { class: 'grow' }),
+        mine ? h('button', { class: 'btn small ghost' + (active ? ' danger' : ''), onclick: () => remove(v) }, active ? 'Revoke' : 'Remove') : null
+      ),
+      // A working invite's token: every one for an administrator, your own otherwise
+      v.token ? h('div', { class: 'row tight' }, h('span', { class: 'invite-token' }, v.token), h('button', { class: 'btn small', onclick: () => copy(v.token, 'Invite') }, 'Copy')) : null,
+      h(
+        'div',
+        { class: 'muted small' },
+        `${i.type} · made by ${v.by.name}, ${fmtTime(v.ts)} · used ${i.uses}${v.maxUses ? '' : v.uses === 1 ? ' time' : ' times'} · `,
+        h('span', { title: v.expires ? new Date(v.expires).toLocaleString() : null }, v.expires ? (active ? `${i.left} left` : 'time ended') : 'no time limit')
+      ),
+      v.joins.length
+        ? h(
+            'details',
+            { class: 'muted small' },
+            h('summary', {}, `Who joined with it (${v.uses})`),
+            v.joins.map((j) => h('div', {}, `${profileOf(j.id, j.name).name} · ${fmtTime(j.ts)}`)),
+            v.uses > v.joins.length ? h('div', {}, `and ${v.uses - v.joins.length} earlier`) : null
+          )
+        : null
+    );
+  };
+
+  body.append(
+    h('h3', {}, 'Invites'),
+    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page. Administrators can copy any working invite again, everyone else the ones they made.'),
+    h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
+    h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
+    h('h3', {}, 'New invite'),
+    h(
+      'div',
+      { class: 'row invite-form' },
+      h('label', { class: 'field grow' }, h('span', {}, 'Note'), note),
+      h('label', { class: 'field' }, h('span', {}, 'Type'), type),
+      st.inviteType === 'multi' ? h('label', { class: 'field' }, h('span', {}, 'Uses'), uses) : null,
+      st.inviteType === 'timed' ? h('label', { class: 'field' }, h('span', {}, 'Lasts'), lasts) : null,
+      h('button', { class: 'btn', onclick: create }, 'Create')
+    ),
+    h('h3', {}, 'This server’s invites'),
+    st.invitesError
+      ? h('p', { class: 'muted small' }, st.invitesError)
+      : h('div', { class: 'emoji-list' }, st.invites.length ? [...st.invites].reverse().map(row) : [h('p', { class: 'muted small' }, 'No invites yet.')])
+  );
 }
 
 // ---------------------------------------------------------------- boot

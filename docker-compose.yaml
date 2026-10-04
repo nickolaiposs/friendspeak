@@ -37,11 +37,13 @@ services:
       - "${FRIENDSPEAK_PORT:-3000}:3000"
     environment:
       SERVER_NAME: ${SERVER_NAME:-friendspeak}
-      PASSWORD: ${PASSWORD:-}
       GIPHY_API_KEY: ${GIPHY_API_KEY:-}
       # Total space for files uploaded to channels (stored in the data volume)
       MAX_STORAGE: ${MAX_STORAGE:-2GB}
-      # off = only people with the password can pass direct messages through this server
+      # Log history kept in the data volume (admin dashboard → Logs): days (0 = memory only) and size cap
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-14}
+      LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
+      # off = only members can pass direct messages through this server
       DM_GUESTS: ${DM_GUESTS:-on}
       HTTPS: ${HTTPS:-1}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated

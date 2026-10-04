@@ -29,7 +29,8 @@ export default class BaseHandler {
     handle(message, user) {
         try {
             if (this.logging) {
-                console.log(`[${this.id}] Received: ${message.action} ${JSON.stringify(message.args)}`)
+                // friendspeak: console.debug, never persisted (the packets can hold chat text)
+                console.debug(`[${this.id}] Received: ${message.action} ${JSON.stringify(message.args)}`)
             }
 
             if (this.handleGuard(message, user)) {

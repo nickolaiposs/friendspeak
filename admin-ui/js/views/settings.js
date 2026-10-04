@@ -53,7 +53,7 @@ export default {
           h('label', { class: 'row', for: 'sgame' }, toggle, 'Penguin game'),
           !g.available && h('span', { class: 'small muted' }, g.reason || 'Not available on this server.')),
         out,
-        h('p', { class: 'small muted' }, 'These are the same settings anyone can change in the app under Settings → Server.'));
+        h('p', { class: 'small muted' }, 'These are the same settings anyone can change in the app under Server settings. Who can join is under Invites.'));
     }
 
     async function refresh(force) {
@@ -64,6 +64,7 @@ export default {
     root.append(box);
     load(box, async () => (data = await api.get('server')), render);
     const d = debounce(() => refresh(false), 400);
-    return events.on('change', (e) => { if (e.topic === 'state') d(); });
+    const off = events.on('change', (e) => { if (e.topic === 'state') d(); });
+    return off;
   },
 };
