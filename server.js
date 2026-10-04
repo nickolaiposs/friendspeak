@@ -57,14 +57,13 @@ async function startServer(opts = {}) {
   const PORT = opts.port ?? 3000;
   const HOST = opts.host;
   const USE_HTTPS = !!opts.https;
-  const PASSWORD = opts.password || '';
   const GIPHY_API_KEY = opts.giphyKey || '';
   let fingerprint = null; // SHA-256 of the self-signed certificate, when HTTPS
   const DATA_DIR = opts.dataDir || path.join(__dirname, 'data');
   // Keep the console lines for the admin dashboard (D34), in memory and on disk (#50)
   const logs =
     opts.captureLogs === false ? null : logbuffer.install({ dir: path.join(DATA_DIR, 'logs'), retentionDays: opts.logs?.retentionDays ?? 14, maxBytes: opts.logs?.maxBytes ?? 50 * 1024 ** 2 });
-  if (logs) for (const secret of [PASSWORD, GIPHY_API_KEY, opts.admin?.key, opts.update?.token, opts.update?.watchtowerToken]) logs.redact(secret);
+  if (logs) for (const secret of [GIPHY_API_KEY, opts.admin?.key, opts.update?.token, opts.update?.watchtowerToken]) logs.redact(secret);
   const bootTime = Date.now();
   const earlierLines = logs && opts.crashReports ? logs.tail(200) : []; // from before this boot, read before it logs anything
   let usersRef = null;
@@ -125,10 +124,21 @@ async function startServer(opts = {}) {
   const MAX_CHANNEL_NAME = 48; // room for emojis, incl. :custom: ones
   // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). Until someone holds
   // an Administrator role the server is in "open mode" and everyone can do everything.
-  const PERM_KEYS = ['admin', 'view', 'send', 'mentionRoles', 'mentionEveryone', 'kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages'];
+  const PERM_KEYS = ['admin', 'view', 'send', 'mentionRoles', 'mentionEveryone', 'kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages', 'createInvites'];
   const CHANNEL_PERM_KEYS = ['view', 'send', 'manage'];
+  // createInvites is off unless a role or the defaults turn it on (D51)
   const DEFAULT_PERMS = Object.fromEntries(PERM_KEYS.map((k) => [k, ['view', 'send', 'mentionRoles', 'mentionEveryone'].includes(k)]));
   const OPEN_ROLES_ERROR = 'Roles are set up in the admin dashboard until someone on this server is an admin';
+  // Invites (D51): the tokens people join with
+  const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O or U
+  const INVITE_CHARS = 16; // 80 random bits
+  const MAX_INVITES = 200;
+  const MAX_INVITE_USES = 10000;
+  const MAX_INVITE_AGE = 365 * 864e5;
+  const MAX_INVITE_JOINS = 100; // who joined with an invite: the latest are kept, `uses` counts them all
+  const MAX_INVITE_LABEL = 40;
+  const INVITE_FAILURES = 10; // wrong invites from one address before it has to wait
+  const INVITE_WINDOW = 10 * 60e3;
   const MAX_STORAGE = parseSize(opts.maxStorage, 2 * 1024 ** 3); // all uploaded files together
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
@@ -177,6 +187,7 @@ async function startServer(opts = {}) {
       forceMuted: [], // profile ids a moderator force-muted
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
+      inviteOnly: true, // joining takes an invite (D51); from Settings → Server. `invites` is added below, so a first start can be told apart
       pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
     };
   }
@@ -237,6 +248,84 @@ async function startServer(opts = {}) {
     }
   }
   cleanRoleState();
+
+  // ---------- invites (D51) ----------
+
+  // An invite is a random token that lets a profile join: for good, a number of times, or until
+  // a date. Only its SHA-256 is kept (the token has 80 random bits, so a fast hash is enough),
+  // so state.json, a backup or the dashboard can't give one out again. Once in, a member is
+  // known by their pinned key (D42) and needs no invite to come back.
+  // { id, hash, label, maxUses|null, uses, expires|null, by: { id|null, name }, ts, revoked: null | { ts, by }, joins: [{ id, name, ts }] }
+  const firstStart = !Array.isArray(state.invites);
+  const cleanLabel = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, MAX_INVITE_LABEL) : '');
+  const posInt = (v, max) => (Number.isInteger(v) && v >= 1 ? Math.min(v, max) : null);
+  const ts0 = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+  state.inviteOnly = state.inviteOnly !== false;
+  state.invites = (firstStart ? [] : state.invites)
+    .filter((v) => isObj(v) && typeof v.id === 'string' && typeof v.hash === 'string' && /^[0-9a-f]{64}$/.test(v.hash))
+    .slice(0, MAX_INVITES)
+    .map((v) => ({
+      id: v.id.slice(0, 32),
+      hash: v.hash,
+      label: cleanLabel(v.label),
+      maxUses: posInt(v.maxUses, MAX_INVITE_USES),
+      uses: Number.isInteger(v.uses) && v.uses > 0 ? v.uses : 0,
+      expires: ts0(v.expires),
+      by: { id: typeof v.by?.id === 'string' ? v.by.id.slice(0, 64) : null, name: cleanLabel(v.by?.name) || '?' },
+      ts: ts0(v.ts) || Date.now(),
+      revoked: isObj(v.revoked) ? { ts: ts0(v.revoked.ts) || Date.now(), by: cleanLabel(v.revoked.by) || '?' } : null,
+      joins: (Array.isArray(v.joins) ? v.joins : []).filter((j) => isObj(j) && typeof j.id === 'string').slice(-MAX_INVITE_JOINS).map((j) => ({ id: j.id.slice(0, 64), name: cleanLabel(j.name) || 'anon', ts: ts0(j.ts) || 0 })),
+    }));
+
+  // 16 characters in groups of four. 256 is a multiple of 32, so a byte's low five bits are uniform.
+  const newInviteToken = () => [...crypto.randomBytes(INVITE_CHARS)].map((b) => INVITE_ALPHABET[b & 31]).join('').replace(/(.{4})(?=.)/g, '$1-');
+  // What someone typed or pasted, as the 16 characters: any case, dashes and spaces dropped, look-alikes mapped. '' when it can't be a token.
+  function normInvite(v) {
+    if (typeof v !== 'string' || v.length > 64) return '';
+    const t = v.toUpperCase().replace(/[\s-]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+    return t.length === INVITE_CHARS && [...t].every((ch) => INVITE_ALPHABET.includes(ch)) ? t : '';
+  }
+  const inviteHash = (norm) => crypto.createHash('sha256').update('friendspeak-invite-v1|' + norm).digest();
+  // 'active', or why it no longer lets anyone in: 'revoked', 'expired', 'used'
+  const inviteStatus = (v, now = Date.now()) => (v.revoked ? 'revoked' : v.expires && v.expires <= now ? 'expired' : v.maxUses && v.uses >= v.maxUses ? 'used' : 'active');
+  // The invite a token belongs to if it still works, else null. Every stored hash is compared, in constant time.
+  function inviteFor(token) {
+    const norm = normInvite(token);
+    if (!norm) return null;
+    const given = inviteHash(norm);
+    let hit = null;
+    for (const v of state.invites) if (crypto.timingSafeEqual(given, Buffer.from(v.hash, 'hex'))) hit = v;
+    return hit && inviteStatus(hit) === 'active' ? hit : null;
+  }
+  // Without the hash: what the app and the dashboard list
+  const publicInvites = () => state.invites.map(({ hash, ...v }) => v);
+  // Make and store an invite; the token is returned once and can't be read back
+  function addInvite({ label = '', maxUses = null, expires = null, by }) {
+    const token = newInviteToken();
+    const invite = { id: id(), hash: inviteHash(normInvite(token)).toString('hex'), label, maxUses, uses: 0, expires, by, ts: Date.now(), revoked: null, joins: [] };
+    state.invites.push(invite);
+    return { invite, token };
+  }
+  // A server with no invite list yet (a new one, or one from before invites): one that never
+  // expires, shown once by the CLI. It goes to stdout only, never through the log.
+  const firstInvite = firstStart ? addInvite({ label: 'First start', by: { id: null, name: 'Server' } }).token : null;
+
+  // Wrong invites per address: after INVITE_FAILURES in INVITE_WINDOW it waits out the window (memory only)
+  const inviteFails = new Map(); // ip -> { n, since }
+  function inviteBlocked(ip, now = Date.now()) {
+    const f = inviteFails.get(ip);
+    if (f && now - f.since > INVITE_WINDOW) inviteFails.delete(ip);
+    return (inviteFails.get(ip)?.n || 0) >= INVITE_FAILURES;
+  }
+  function inviteFailed(ip, now = Date.now()) {
+    if (!inviteFails.has(ip) && inviteFails.size >= 5000) {
+      for (const [k, f] of inviteFails) if (now - f.since > INVITE_WINDOW) inviteFails.delete(k);
+      if (inviteFails.size >= 5000) inviteFails.delete(inviteFails.keys().next().value);
+    }
+    const f = inviteFails.get(ip) || { n: 0, since: now };
+    f.n++;
+    inviteFails.set(ip, f);
+  }
 
   // Update mode and maintenance window set in the admin dashboard; they override
   // AUTO_UPDATE / MAINTENANCE_CRON. Only strings get through: updater.js checks the rest.
@@ -352,7 +441,7 @@ async function startServer(opts = {}) {
   const isAdminPid = (pid) => state.permissionsOn && (!!state.defaultPerms.admin || holdsAdminRole(pid));
 
   // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
-  // (only channels it can see). Open mode: everything but role management.
+  // (only channels it can see). Open mode: everything but role management and invites (those are the dashboard's until someone is an admin).
   function permsOf(pid) {
     const open = !state.permissionsOn;
     const held = open ? [] : heldRoles(pid);
@@ -360,7 +449,7 @@ async function startServer(opts = {}) {
     const g = { open, admin };
     for (const k of PERM_KEYS) {
       if (k === 'admin') continue;
-      if (open) g[k] = k !== 'manageRoles';
+      if (open) g[k] = k !== 'manageRoles' && k !== 'createInvites';
       else if (admin) g[k] = true;
       else {
         const r = held.find((x) => typeof x.perms[k] === 'boolean');
@@ -530,7 +619,8 @@ async function startServer(opts = {}) {
   // The server hosts no chat UI: the client ships only in the desktop app (D26).
   // The admin dashboard at /admin is the one exception (D34).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
-  app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, password: !!PASSWORD, version: VERSION }));
+  // `password`: apps from before invites ask for one when it is set, and send what was typed as the invite
+  app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, invite: state.inviteOnly, password: state.inviteOnly, version: VERSION }));
 
   // Clients are often served from another origin (desktop app, another server),
   // and authenticate uploads with their socket id, never cookies, so * is fine.
@@ -760,6 +850,7 @@ async function startServer(opts = {}) {
       defaultGrantable: state.defaultGrantable,
       permissionsOn: state.permissionsOn,
       forceMuted: state.forceMuted,
+      inviteOnly: state.inviteOnly,
       storage: usage(),
       game: gameInfo(),
       update: updater.info(),
@@ -840,6 +931,12 @@ async function startServer(opts = {}) {
       broadcastUsers();
     }
 
+    // The invite list changed: tell the sockets that may see it (nobody else is sent any of it)
+    function invitesChanged() {
+      const list = publicInvites();
+      for (const [sid, u] of users) if (permsOf(u.profile.id).createInvites) io.to(sid).emit('invites', { invites: list });
+    }
+
     // Disconnect every chat and DM-signaling socket that matches, telling it why
     // ('banned' or 'removed'). Clients don't auto-reconnect after this.
     function kick(match, reason) {
@@ -862,22 +959,26 @@ async function startServer(opts = {}) {
     // relays WebRTC handshakes, and keeps sealed mail for people who are away.
     // It never sees a message.
     //
-    // Guests are people without the password, sent here by a friend's friend
+    // Members are the profiles that joined (with an invite, when the server asks
+    // for one, D51). Guests are everyone else, sent here by a friend's friend
     // code. They can reach the people whose profile id or mailbox address
     // they already know, and nothing else: no member list, no mailbox.
     const dm = io.of('/dm');
     const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
     const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
-      const { profileId, password, guest } = socket.handshake.auth || {};
+      const { profileId, guest } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
-      const wrong = !!PASSWORD && password !== PASSWORD;
-      // A guest can't use the profile id of someone on this server
-      if (wrong && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Wrong server password'));
+      // On an invite-only server a member is a profile that joined and has a key pinned,
+      // which it proves in `identify` below; nothing a socket says here makes it one
+      const outsider = state.inviteOnly && !(pid && Object.hasOwn(state.profiles, pid) && pinOf(pid));
+      // A guest can't use the profile id of someone on this server. ("password": apps from before invites stop retrying on it.)
+      if (outsider && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Not a member of this server (no valid invite or password)'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
-      socket.data.guest = wrong;
+      socket.data.guest = outsider;
+      socket.data.mustProve = state.inviteOnly && !outsider;
       next();
     });
     dm.on('connection', (socket) => {
@@ -924,8 +1025,10 @@ async function startServer(opts = {}) {
         if (socket.data.addr) socket.leave('a:' + socket.data.addr);
         socket.data.addr = addr;
         socket.join('a:' + addr);
-        let box = guest ? null : mail.get(addr);
-        if (!guest && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
+        // A claimed member of an invite-only server has a mailbox once the pinned key has signed
+        const member = !guest && (!socket.data.mustProve || socket.data.verified);
+        let box = member ? mail.get(addr) : null;
+        if (member && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
         if (box) {
           box.seen = Date.now();
           saveMail();
@@ -1059,12 +1162,15 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
-      // Name, icon, voice quality and the game: admin only (open mode: anyone, as before)
-      updateServer(actor, { name, icon, game, audioQuality: quality }) {
+      // Name, icon, voice quality and the game: admin only (open mode: anyone, as before).
+      // inviteOnly (whether joining takes an invite): an admin or the dashboard, never open mode.
+      updateServer(actor, { name, icon, game, audioQuality: quality, inviteOnly }) {
         if (!isDash(actor)) {
           const g = permsOf(actor.profileId);
           if (!g.open && !g.admin) return noPerm('change the server settings');
+          if (inviteOnly !== undefined && !g.admin) return noPerm('change who can join');
         }
+        if (inviteOnly !== undefined && typeof inviteOnly !== 'boolean') return { error: 'inviteOnly must be true or false' };
         if (name !== undefined) {
           name = str(name, 40).trim();
           if (!name) return { error: 'Server name required' };
@@ -1083,10 +1189,11 @@ async function startServer(opts = {}) {
           state.gameEnabled = !!game;
           if (!game) for (const u of users.values()) u.playing = false;
         }
+        if (inviteOnly !== undefined) state.inviteOnly = inviteOnly;
         save();
-        const what = [name !== undefined && 'name', icon !== undefined && (icon ? 'icon' : 'icon removed'), quality !== undefined && `voice quality ${quality}`, game !== undefined && (game ? 'game on' : 'game off')].filter(Boolean);
+        const what = [name !== undefined && 'name', icon !== undefined && (icon ? 'icon' : 'icon removed'), quality !== undefined && `voice quality ${quality}`, game !== undefined && (game ? 'game on' : 'game off'), inviteOnly !== undefined && (inviteOnly ? 'invites required' : 'invites not required')].filter(Boolean);
         console.log(`[server] ${actorName(actor)} changed the server settings: ${what.join(', ') || 'no change'}`);
-        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo(), audioQuality: audioQuality() });
+        io.emit('server', { name: state.name, icon: state.icon, game: gameInfo(), audioQuality: audioQuality(), inviteOnly: state.inviteOnly });
         if (game === false) broadcastUsers();
         return { ok: true };
       },
@@ -1115,6 +1222,53 @@ async function startServer(opts = {}) {
         save();
         console.log(`[mod] ${actorName(dashActor)} reset the profile key of ${whoIs({ ...state.profiles[profileId], id: profileId })}`);
         return { ok: true };
+      },
+
+      // --- invites (D51) ---
+
+      listInvites(actor) {
+        return need(actor, 'createInvites', 'see invites') || { ok: true, invites: publicInvites(), inviteOnly: state.inviteOnly };
+      },
+
+      // maxUses: how many people it lets in (null: any number). expiresIn: ms from now (null: never).
+      // Neither: it works until it is revoked. The token is in the answer and nowhere else.
+      createInvite(actor, { label, maxUses = null, expiresIn = null } = {}) {
+        const denied = need(actor, 'createInvites', 'create invites');
+        if (denied) return denied;
+        if (label !== undefined && typeof label !== 'string') return { error: 'The note must be text' };
+        if (maxUses !== null && !(Number.isInteger(maxUses) && maxUses >= 1 && maxUses <= MAX_INVITE_USES)) return { error: `Uses must be a whole number from 1 to ${MAX_INVITE_USES}` };
+        if (expiresIn !== null && !(Number.isFinite(expiresIn) && expiresIn >= 60e3 && expiresIn <= MAX_INVITE_AGE)) return { error: 'An invite can last from a minute to a year' };
+        // Room for it: invites that no longer work go first, oldest first
+        while (state.invites.length >= MAX_INVITES) {
+          const i = state.invites.findIndex((v) => inviteStatus(v) !== 'active');
+          if (i < 0) return { error: `This server has ${MAX_INVITES} working invites. Revoke one first.` };
+          state.invites.splice(i, 1);
+        }
+        const by = isDash(actor) ? { id: null, name: actorName(actor) } : { id: actor.profileId, name: state.profiles[actor.profileId]?.name || 'anon' };
+        const { invite, token } = addInvite({ label: cleanLabel(label), maxUses, expires: expiresIn === null ? null : Date.now() + Math.round(expiresIn), by });
+        save();
+        invitesChanged();
+        console.log(`[mod] ${actorName(actor)} created invite ${invite.id.slice(0, 8)}: ${maxUses === null ? 'any number of uses' : maxUses === 1 ? 'one use' : maxUses + ' uses'}, ${expiresIn === null ? 'no end date' : 'expires ' + new Date(invite.expires).toISOString()}`);
+        const { hash, ...pub } = invite;
+        return { ok: true, invite: pub, token };
+      },
+
+      // A working invite is revoked and stays listed (with who joined); one that no longer works is
+      // taken off the list. Other people's invites: an admin or the dashboard.
+      removeInvite(actor, inviteId) {
+        const denied = need(actor, 'createInvites', 'revoke invites');
+        if (denied) return denied;
+        const i = state.invites.findIndex((v) => v.id === inviteId);
+        if (i < 0) return { error: 'No such invite' };
+        const invite = state.invites[i];
+        if (!isDash(actor) && invite.by.id !== actor.profileId && !permsOf(actor.profileId).admin) return noPerm('revoke an invite someone else made');
+        const revoked = inviteStatus(invite) === 'active';
+        if (revoked) invite.revoked = { ts: Date.now(), by: isDash(actor) ? actorName(actor) : state.profiles[actor.profileId]?.name || 'anon' };
+        else state.invites.splice(i, 1);
+        save();
+        invitesChanged();
+        console.log(`[mod] ${actorName(actor)} ${revoked ? 'revoked' : 'removed'} invite ${invite.id.slice(0, 8)}`);
+        return { ok: true, revoked };
       },
 
       // --- roles and permissions ---
@@ -1297,12 +1451,9 @@ async function startServer(opts = {}) {
           }
         });
 
-      socket.on('hello', ({ profile, password, proof } = {}, ack) => {
+      // `invite`: the token of someone joining. Apps from before invites send what was typed as `password`.
+      socket.on('hello', ({ profile, invite, password, proof } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        if (PASSWORD && password !== PASSWORD) {
-          console.warn(`[auth] wrong server password from ${clientIp(socket)}`);
-          return ack({ error: 'Wrong server password' });
-        }
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) {
           console.warn(`[auth] banned ${whoIs(p)} refused`);
@@ -1316,6 +1467,22 @@ async function startServer(opts = {}) {
         // A proof that doesn't check out is a bug or a proxy that rewrites Host, never a reason to go on unprotected
         const refuse = (why, res) => (console.warn(`[auth] ${whoIs(p)} refused: ${why}`), ack(res));
         if (proof && !signed) return refuse('the profile key proof did not verify (a proxy that rewrites Host?)', { error: 'Could not verify your profile key. If this server is behind a reverse proxy, it must pass the original Host header.', key: true });
+        // Joining takes an invite (D51). A member is a profile that joined and signs with its pinned
+        // key: it needs none, and one it still sends is not looked at, so coming back uses nothing up.
+        const member = signed && !!pin && card.s === pin && Object.hasOwn(state.profiles, p.id);
+        let joinedWith = null;
+        if (state.inviteOnly && !member) {
+          const ip = clientIp(socket);
+          if (inviteBlocked(ip)) return ack({ error: 'Too many wrong invites from your address. Try again in a few minutes.', invite: true });
+          joinedWith = inviteFor(invite ?? password);
+          if (!joinedWith) {
+            inviteFailed(ip);
+            console.warn(`[auth] no valid invite from ${ip}`);
+            return ack({ error: 'This server needs an invite. The one you entered is wrong, used up, expired or revoked.', invite: true });
+          }
+          // Only a key can say who used an invite, and who may come back without one
+          if (!signed) return refuse('an invite needs a signed hello and the app sent none', { error: 'Update friendspeak to join this server with an invite.', key: true });
+        }
         if (pin && !signed) return refuse('the profile is pinned to a key and the app sent none', { error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
         if (pin && card.s !== pin) return refuse('signed with a different key than the one pinned (D42)', { error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
         if (signed && !pin) state.pins[p.id] = card.s;
@@ -1334,7 +1501,11 @@ async function startServer(opts = {}) {
           } else if (other.voice) io.to('voice:' + other.voice).emit('voice:peer-left', { sid });
           users.delete(sid);
         }
-        if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
+        if (joinedWith) {
+          joinedWith.uses++;
+          joinedWith.joins = [...joinedWith.joins, { id: p.id, name: p.name, ts: Date.now() }].slice(-MAX_INVITE_JOINS);
+          console.log(`[auth] ${whoIs(p)} joined with invite ${joinedWith.id.slice(0, 8)}`);
+        } else if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
         socket.data.profileId = p.id;
         users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
         state.profiles[p.id] = storedProfile(p);
@@ -1344,6 +1515,7 @@ async function startServer(opts = {}) {
         ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g });
         socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
         broadcastUsers();
+        if (joinedWith) invitesChanged();
       });
 
       on('profile:update', (profile) => {
@@ -1489,9 +1661,15 @@ async function startServer(opts = {}) {
         ack(actions.unban({ profileId: myId() }, banId));
       });
 
-      on('server:update', ({ name, icon, game, audioQuality }, ack) => {
-        ack(actions.updateServer({ profileId: myId() }, { name, icon, game, audioQuality }));
+      on('server:update', ({ name, icon, game, audioQuality, inviteOnly }, ack) => {
+        ack(actions.updateServer({ profileId: myId() }, { name, icon, game, audioQuality, inviteOnly }));
       });
+
+      // --- invites: only for people who may create them (D51) ---
+
+      on('invite:list', (_p, ack) => ack(actions.listInvites({ profileId: myId() })));
+      on('invite:create', ({ label, maxUses, expiresIn }, ack) => ack(actions.createInvite({ profileId: myId() }, { label, maxUses: maxUses ?? null, expiresIn: expiresIn ?? null })));
+      on('invite:remove', ({ id: inviteId }, ack) => ack(actions.removeInvite({ profileId: myId() }, inviteId)));
 
       // --- roles and permissions ---
 
@@ -1772,7 +1950,6 @@ async function startServer(opts = {}) {
         version: VERSION,
         https: USE_HTTPS,
         fingerprint: () => fingerprint,
-        passwordSet: !!PASSWORD,
         inDocker: !!opts.update?.inDocker,
         startedAt: Date.now(),
         state: () => state,
@@ -1817,6 +1994,10 @@ async function startServer(opts = {}) {
     https: USE_HTTPS,
     fingerprint,
     name: state.name,
+    firstInvite, // the token of the invite made on a first start, else null: shown once by the CLI
+    get inviteOnly() {
+      return state.inviteOnly;
+    },
     admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false },
     game,
     get gameEnabled() {
@@ -1890,7 +2071,6 @@ if (require.main === module) {
     https: env.HTTPS === '1' || env.HTTPS === 'true',
     dataDir: env.DATA_DIR,
     serverName: env.SERVER_NAME,
-    password: env.PASSWORD,
     giphyKey: env.GIPHY_API_KEY,
     maxStorage: env.MAX_STORAGE,
     logs: { retentionDays: /^\s*\d+\s*$/.test(env.LOG_RETENTION_DAYS || '') ? Number(env.LOG_RETENTION_DAYS) : 14, maxBytes: parseSize(env.LOG_MAX_SIZE, 50 * 1024 ** 2) },
@@ -1915,12 +2095,22 @@ if (require.main === module) {
     for (const ip of lanAddresses()) console.log(`  Friends connect:   ${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
     console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}/admin  (${s.admin.local ? 'no key needed from this machine' : 'admin key required'})`}`);
-    if (env.PASSWORD) console.log('  Password protected: yes');
+    console.log(`  Joining:           ${s.inviteOnly ? 'needs an invite (make them in Server settings or the admin dashboard)' : 'open to anyone with the address (invites are off)'}`);
+    if (env.PASSWORD) console.warn('  PASSWORD is no longer used: people join with invites, and everyone already on the server stays');
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');
     console.log(`  Version:           ${s.version}` + (s.update.mode === 'off' ? '' : `  (updates: ${s.update.mode === 'on' ? 'automatic, cron "' + s.update.cron + '"' : 'notify only'})`));
     console.log(`  File storage:      ${fmtBytes(s.storage.used)} of ${fmtBytes(s.storage.max)} used`);
     console.log(`  Penguin game:      ${env.GAME && /^(off|0|false|no)$/i.test(env.GAME) ? 'off (GAME=off)' : !s.game.available ? s.game.reason : s.gameEnabled ? 'ready (' + s.game.worldName + ')' : 'turned off (Settings → Server)'}`);
     console.log('');
+    // stdout, not console: the token must never enter the log the dashboard shows
+    if (s.firstInvite) {
+      const at = env.FRIENDSPEAK_DOCKER === '1' ? null : lanAddresses()[0]; // a container's own address is no use to friends
+      process.stdout.write(
+        `  Invite (never expires; made on the first start, shown only now):\n\n    ${s.firstInvite}\n\n` +
+          `  Friends can paste this into "Connect to a server":  ${at ? `${s.https ? 'https://' : ''}${at}:${s.port}` : '<your address>'}#${s.firstInvite}\n` +
+          '  Revoke it or make more in Server settings → Invites, or in the admin dashboard.\n\n'
+      );
+    }
 
     // `docker stop` sends SIGTERM: save state and exit cleanly. The game worlds'
     // sockets can keep the HTTP server open, so don't wait on them forever.
