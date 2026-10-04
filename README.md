@@ -21,7 +21,8 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **GIFs:** GIPHY search built into the composer.
 - **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, a link, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON. Each profile is its own account: it has its own server list and direct messages, and joins every server (password included) itself.
 - **Themes:** **Settings → Appearance** has dark, light and high-contrast themes, 50 popular color schemes (Catppuccin, Dracula, Nord, Gruvbox, Tokyo Night, … from the [Gogh](https://github.com/Gogh-Co/Gogh) collection) with a preview of each, and a color picker for every color in the UI. You can also change the font, text size, density and the size of the whole UI. It's stored on your device and nobody else sees it.
-- **Connect by IP:** save any number of servers in the left rail, with optional passwords.
+- **Connect by IP:** save any number of servers in the left rail.
+- **Invites:** joining a server takes an invite token (`K7QF-29XM-PA3T-Z6WH`), entered once. An invite can work until it is revoked, once, a set number of times, or for a set time. The server lists who made each invite, how often it was used, how long it has left and who joined with it, and administrators can copy a working invite again. Friends paste it into the **Invite** field of **Connect to a server**.
 - **Server settings:** click the server name, or right-click the server → **Server settings…**, for the overview (name, icon, voice quality, game), roles, members, emojis and bans. Admins can set the icon from any image (it's resized for you), an animated GIF, a GIPHY GIF or an https link. Everyone on the server sees it, like Discord.
 - **Soundboard:** add your own audio files (drag and drop works). They're stored locally, and when you play one it's mixed into your voice stream so everyone in the channel hears it, even while you're muted. Each sound can have its own emoji, volume and hotkey.
 - **Desktop app:** an Electron app for macOS, Windows and Linux. The mic always works, soundboard hotkeys work from other apps, and it connects to any friendspeak server. (It doesn't host one; run the server separately.) It tells you when a new version is out, links to the release notes, and updates itself on Windows and Linux.
@@ -41,7 +42,7 @@ The server only hosts: it has no chat web UI. Everyone, including the host, uses
 
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
-  Friends connect:   192.168.1.20:3000
+  Friends connect:   http://192.168.1.20:3000
   Admin dashboard:   http://localhost:3000/admin  (no key needed from this machine)
 ```
 
@@ -110,9 +111,9 @@ Then restart the server. The startup log shows `Penguin game: ready`. The game s
 
 ## How friends connect (read this for voice to work)
 
-The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's `IP:port`. Plain `http://` works, and the microphone always works in the app.
+The client is the **desktop app**; the server does not serve a chat web UI. Each friend installs the app, clicks **+** in the left rail, and enters the host's address. An address without a scheme means `https://` (port 3000 unless one is given), so for a plain HTTP server (`npm start`) type `http://IP:port`. The microphone works in the app either way.
 
-For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `https://HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
+For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
 To play over the internet instead of a LAN, forward the TCP port on the host's router. Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
 
@@ -122,12 +123,11 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 |-----------------|---------------|----------------------------------------------------------------|
 | `PORT`          | `3000`        | Port to listen on                                              |
 | `SERVER_NAME`   | `friendspeak` | Initial server name (first start only; afterwards rename it in Settings → Server) |
-| `PASSWORD`      | none          | Require a password to join                                     |
 | `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key                |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
 | `LOG_RETENTION_DAYS` | `14`     | How many days of the server's log are kept on disk (`data/logs/`) for the admin dashboard. `0` = keep the log in memory only |
 | `LOG_MAX_SIZE`  | `50MB`        | Most disk space the log history may use; the oldest days are deleted first |
-| `DM_GUESTS`     | on            | `off` = only people with the password can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without the password; they see nothing else |
+| `DM_GUESTS`     | on            | `off` = only members can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without having joined; they see nothing else |
 | `HTTPS`         | off           | `1` = serve over HTTPS with an auto-generated self-signed cert |
 | `DATA_DIR`      | `./data`      | Where channels, history, emojis, certs and the game database are stored |
 | `GAME`          | on            | `off` = disable the game entirely (not served, not started, can't be turned on in Settings) |
@@ -144,7 +144,19 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `ADMIN_LOCAL`   | on (off in Docker) | `off` = even a request from the server's own machine needs a key |
 | `ADMIN`         | on            | `off` = no admin dashboard at all |
 
-Example: `SERVER_NAME="Game Night" PASSWORD=hunter2 npm start`
+Example: `SERVER_NAME="Game Night" npm start`
+
+### Invites
+
+Joining takes an invite. The first start prints one that never expires on the console (in Docker: `docker compose logs friendspeak`). A friend pastes it into the **Invite** field of **Connect to a server**. It is not kept in the log the dashboard shows; find it again under **Invites** in the dashboard.
+
+Make more in the admin dashboard under **Invites**, or in the app under **Server settings → Invites**: one that never expires (until it is revoked), one use, a number of uses, or one that expires after a time. The list shows each working invite's token with a **Copy** button, who made it, its uses, the time it has left and who joined with it. The server keeps the tokens of working invites (in `state.json`), so they can be copied again at any time: the dashboard and administrators see all of them, other people with the permission the ones they made.
+
+In the app only people with the **Create invites** permission see that page or any invite. The permission is off by default: give it to a role (or to everyone) under Roles. Until someone is an administrator, invites are made in the dashboard. Someone with the permission can revoke their own invites; administrators and the dashboard can revoke any.
+
+An invite is needed once. After that the server knows a member by their profile's key, so losing or revoking an invite doesn't lock anyone out. A member who is removed needs a new invite to come back. **Require an invite to join** can be switched off in the dashboard or by an administrator in the app; then anyone who knows the address can join.
+
+A server updated from a version with `PASSWORD`: the variable is ignored, everyone already on the server stays, and the first start after the update prints an invite as above.
 
 ## Admin dashboard
 
@@ -164,7 +176,7 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
 
-**Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from `PASSWORD`, which every friend knows. The dashboard ignores roles: it can do everything, whatever the app's permissions say.
+**Anyone who can open the dashboard should be treated as having full control of the server.** The admin key is separate from the invites friends join with. The dashboard ignores roles: it can do everything, whatever the app's permissions say.
 
 ### Getting in
 
@@ -219,7 +231,6 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `COMPOSE_PROFILES` + `WATCHTOWER_TOKEN` | none | Optional. `autoupdate` + a secret (`openssl rand -hex 32`) to install updates automatically |
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
-| `PASSWORD` | none | **Set this** if the port is reachable from the internet |
 | `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
 | `HTTPS` | `1` | `1` = self-signed HTTPS on the port. `0` = plain HTTP for use behind a TLS reverse proxy |
 | `GAME_ASSETS_PATH` / `GAME_EXTRA_ASSETS_PATH` | `/opt/friendspeak/assets-*` | Absolute host paths of the game asset packs, mounted read-only |
@@ -264,7 +275,7 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 - Click someone in a voice channel to change their volume just for you, up to 300% for quiet friends, or to mute them. Double-click the slider to go back to 100%.
 - Sharing audio: Chrome/Edge share system audio when you share an entire screen on Windows, and tab or window audio elsewhere. The desktop app shares system audio on Windows and macOS 13+ (grant Screen Recording permission on macOS). With native streaming (the default, **Settings → Voice & video → Streaming**) friendspeak's own sound is left out of it, so friends don't hear themselves; without it, use headphones while sharing system audio.
 - Press ↑ in an empty composer to edit your last message. Shift-click the trash icon to delete without confirming (messages and files).
-- File links are unguessable but not password-protected: anyone you give a file's URL to can download it, like Discord attachments.
+- File links are unguessable but not behind an invite: anyone you give a file's URL to can download it, like Discord attachments.
 - To edit a sound, right-click it or use the pencil icon. Hotkeys and push-to-talk only work while the friendspeak window is focused (a browser limitation).
 - Your profiles, saved servers, settings and sounds live in the app's storage on your computer. Each profile has its own saved servers and direct messages; settings and sounds are shared. Use **Settings → My profile → Export** to move a profile to another computer. The file holds the profile's keys: servers only let a profile in with the key they first saw for it, so keep the file private and don't lose it (a server admin can reset a lost key under **Users** in the admin dashboard).
 

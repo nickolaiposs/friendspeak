@@ -23,7 +23,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Decision:**
 - A profile (uuid, name, color, avatar, status) is created and stored in the client, and it can be exported/imported.
 - Servers trust the profile id they're sent.
-- Access control is at most one shared server password.
+- Access control is at most one shared server password (replaced by invites, D51).
 - Anyone connected can manage channels and emojis. Only the author can edit or delete a message.
 
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
@@ -166,7 +166,7 @@ Without a mic, users join **listen-only** instead of failing.
 - Desktop clients pin a server's certificate per hostname after the user confirms its fingerprint (SSH-style). A changed certificate triggers a louder warning.
 - Prompts only happen when the user connects to a server (`trustServer` IPC), never from verify-proc callbacks. That way a chat image from a bad-cert host can't pop a trust dialog.
 
-**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). Friends must type `https://` in the address, because scheme-less addresses still default to http. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
+**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). An address typed without a scheme means https (port 3000 unless one is given), so a plain HTTP server takes a typed `http://`. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
 **Alternatives:** blanket `certificate-error` acceptance, which would encrypt but allow trivial MITM; Let's Encrypt, which needs a domain.
 
 ## D21: Production packaging: Docker image + unsigned cross-platform installers · Active
@@ -705,3 +705,27 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - An app from before this decision run on the same data afterwards finds no server list.
 
 **Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
+
+## D51: People join with invites; a member is then known by their key · Active
+
+**Context:** access was one shared `PASSWORD` from the environment, compared in plaintext on every `hello`. Everyone knew it, it couldn't be taken back from one person, and nothing said who let whom in.
+
+**Decision:**
+- **Invites replace the password.** An invite is a token of 16 Crockford base32 characters (80 random bits from `crypto.randomBytes`), shown as `XXXX-XXXX-XXXX-XXXX`. Input is case-insensitive, ignores dashes and spaces and maps `O`→`0`, `I`/`L`→`1`. A lookup hashes what was typed (`SHA-256("friendspeak-invite-v1|" + token)`) and compares it with every stored hash with `timingSafeEqual`.
+- **Four kinds, two settings:** `maxUses` (null, 1 or more) and `expires` (null or a time). Neither: works until revoked. The UIs offer never-expiring, one use, multi-use and time-expiring.
+- **An invite is needed once.** `hello` takes it only from a profile that isn't a member. A member is a profile that is in `state.profiles` and signs with its pinned key (D42), so coming back sends no invite, uses nothing up, and a revoked or used-up invite locks nobody out. Joining with an invite needs a signed `hello`. A removed member needs a new invite. The app forgets an invite once it has joined.
+- **The server keeps the token of every invite** next to its hash, so a working invite can be read and handed out again instead of being replaced. Lists carry it for working invites only: all of them for the dashboard and administrators, their own for other people with `createInvites`. Lists also carry who made it, uses, expiry, who revoked it and the last 100 profiles that joined with it, never the hash. The first version kept only hashes and showed a token once; people lost tokens and had to make new invites, and the dashboard already means full control of the server.
+- **First start:** a server without an invite list (new, or from before invites) makes one invite that never expires. The CLI writes it to stdout, not through `console`, so it isn't in the log buffer, the log files or the dashboard's log view (it is listed under Invites); the scrubber also knows the token's shape.
+- **`createInvites` permission, off by default**, and off in open mode like `manageRoles`: until someone is an administrator, invites are made in the dashboard. Without it the app shows no Invites page and the server sends no invite (`invite:list` is refused, the `invites` event isn't sent). A holder revokes their own invites; an administrator or the dashboard any.
+- **Optional, on by default:** `state.inviteOnly`. Off, anyone with the address joins as before. Only the dashboard or an administrator changes it, never open mode: otherwise any member could open the server to everyone.
+- **Wrong invites are limited per address:** 10 in 10 minutes, then that address waits. Members aren't affected.
+- **`/dm`:** on an invite-only server a socket is a member only if its profile id has joined and has a pinned key, and it gets presence and a mailbox once `identify` proves that key. Anyone else is a guest (D32) or refused.
+- **Version skew:** `/api/info` still sends `password` so older apps ask for one, and `hello` reads `password` when `invite` is missing, so an older app joins with the invite typed as the password. The app sends the same text as both, so it still joins older servers with their password.
+
+**Consequences:**
+- `PASSWORD` is gone. A server that had one ignores it and warns at start; its members stay (their keys are pinned), and new people need an invite. A server that had no password becomes invite-only on update: switch **Require an invite to join** off to keep it open.
+- A profile without a pinned key (an app from before D42 that never updated) can't join an invite-only server.
+- Tokens are readable in `state.json`, its backups and the dashboard: whoever has those can let people in until the invite is revoked. An invite made while only hashes were kept has no token to show.
+- An invite says who was let in, not who they are: identities are still self-made (D3).
+
+**Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).

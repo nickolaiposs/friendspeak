@@ -419,6 +419,13 @@ body.game-visible #main { display: none; }
 .emoji-list { display: flex; flex-direction: column; gap: 4px; }
 .emoji-row { display: flex; align-items: center; gap: 12px; padding: 6px 8px; background: var(--bg-1); border-radius: 6px; }
 .emoji-row img { width: 32px; height: 32px; object-fit: contain; }
+.invite-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: var(--bg-1); border-radius: 6px; }
+.invite-row details > div { padding: 2px 0 0 14px; }
+.invite-status { font-size: calc(11px * var(--font-scale)); font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--bg-3, var(--bg-2)); color: var(--muted); }
+.invite-status.active { background: var(--accent); color: var(--on-accent); }
+.invite-form { align-items: flex-end; }
+.invite-form .field { margin-bottom: 0; }
+.invite-token { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: calc(18px * var(--font-scale)); letter-spacing: .06em; user-select: all; color: var(--text-strong); }
 .server-overview { align-items: flex-start; }
 .server-icon-edit { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .server-icon-preview {

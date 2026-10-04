@@ -373,7 +373,8 @@ function createAdmin(ctx) {
       docker: !!ctx.inDocker,
       https: !!ctx.https,
       fingerprint: ctx.fingerprint(),
-      password: !!ctx.passwordSet,
+      inviteOnly: st.inviteOnly !== false,
+      invites: st.invites.filter((v) => !v.revoked && !(v.expires && v.expires <= Date.now()) && !(v.maxUses && v.uses >= v.maxUses)).length, // the ones that still work
       adminLocal: localAllowed,
       counts: { online: ctx.users.size, profiles: Object.keys(st.profiles).length, bans: st.bans.length, channels: st.channels.length },
       storage: ctx.usage(),
@@ -513,7 +514,7 @@ function createAdmin(ctx) {
     detail = String(detail).replace(/[\u0000-\u001f\u007f]/g, ' '); // names are user input
     audit(req.admin.actor, peerOf(req), action, detail);
     // What the shared actions do is logged by server.js ([mod], [server]), with this actor
-    if (!/^(user|ban|role|perms|server)\./.test(action)) console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
+    if (!/^(user|ban|role|perms|server|invite)\./.test(action)) console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
   };
 
   api.get('/users', (req, res) => {
@@ -728,9 +729,9 @@ function createAdmin(ctx) {
   });
 
   const serverView = () => {
-    const { name, icon } = ctx.state();
+    const { name, icon, inviteOnly } = ctx.state();
     const { available, enabled, reason, world } = ctx.gameInfo();
-    return { name, icon, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
+    return { name, icon, inviteOnly, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
   };
   api.get('/server', (_req, res) => res.json(serverView()));
 
@@ -741,6 +742,7 @@ function createAdmin(ctx) {
     if (b.icon !== undefined) patch.icon = b.icon;
     if (b.game !== undefined) patch.game = b.game;
     if (b.audioQuality !== undefined) patch.audioQuality = b.audioQuality;
+    if (b.inviteOnly !== undefined) patch.inviteOnly = b.inviteOnly;
     if (!Object.keys(patch).length) return res.status(400).json({ error: 'Nothing to change' });
     if (patch.name !== undefined && typeof patch.name !== 'string') return res.status(400).json({ error: 'Server name required' });
     if (patch.icon !== undefined && typeof patch.icon !== 'string') return res.status(400).json({ error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' });
@@ -751,8 +753,25 @@ function createAdmin(ctx) {
       if (patch.icon !== undefined) what.push(patch.icon ? 'icon' : 'icon removed');
       if (patch.game !== undefined) what.push(patch.game ? 'game on' : 'game off');
       if (patch.audioQuality !== undefined) what.push(`voice quality ${patch.audioQuality}`);
+      if (patch.inviteOnly !== undefined) what.push(patch.inviteOnly ? 'invites required' : 'invites not required');
       logAction(req, 'server.update', what.join(', '));
     });
+  });
+
+  // Invites (D51): the tokens people join with. The dashboard is sent the token of every working invite.
+  api.get('/invites', (req, res) => answer(res, actions.listInvites(dash(req))));
+
+  api.post('/invites', (req, res) => {
+    const b = req.body && typeof req.body === 'object' ? req.body : {};
+    answer(res, actions.createInvite(dash(req), { label: b.label, maxUses: b.maxUses ?? null, expiresIn: b.expiresIn ?? null }), (r) =>
+      logAction(req, 'invite.create', `${r.invite.id.slice(0, 8)} ${r.invite.label}`.trim())
+    );
+  });
+
+  api.delete('/invites/:id', (req, res) => {
+    const inviteId = urlId(req.params.id);
+    const label = ctx.state().invites.find((v) => v.id === inviteId)?.label || '';
+    answer(res, actions.removeInvite(dash(req), inviteId), (r) => logAction(req, r.revoked ? 'invite.revoke' : 'invite.remove', `${inviteId.slice(0, 8)} ${label}`.trim()));
   });
 
   api.use((_req, res) => res.status(404).json({ error: 'No such admin API route' }));

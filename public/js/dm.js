@@ -129,6 +129,14 @@ export class DirectMessages {
     this.on.presence();
   }
 
+  // A bookmarked server turned us away before we had joined it (D51) and we gave up on it: knock again
+  retry(address) {
+    const s = this.servers.get(address);
+    if (!s || s.guest || s.socket.active) return;
+    this.servers.delete(address);
+    this.syncServers();
+  }
+
   connectServer(address, { password, guest }) {
     // forceNew: its own connection, so it never shares reconnect settings with the chat socket
     const socket = io(address + '/dm', {
@@ -168,8 +176,8 @@ export class DirectMessages {
       }
       this.on.presence();
     });
-    // Banned, wrong password, or a server that takes no guests: don't keep knocking
-    socket.on('connect_error', (err) => /banned|password/i.test(err.message) && socket.disconnect());
+    // Banned, not a member (or a wrong password, before invites), or a server that takes no guests: don't keep knocking
+    socket.on('connect_error', (err) => /banned|password|member/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
     // Servers with mailboxes (D32) ask who we are: prove it with the profile's key
     socket.on('challenge', async ({ nonce } = {}) => {
