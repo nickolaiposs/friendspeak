@@ -2,7 +2,8 @@
 #
 # Everything (chat, voice signaling, the penguin game) runs on ONE port. There is no
 # chat web UI: friends connect with the friendspeak desktop app. The admin
-# dashboard is at https://<host>:<port>/admin (see ADMIN_KEY below).
+# dashboard is at https://<host>:<port>/admin-<random>: the server prints the
+# address at every start (docker logs friendspeak). See ADMIN_KEY below.
 # Set the variables below in Portainer's "Environment variables" section, or in
 # a .env file next to this file when using `docker compose` directly.
 #
@@ -49,6 +50,11 @@ services:
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
       # and printed once in the container log on first start (docker logs friendspeak).
       ADMIN_KEY: ${ADMIN_KEY:-}
+      # The dashboard's path. Empty = a random one, made on the first start and printed at every
+      # start. off = the plain /admin. Or a path of your own, such as /backoffice
+      ADMIN_PATH: ${ADMIN_PATH:-}
+      # off = an admin key alone signs in (no code from an authenticator app)
+      ADMIN_MFA: ${ADMIN_MFA:-on}
       # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
       GAME: ${GAME:-on}
       GAME_WORLD: ${GAME_WORLD:-Blizzard}
