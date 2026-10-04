@@ -339,7 +339,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43)
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -729,3 +729,26 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - An invite says who was let in, not who they are: identities are still self-made (D3).
 
 **Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).
+
+## D52: The dashboard is at a random path and keys need an authenticator code; both can be switched off · Active
+**Context:** issue #82. The dashboard is full control of the server (D34), and it sat at a path anyone could guess, behind one secret: a key that is pasted around, kept in password managers and compose files, and printed in a container log.
+
+**Decision:**
+- **Random path, on by default.** The first start makes `/admin-` plus 32 hex characters (16 random bytes) and keeps it in `admin.json`, so it survives restarts and updates. The CLI prints the address at every start: unlike a key it is stored in clear, so it can be shown again, and `docker logs` is where a host looks. It is registered with the log scrubber, so the stored log and the dashboard's own log view don't hold it. `/admin` then answers like any unknown path, except to a local request (D34's rule), which is forwarded: that machine needs no key, so the path is no secret to it.
+- **`ADMIN_PATH`** names a path instead (one segment, not one the server uses), and `ADMIN_PATH=off` is the plain `/admin`. A proxy rule or an access layer in front needs a path the host can write down.
+- **TOTP, on by default, set up at a key's first sign-in.** RFC 6238 with SHA-1, 6 digits and 30 s, which every authenticator app reads, done with `node:crypto`. Each key has its own secret, so resetting or revoking one admin doesn't touch the rest. The first sign-in with a key shows the secret as a QR code and as text, and stores it only once a code proves the app has it. After that the key needs a code every time. A code works once (the last used time step is stored) and is accepted one step early or late. Wrong codes count against the address like wrong keys, and also against the key, so guessing codes from many addresses is slowed too.
+- **`ADMIN_MFA=off`** switches it off for the server. Stored secrets stay, so switching it back on doesn't set up again.
+- **Local requests are unchanged:** no key, so no code.
+- **Lost phone:** another admin resets the key's 2-step in Admin keys; the key then sets up again. With no other way in, the host uses the local rule, changes `ADMIN_KEY` (its secret is tied to the key's hash, so a new value is a new key), or deletes `admin.json`.
+- **The QR encoder is our own** (`admin-ui/js/qr.js`, about 200 lines: byte mode, level L, versions 1 to 20). The dashboard has no build step (D1) and its CSP allows no other origin, and the secret must not be sent to a QR service.
+
+**Consequences:**
+- Updating changes how hosts get in: `/admin` is a 404 from another machine until they read the new address from the server's output, and the next sign-in asks to set up an app. `ADMIN_PATH=off` and `ADMIN_MFA=off` keep the old behaviour. Auto-updating servers get this without being asked.
+- The path is obscurity, not access control. It keeps scanners and anyone who only has the server's address away from the sign-in page; it is in browser history, bookmarks, proxy logs and `admin.json`, and is not treated as a secret anywhere else. The key and the code are the gate.
+- Setup at first use means whoever first holds a key can enroll their own app. A key that leaks before its owner signs in is as bad as before D52; one that leaks after is not enough.
+- TOTP secrets can't be hashed: they are in clear in `admin.json` (mode 0600) and its backups. Whoever reads the data folder can make codes, but can't recover a key from its hash.
+- An admin with a session can reset anyone's 2-step. They can also make a new key, so it gives them nothing new.
+- A key that wrong codes have locked is locked for its owner too. Only someone who already has the key can do that.
+- Scripts that sign in (see AGENTS.md → Verifying changes) compute the code or run with `ADMIN_MFA=off`.
+
+**Alternatives:** WebAuthn/passkeys (need a stable HTTPS origin, which a self-signed LAN server on an IP doesn't have); one TOTP secret for the whole server (can't reset one admin); printing the secret in the server output at first boot (ties setup to shell access and puts a lasting secret in `docker logs`); requiring both with no switch (breaks hosts behind an access proxy with path rules, and automation); a QR library (a dependency and a vendored file for one screen); recovery codes (another secret to store; the reset and the host's own access cover it).

@@ -620,7 +620,7 @@ async function startServer(opts = {}) {
 
   const app = express();
   // The server hosts no chat UI: the client ships only in the desktop app (D26).
-  // The admin dashboard at /admin is the one exception (D34).
+  // The admin dashboard is the one exception (D34), at a path of its own (D52).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
   // `password`: apps from before invites ask for one when it is set, and send what was typed as the invite
   app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, invite: state.inviteOnly, password: state.inviteOnly, version: VERSION }));
@@ -1973,7 +1973,7 @@ async function startServer(opts = {}) {
         },
         logs: logs || { lines: () => ({ lines: [], more: false }), query: async () => ({ lines: [], more: false }), info: () => ({ persisted: false, bytes: 0, files: 0, oldest: null, retentionDays: 0, maxBytes: 0 }), on: () => () => {}, scrub: (t) => String(t) },
         crashes,
-        options: { local: opts.admin?.local, key: opts.admin?.key },
+        options: { local: opts.admin?.local, key: opts.admin?.key, mfa: opts.admin?.mfa, path: opts.admin?.path },
       }))
     : null;
   unsubCrashes = admin ? crashes.on(() => admin.notify('crashes')) : null;
@@ -2003,7 +2003,7 @@ async function startServer(opts = {}) {
     get inviteOnly() {
       return state.inviteOnly;
     },
-    admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false },
+    admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false, path: admin ? admin.path : null, mfa: !!admin?.mfa },
     game,
     get gameEnabled() {
       return gameInfo().enabled;
@@ -2082,7 +2082,7 @@ if (require.main === module) {
     crashReports: true,
     dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
-    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY },
+    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
       repo: env.UPDATE_REPO || 'nickolaiposs/friendspeak',
@@ -2100,7 +2100,7 @@ if (require.main === module) {
     // The app reads an address without a scheme as https, so a plain http server prints its scheme
     for (const ip of lanAddresses()) console.log(`  Friends connect:   ${s.https ? '' : 'http://'}${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
-    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}/admin  (${s.admin.local ? 'no key needed from this machine' : 'admin key required'})`}`);
+    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}${s.admin.path}  (${s.admin.local ? 'no key needed from this machine' : 'admin key' + (s.admin.mfa ? ' and authenticator code' : '') + ' required'})`}`);
     console.log(`  Joining:           ${s.inviteOnly ? 'needs an invite (make them in Server settings or the admin dashboard)' : 'open to anyone with the address (invites are off)'}`);
     if (env.PASSWORD) console.warn('  PASSWORD is no longer used: people join with invites, and everyone already on the server stays');
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');

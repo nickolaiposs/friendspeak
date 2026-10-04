@@ -43,7 +43,7 @@ The server only hosts: it has no chat web UI. Everyone, including the host, uses
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
   Friends connect:   http://192.168.1.20:3000
-  Admin dashboard:   http://localhost:3000/admin  (no key needed from this machine)
+  Admin dashboard:   http://localhost:3000/admin-5c1e…  (no key needed from this machine)
 ```
 
 ## Desktop app
@@ -142,6 +142,8 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `GITHUB_TOKEN`  | none          | Lets the server read releases while the GitHub repo is private |
 | `ADMIN_KEY`     | generated     | Admin key for the [admin dashboard](#admin-dashboard) (16+ characters). If unset, a key is generated and printed once on first start |
 | `ADMIN_LOCAL`   | on (off in Docker) | `off` = even a request from the server's own machine needs a key |
+| `ADMIN_MFA`     | on            | `off` = an admin key alone signs in, with no code from an authenticator app |
+| `ADMIN_PATH`    | generated     | The dashboard's path. If unset, a random one (`/admin-…`) is made on the first start and printed at every start. `off` = the plain `/admin`; or a path of your own, such as `/backoffice` |
 | `ADMIN`         | on            | `off` = no admin dashboard at all |
 
 Example: `SERVER_NAME="Game Night" npm start`
@@ -160,7 +162,7 @@ A server updated from a version with `PASSWORD`: the variable is ignored, everyo
 
 ## Admin dashboard
 
-The server hosts a small web dashboard at `/admin`, on the same port. It is for the host, not for friends. Today it shows:
+The server hosts a small web dashboard on the same port, at a random path it makes on the first start (`/admin-` and 32 characters). It is for the host, not for friends. Today it shows:
 
 - **Overview:** version, uptime, memory, how it is hosted, who is online, storage used, the game and update status.
 - **Users:** who is online (with their IP, since when, and what they are doing), everyone who has been on the server before (last seen, last IP) and the bans (with the real IP). You can remove someone, ban them (and their IP) and unban them.
@@ -172,7 +174,7 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 - **Server settings:** the server's name, icon and the game switch, like **Server settings** in the app.
 - **Server log:** a live tail of the server's own output, and its history: the log is kept on disk for `LOG_RETENTION_DAYS` (14 by default), so it survives restarts. Filter by level and source (`[auth]`, `[mod]`, `[game]`, `[update]`), search the whole history, jump to a date range, and export what you see as a text file. The log records who did what (connections, refused sign-ins, moderation, failed uploads, errors), never message text, and secrets such as the server password and admin keys are removed before a line is stored.
 - **Crash reports:** one report each time the server crashes, fails to start, or stops without shutting down (killed, out of memory, power loss), with the error, the version and the last log lines before it. Copy or download a report to send with a bug report.
-- **Admin keys:** create a named key for each admin and revoke it.
+- **Admin keys:** create a named key for each admin, revoke it, and reset its 2-step sign-in.
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
 
@@ -180,15 +182,21 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 
 ### Getting in
 
+**The address.** The dashboard's path is random, so someone who only knows the server's address can't find the sign-in page: `/admin` answers like any page that doesn't exist. The server prints the full address on the `Admin dashboard:` line every time it starts (`docker logs friendspeak`, or Portainer's log view). The path is kept in `admin.json` in the data folder and stays the same across restarts and updates, so bookmark it. It is left out of the log the dashboard stores. `ADMIN_PATH` sets a path of your own, and `ADMIN_PATH=off` goes back to `/admin`. The path is a second lock, not the lock: the key and the code below are what keep people out.
+
+**2-step sign-in.** The first time a key signs in, the dashboard shows a QR code. Scan it with an authenticator app (Google Authenticator, Aegis, 1Password, …) and type the 6-digit code the app shows. From then on that key needs its app's code at every sign-in. Each key has its own. `ADMIN_MFA=off` turns this off for the whole server. Until a key has signed in once, whoever has the key can set this up, so sign in soon after making one.
+
+**Updating from 1.1.5 or older:** `/admin` stops working from another machine. Read the new address from the server's output, and expect the QR code at your next sign-in. To keep things as they were, set `ADMIN_PATH=off` and `ADMIN_MFA=off`.
+
 | Where the server runs | Open | Key |
 |---|---|---|
-| `npm start` on your own machine | `http://localhost:3000/admin` | not needed from that machine. From another machine it needs HTTPS and a key |
-| Docker / Portainer on a LAN | `https://<lan-ip>:3000/admin` | required |
-| A public host | `https://your.domain/admin` | required, with a real certificate |
+| `npm start` on your own machine | `http://localhost:3000/admin` (it forwards to the real path) | not needed from that machine. From another machine it needs HTTPS, a key and its code |
+| Docker / Portainer on a LAN | `https://<lan-ip>:3000/admin-…` | key and code |
+| A public host | `https://your.domain/admin-…` | key and code, with a real certificate |
 
-**1. `npm start` on your own machine.** Open `http://localhost:3000/admin`. A request counts as coming from your own machine when it arrives over loopback, to `localhost`, with no proxy headers. Any program or user on that machine gets in the same way. If that isn't what you want, start with `ADMIN_LOCAL=off`. From another machine, use `https://` (`npm run start:https`) and a key.
+**1. `npm start` on your own machine.** Open `http://localhost:3000/admin`, which forwards your own machine to the real path. A request counts as coming from your own machine when it arrives over loopback, to `localhost`, with no proxy headers. Any program or user on that machine gets in the same way. If that isn't what you want, start with `ADMIN_LOCAL=off`. From another machine, use `https://` (`npm run start:https`) and a key.
 
-**2. Docker / Portainer on a LAN.** Open `https://<lan-ip>:3000/admin`. The image always asks for a key (`ADMIN_LOCAL=off`). On the first start the server generates one and prints it once in the container log (`docker logs friendspeak`, or Portainer's log view). Copy it then: only its hash is stored. Or set `ADMIN_KEY` (16+ characters) in the stack's environment instead. The certificate is self-signed, so the browser shows a warning. To check you are talking to your own server, compare the fingerprint shown on the login page with the `Certificate:` line in the log before you click through. A key is never accepted over plain HTTP from another machine.
+**2. Docker / Portainer on a LAN.** Open `https://<lan-ip>:3000` followed by the path from the container log. The image always asks for a key (`ADMIN_LOCAL=off`). On the first start the server generates one and prints it once in the container log (`docker logs friendspeak`, or Portainer's log view). Copy it then: only its hash is stored. Or set `ADMIN_KEY` (16+ characters) in the stack's environment instead. The certificate is self-signed, so the browser shows a warning. To check you are talking to your own server, compare the fingerprint shown on the login page with the `Certificate:` line in the log before you click through. A key is never accepted over plain HTTP from another machine.
 
 **3. A public host.** Use a real certificate. A browser warning you click through on the public internet makes interception easy. Put a TLS reverse proxy in front, such as Caddy, and run friendspeak with `HTTPS=0`:
 
@@ -200,15 +208,16 @@ your.domain {
 
 - The proxy must pass the original `Host` header, or the app can't sign in ("Could not verify your profile key") and the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
 - Leave `ADMIN_LOCAL` off here (it is off in the image). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`.
-- For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit `/admin` at the proxy if you want per-visitor limits.
-- Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of `/admin`), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000/admin`.
+- For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit the dashboard's path at the proxy if you want per-visitor limits.
+- Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of the dashboard's path; set `ADMIN_PATH` to one you can write in a rule), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000` and the dashboard's path.
 
 ### Managing keys
 
 - Make one key per admin in **Admin keys** and revoke it there when someone leaves. A revoked key's sessions end at once. A new key is shown once, so copy it.
 - Signing in lasts up to 12 hours, or 1 hour without activity. Restarting the server signs everyone out.
+- If an admin loses the phone with their authenticator app, another admin clicks **Reset 2-step** next to their key, and the key sets it up again at its next sign-in. If it was the only key: on the server's own machine `http://localhost:3000/admin` needs no key (`npm start`), a changed `ADMIN_KEY` counts as a new key, and deleting `admin.json` starts over with a new key and a new path.
 - If you lose every key, set `ADMIN_KEY` and restart, or delete `admin.json` in the data folder and restart to get a new first-boot key in the log.
-- Failed sign-ins are rate limited per address: five are free, then the wait grows up to an hour.
+- Failed sign-ins are rate limited per address: five are free, then the wait grows up to an hour. Wrong codes are also counted per key.
 - The audit log is also a file, `admin-audit.log` in the data folder (it rotates at 5 MB).
 - `ADMIN=off` turns the dashboard off completely.
 
@@ -232,6 +241,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
 | `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
+| `ADMIN_PATH` / `ADMIN_MFA` | generated / `on` | The dashboard's path (printed in the container log at every start; `off` = `/admin`) and 2-step sign-in (`off` = key only) |
 | `HTTPS` | `1` | `1` = self-signed HTTPS on the port. `0` = plain HTTP for use behind a TLS reverse proxy |
 | `GAME_ASSETS_PATH` / `GAME_EXTRA_ASSETS_PATH` | `/opt/friendspeak/assets-*` | Absolute host paths of the game asset packs, mounted read-only |
 
@@ -241,7 +251,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 
 **TLS.** With `HTTPS=1`, desktop-app users are asked once to trust the server's certificate fingerprint (printed in the container log). Alternatively, put the container behind a reverse proxy with a real certificate (Nginx Proxy Manager, Traefik, Caddy, …), set `HTTPS=0`, **enable WebSocket support** on the proxy, and stop publishing the port publicly.
 
-**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `mail.json` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
+**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `mail.json` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes, the dashboard's path and the 2-step secrets) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
 
 ### Automatic updates
 
@@ -294,7 +304,7 @@ updater.js          Release check and maintenance-window updates
 admin.js            Admin dashboard: access, sessions, JSON API and event stream
 logbuffer.js        The server's log: in memory for the live view, on disk (data/logs) for history, secrets removed
 crashlog.js         Crash reports (data/crashes)
-admin-ui/           The admin dashboard's pages (plain ES modules, served at /admin)
+admin-ui/           The admin dashboard's pages (plain ES modules)
 public/index.html   App shell
 public/css/         Styles
 public/js/main.js   UI and app logic
