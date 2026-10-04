@@ -1,7 +1,7 @@
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
-import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, CUES } from './audio.js';
+import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { nativeMedia } from './native.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
@@ -5212,36 +5212,70 @@ function settingsVoice(body) {
   const testBtn = h('button', { class: 'btn small ghost' }, 'Test mic');
   const setTest = (on) => {
     testing = on;
-    audio.setMicTest(on);
+    const done = audio.setMicTest(on); // restarts a running mic when the test changes its echo cancellation
     testBtn.textContent = on ? 'Stop test' : 'Test mic';
     syncVoiceState();
+    return done;
   };
   const stopTest = () => {
-    setTest(false);
     if (!liveVoice()) audio.stopMic(); // the test started it
+    setTest(false).catch((e) => toast(e.message, 'error'));
   };
   testBtn.onclick = async () => {
     if (testing) return stopTest();
     if (busy) return;
     busy = true;
     try {
-      if (!audio.micStream) await audio.startMic();
-      if (closed) !liveVoice() && audio.stopMic();
-      else setTest(true);
+      await setTest(true); // first, so a mic that starts here starts the way the test wants it
+      if (testing && !audio.micStream) await audio.startMic(); // not if it was stopped meanwhile
     } catch (e) {
+      stopTest();
       toast(e.message, 'error');
     }
     busy = false;
   };
   const micNote = h('p', { class: 'muted small', hidden: true });
+  // Noise gate, like Discord's input sensitivity: the bar is the mic's level
+  // before the gate, and the slider on it is the level the gate opens at. At
+  // the slider's bottom there is no gate.
+  const gatePct = (db) => Math.min(100, Math.max(0, ((db - GATE.min) / (GATE.max - GATE.min)) * 100)) + '%';
+  const gateVal = h('span', {});
+  const gateSlider = h('input', {
+    type: 'range',
+    ...GATE,
+    step: 1,
+    value: Math.max(GATE.min, Math.min(GATE.max, st.micGate)),
+    'aria-label': 'Noise gate threshold',
+    oninput: (e) => (settings.set({ micGate: +e.target.value }), audio.micStream && audio.applyGate(), syncGate()), // a mic that starts later applies it itself
+  });
+  const gateBox = h('div', { class: 'gate' }, h('div', { class: 'gate-track' }), h('div', { class: 'gate-level' }), gateSlider);
+  const syncGate = () => {
+    const threshold = +gateSlider.value;
+    const on = threshold > GATE.min;
+    const live = audio.micStream ? audio.micGate.live : null;
+    gateBox.classList.toggle('closed', !!live && !live.open);
+    gateBox.style.setProperty('--thr', gatePct(threshold));
+    gateBox.style.setProperty('--lvl', live ? gatePct(live.level) : '0%');
+    const text = on ? `opens above ${threshold} dB`.replace('-', '−') : 'off';
+    if (gateVal.textContent !== text) gateVal.textContent = text;
+  };
+  syncGate();
+  let denoiseOn = st.noiseSuppression;
+  const applyDenoise = () => audio.micStream && audio.applyDenoise(); // live; a mic that starts later applies it itself
   const iv = setInterval(() => {
     const lvl = audio.micStream ? Level(audio.micAnalyser) : 0;
     meter.firstChild.style.width = Math.min(100, lvl * 400) + '%';
+    syncGate();
     if (testing && !busy && !audio.micStream) setTest(false); // the call it ran in ended, and took the mic with it
-    // A device or OS can refuse a constraint without an error
+    // A device or OS can refuse a constraint without an error, and noise suppression may not run here
     const info = audio.micInfo;
-    const refused = [info?.want.noiseSuppression && info.got.noiseSuppression === false && 'noise suppression', info?.want.autoGainControl && info.got.autoGainControl === false && 'automatic gain'].filter(Boolean);
-    const note = refused.length ? `This microphone or system didn’t apply ${refused.join(' or ')}.` : '';
+    const note = [
+      info?.want.autoGainControl && info.got.autoGainControl === false && 'This microphone or system didn’t apply automatic gain.',
+      info?.want.echoCancellation && info.got.echoCancellation === false && 'This microphone or system didn’t apply echo cancellation.',
+      denoiseOn && audio.denoise.state === 'failed' && `Noise suppression can’t run here (${audio.denoise.error}), so your mic is sent as it is.`,
+    ]
+      .filter(Boolean)
+      .join(' ');
     if (micNote.textContent !== note) micNote.textContent = note;
     micNote.hidden = !note;
   }, 60);
@@ -5297,6 +5331,27 @@ function settingsVoice(body) {
       h('input', { type: 'range', min: 0, max, step: 0.01, value: st[key], oninput: (e) => (settings.set({ [key]: +e.target.value }), (val.textContent = Math.round(e.target.value * 100) + '%'), after(+e.target.value)) })
     );
   };
+  // Noise suppression strength: the most the noise is turned down by. The top of the slider is no limit.
+  const limitText = (v) => (v > DENOISE_LIMIT.max ? 'maximum' : `up to ${v} dB quieter`);
+  const limitVal = h('span', {}, limitText(st.noiseSuppressionLimit));
+  const denoiseLimit = h(
+    'label',
+    { class: 'field' },
+    h('span', {}, 'Strength: ', limitVal),
+    h('input', {
+      type: 'range',
+      min: DENOISE_LIMIT.min,
+      max: DENOISE_LIMIT.max + DENOISE_LIMIT.step,
+      step: DENOISE_LIMIT.step,
+      value: Math.min(st.noiseSuppressionLimit, DENOISE_LIMIT.max + DENOISE_LIMIT.step),
+      oninput: (e) => {
+        const v = +e.target.value > DENOISE_LIMIT.max ? DENOISE_LIMIT.none : +e.target.value;
+        settings.set({ noiseSuppressionLimit: v });
+        limitVal.textContent = limitText(v);
+        applyDenoise();
+      },
+    })
+  );
 
   body.append(
     h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
@@ -5321,8 +5376,21 @@ function settingsVoice(body) {
     slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
     check('autoGain', 'Automatic gain', restartMic),
     h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
-    check('noiseSuppression', 'Noise suppression', restartMic),
-    h('p', { class: 'muted small' }, 'Filters steady background noise out of your mic. There is no echo cancellation, so use headphones, or friends hear themselves through your speakers.'),
+    check('echoCancellation', 'Echo cancellation', restartMic),
+    h('p', { class: 'muted small' }, 'Keeps what your speakers play out of your mic, so friends don’t hear themselves. With headphones on you can turn it off: your voice is then sent untouched while others talk.'),
+    check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
+    denoiseLimit,
+    h(
+      'p',
+      { class: 'muted small' },
+      'Takes keyboards, fans and other background noise out of your mic, on this device. Turn the strength down if it cuts sounds you want heard.'
+    ),
+    h('div', { class: 'field' }, h('span', {}, 'Noise gate: ', gateVal), gateBox),
+    h(
+      'p',
+      { class: 'muted small' },
+      'Silences your mic while it is quieter than the marker. The bar shows how loud your mic is, in a call or a mic test: set the marker above your background noise and below your voice, or all the way left for no gate.'
+    ),
     micNote,
     h('h3', {}, 'Push to talk'),
     check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),

@@ -26,6 +26,7 @@ The Node version must be **≥ 22.13**, because the game uses the built-in `node
 | `npm start` | Runs the server on `:3000` (env vars: see ARCHITECTURE.md → Configuration) |
 | `npm run desktop` | Runs the Electron app from source |
 | `npm run build:media` | Builds the native media sidecar (`native/`, Rust) for this OS into `native/dist/`. Needs Rust (`rustup`). `cargo build --release` in `native/` is enough for `npm run desktop`. **Required after any edit under `native/src`.** |
+| `npm run build:denoise` | Rebuilds the noise suppression wasm in `public/vendor/deepfilternet/` from upstream DeepFilterNet (`scripts/denoise/`, D47). Needs Docker. The built files are committed: only needed to change the patch or the pinned versions. |
 | `npm run build:game` | Rebuilds `game/server/dist` (Babel) and `game/client/dist` (webpack). **Required after any edit under `game/*/src`.** |
 | `npm run dist[:mac\|:win\|:linux\|:all]` | Builds desktop installers into `release/` (`:all` cross-builds every OS from a Mac). The installers are client-only and don't include the server or game. Each first builds the media sidecar for the machine's own OS if Rust is installed; installers for other OSes are built without it (D45). |
 | `docker build -t friendspeak .` | Builds the server image; `docker-compose.yaml` runs it (README → Docker) |
@@ -50,7 +51,10 @@ public/                the client UI, bundled into the desktop app (no bundler; 
   js/call.js           calls in DMs (DmCalls): voice, camera and screen share over the DM link, media via VoiceClient
   js/background.js     camera backgrounds (blur, pictures): MediaPipe person segmentation, composited per frame into the track that is sent (D37)
   models/              the segmentation model for camera backgrounds (Apache 2.0; see its README)
-  js/audio.js          Web Audio graph: mic → mute/PTT gate → outgoing track, mic test loopback, soundboard mixing (D38)
+  js/audio.js          Web Audio graph: mic → noise suppression → noise gate → mute/PTT gate → outgoing track, mic test loopback, soundboard mixing (D38, D47, D48)
+  js/denoise-worklet.js  the mic's noise suppression (D47): runs DeepFilterNet on the audio thread; denoise-shim.js is its TextDecoder stand-in
+  js/gate-worklet.js   the mic's noise gate (D48), on the audio thread; reports the mic's level for the bar in Settings
+  vendor/deepfilternet/  the DeepFilterNet wasm, its glue and the model (MIT / Apache 2.0; see its README)
   js/store.js          localStorage (profiles, keys, servers, settings) + IndexedDB (sounds, DMs, DM images, camera background pictures)
   js/theme.js          appearance: themes, custom palette, font, text size, density → CSS variables on <html> (D30); UI size → window zoom (D40)
   js/gogh.js           data: 50 terminal color schemes from Gogh
@@ -69,6 +73,7 @@ game/assets-pack/      (gitignored) Yukon-compatible asset pack; ~3.4 GB
 game/assets-extra/     (gitignored) art for the extra rooms
 scripts/build-game.js  builds both vendored projects
 scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
+scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.patch (our changes to upstream), Cargo.lock
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
 .github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29)
 data/                  (gitignored) server state when run via `npm start` (state.json, mail.json, files/, …)
@@ -114,7 +119,7 @@ See `docs/GAME.md`. In short: edit under `game/*/src`, mark the change, `npm run
 There are no unit tests. Verification so far has been scripted with **puppeteer-core** driving the system Chrome (and Electron via `--remote-debugging-port`). Those scripts lived in a scratch directory and are not in the repo. Reproduce the approach:
 
 - **Server protocol:** a Node script with `socket.io-client` that runs `hello` → exercises events → asserts broadcasts.
-- **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll. To feed a recording instead, add `--use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox` (without the second flag the sandboxed audio service can't read the file and the mic is silent). Mic processing can also be rendered offline: an `OfflineAudioContext` at 48 kHz with the same worklets.
+- **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll. To feed a recording instead, add `--use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox` (without the second flag the sandboxed audio service can't read the file and the mic is silent). Mic processing can also be rendered offline: an `OfflineAudioContext` at 48 kHz with the same worklet (`fs-denoise` with `processorOptions: { wasm, model, on: true, limit }`; messages posted to an offline context's worklet arrive after it has rendered; `fs-gate` takes `processorOptions: { threshold }`). Echo cancellation can't be measured with fake devices: the fake mic doesn't hear the speakers.
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
 - **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
 - **Media sidecar (D45):** two layers. (1) The sidecar alone: a Node script that spawns `native/target/release/friendspeak-media`, sends `start` with `source: { type: 'test' }` (a moving pattern; `audio: true` adds a tone) and `viewer`, and relays `signal` events to a page in the system Chrome (puppeteer-core) that answers on a plain `RTCPeerConnection`; assert on the page's `inbound-rtp` stats (frames decoded, size, `audioLevel` with an unmuted element) and on the sidecar's `stats` events. `type: 'camera'` uses the real camera. (2) In the app: run the Electron instances with `FRIENDSPEAK_FAKE_CAPTURE=1` so every native source is the test pattern; get the `VoiceClient` by wrapping `VoiceClient.prototype.join` from `import('friendspeak://app/js/voice.js')` (modules are singletons), call `setNativeMedia` on one and `watch` on the other, and check `mediaOf`, `videoStats` and `peers.get(sid).nin`. Set `peer.noStream.screen = true` on the viewer to act as an older app. Real screen capture needs the Screen Recording permission, which macOS refuses to a process started from a terminal. Windows code can be type-checked from a Mac in a container (`rust` image, `mingw-w64`, `nasm`, target `x86_64-pc-windows-gnu`); it can only be run on Windows.
@@ -149,6 +154,8 @@ Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 
 - `socket.emitWithAck` never resolves if the socket disconnects mid-call. UI code assumes a connected socket.
 - **Electron global shortcuts have no key-up event,** so push-to-talk can't be global. Soundboard hotkeys can.
 - **Regenerate `package-lock.json` with the Node 24 npm** (the version Docker and CI use) after changing dependencies, e.g. `docker run --rm -v "$PWD:/w" -w /w node:24-bookworm-slim npm install --package-lock-only --ignore-scripts`. Older npm versions drop optional entries, and then `npm ci` fails in the image and in CI.
+- **A compiled `WebAssembly.Module` can't be posted to an AudioWorklet's port** (the worklet gets `messageerror`); it travels in `processorOptions`. The audio thread also has no `TextDecoder`, `performance` or `URL`.
+- **Test instances outlive a failed script.** A puppeteer script that throws before closing leaves its Electron running on its debugging port, and the next run connects to that old one. Kill it first.
 - **The media sidecar needs only the Command Line Tools on macOS, not Xcode.** Its Apple bindings are the `objc2` crates for that reason; `cidre` (and `scap`, which uses it) run `xcodebuild` in their build scripts.
 - **str0m's rule:** every change to an `Rtc` (input, write, SDP, candidate) is followed by polling it until it returns a timeout (`drain` in `native/src/engine.rs`). Two changes in a row without that leave it inconsistent.
 - **Chromium's `audioLevel` stats stay 0 for a muted `<video>`.** Unmute the element when a test checks that a share's audio has sound.

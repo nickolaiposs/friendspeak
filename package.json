@@ -9,6 +9,7 @@
     "desktop": "electron .",
     "build:game": "node scripts/build-game.js",
     "build:media": "node scripts/build-media.js",
+    "build:denoise": "bash scripts/denoise/build.sh",
     "postinstall": "node scripts/build-game.js --if-possible",
     "dist": "node scripts/build-media.js --if-possible && electron-builder",
     "dist:mac": "node scripts/build-media.js --if-possible && electron-builder --mac",
