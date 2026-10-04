@@ -31,7 +31,7 @@ export default {
   title: 'Channels',
   mount(root, { api, events }) {
     const box = h('div', {});
-    root.append(h('p', { class: 'note small' }, 'Channels are created, renamed and deleted in the app, not here.'), box);
+    root.append(h('p', { class: 'note small' }, 'Channels are managed in the app.'), box);
     const fetcher = () => api.get('channels');
     load(box, fetcher, render);
     const refresh = debounce(async () => { try { box.replaceChildren(render(await fetcher())); } catch { /* keep */ } }, 400);
