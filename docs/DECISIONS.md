@@ -166,7 +166,7 @@ Without a mic, users join **listen-only** instead of failing.
 - Desktop clients pin a server's certificate per hostname after the user confirms its fingerprint (SSH-style). A changed certificate triggers a louder warning.
 - Prompts only happen when the user connects to a server (`trustServer` IPC), never from verify-proc callbacks. That way a chat image from a bad-cert host can't pop a trust dialog.
 
-**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). Friends must type `https://` in the address, because scheme-less addresses still default to http. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
+**Consequences:** traffic is encrypted, and it resists interception after the first connect (verify the fingerprint with the host out-of-band to cover that one too). An address typed without a scheme means https (port 3000 unless one is given), so a plain HTTP server takes a typed `http://`. Deleting the server's `key.pem`/`cert.pem` (in `DATA_DIR`) regenerates the cert, and friends then see the "changed" warning.
 **Alternatives:** blanket `certificate-error` acceptance, which would encrypt but allow trivial MITM; Let's Encrypt, which needs a domain.
 
 ## D21: Production packaging: Docker image + unsigned cross-platform installers · Active
@@ -728,4 +728,4 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - A lost token can't be recovered, only replaced. That is the price of keeping hashes.
 - An invite says who was let in, not who they are: identities are still self-made (D3).
 
-**Alternatives:** keeping tokens readable so they can be copied again later (a backup or a look at `state.json` would hand them out); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration; `address#invite` pastes into the existing dialog).
+**Alternatives:** keeping tokens readable so they can be copied again later (a backup or a look at `state.json` would hand them out); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).

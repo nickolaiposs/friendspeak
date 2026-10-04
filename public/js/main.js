@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, inviteInfo, inviteStatus, inviteLink, splitInvite, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -1292,20 +1292,11 @@ function renderRail() {
 }
 
 function serverDialog(existing) {
-  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^http:\/\//, '') || '' });
+  // https is the default, so it is left out when the port says the rest ("https://host" alone means port 443)
+  const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^https:\/\/(?=[^/]+:\d+$)/, '') || '' });
   // The bookmark's `password` holds the invite (D51) until it has been used, or an older server's password
   const pass = h('input', { placeholder: 'XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', value: existing?.password || '' });
-  // "address#invite", as copied from Server settings → Invites, fills both fields
-  const split = () => {
-    const { address, invite } = splitInvite(addr.value);
-    if (!invite) return;
-    addr.value = address;
-    pass.value = invite;
-    if (document.activeElement === addr) pass.focus(); // typed rather than pasted: the rest goes to the invite
-  };
-  addr.addEventListener('input', split);
   const save = (close) => {
-    split();
     const address = normalizeAddress(addr.value);
     if (!address) return toast('Enter an IP or hostname', 'error');
     const entry = servers.upsert({ ...(existing || {}), address, password: pass.value.trim() });
@@ -1320,8 +1311,7 @@ function serverDialog(existing) {
       'div',
       { onkeydown: (e) => e.key === 'Enter' && save(close) },
       h('label', { class: 'field' }, h('span', {}, 'Server IP / address'), addr),
-      h('label', { class: 'field' }, h('span', {}, 'Invite'), pass),
-      h('p', { class: 'muted small' }, 'Port defaults to 3000. You need an invite the first time you join a server that asks for one: paste it here, or paste "address#invite" into the address. Servers from before invites take their password here.')
+      h('label', { class: 'field' }, h('span', {}, 'Invite'), pass)
     ),
     { actions: [(c) => h('button', { class: 'btn', onclick: () => save(c) }, existing ? 'Save & connect' : 'Connect')] }
   );
@@ -6258,7 +6248,6 @@ function serverInvites(body, { st, redraw }) {
       redraw();
     });
   }
-  const address = S.entry.address;
   const copy = (text, what) => navigator.clipboard.writeText(text).then(() => toast(what + ' copied'), () => toast('Could not copy', 'error'));
 
   // Whether joining takes an invite at all: administrators
@@ -6341,8 +6330,7 @@ function serverInvites(body, { st, redraw }) {
           h(
             'div',
             { class: 'row tight' },
-            h('button', { class: 'btn small', onclick: () => copy(inviteLink(address, st.newInvite), 'Address and invite') }, 'Copy address and invite'),
-            h('button', { class: 'btn small ghost', onclick: () => copy(st.newInvite, 'Invite') }, 'Copy invite only'),
+            h('button', { class: 'btn small', onclick: () => copy(st.newInvite, 'Invite') }, 'Copy invite'),
             h('button', { class: 'btn small ghost', onclick: () => ((st.newInvite = null), redraw()) }, 'Done')
           )
         )
