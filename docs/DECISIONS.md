@@ -446,7 +446,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** the same pipeline in a worker (keeps the UI thread free, but MediaPipe's loader uses `importScripts`, which module workers don't have, and a classic worker can't import the ES bundle without a build step); compositing in WebGL on MediaPipe's own context (no mask readback, but far more code for a 256 px mask); TensorFlow.js body-segmentation (wraps the same model with a bigger runtime); ONNX Runtime Web with MODNet or Robust Video Matting (cleaner edges, models of tens of MB and much more GPU); the operating system's effects (macOS Portrait, Windows Studio Effects: free where present, but hardware-dependent and missing on Linux); blurring on the viewer's side (the room would still leave the sender's machine); shipping stock photos as presets (licensing, and megabytes in every installer); a "don't show the preview again" switch (not asked for; the dialog is also where the background is chosen).
 
-## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active (mic processing amended by D44)
+## D38: The mic is sent as captured, as the best Opus there is; servers can set a lower bitrate · Active (mic processing amended by D44 and D48; noise suppression replaced by D47)
 **Context:** D35's processing (RNNoise, a noise gate, speaker mode, the browser's echo canceller and automatic gain) gave people many options and changed how they sounded in ways they didn't ask for (issue #44). Toggling noise reduction during a call was also reported to crash the app (#43). Voice used WebRTC's default Opus: mono, about 32 kbps, so soundboard clips and music sounded flat (#45). And the old "Test mic" only showed a level: you couldn't hear yourself, and not at all during a call (#48).
 **Decision:**
 - **One mic option:** the browser's (WebRTC's) noise suppression, on by default. Echo cancellation and automatic gain are explicitly off; there is no RNNoise, gate or speaker mode. `mic-worklet.js` is gone, and nothing in the app loads the vendored RNNoise files any more.
@@ -537,7 +537,7 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 **Consequences:** enforcement lives on the server, except voice: audio is peer to peer (D5), so a force-muted person with a modified app can still send audio. Unmodified receivers drop it. Hosts who never open the dashboard keep today's open server. Losing the only admin's profile file leaves the server without one until the dashboard grants it again (or resets the key, D42). A server run with `ADMIN=off` has no dashboard, so it stays open.
 **Alternatives:** Discord's "allow wins" across roles (couldn't express a role that takes something away, as the issue asks); enforcing the defaults on update (locks hosts out of channel management until they find the dashboard); making the first person to connect admin (a race); separate "manage server" permission (the issue keeps server settings with admins).
 
-## D44: The mic is sent mono at full level, with automatic gain on by default · Active
+## D44: The mic is sent mono at full level, with automatic gain on by default · Active (echo cancellation and a noise gate added by D48)
 **Context:** after D38, two friends in a real call found everyone too quiet, even with both mics and each other's volume at the maximum, and heard each other mostly in the left ear with noise suppression off. Measured in the app with a fake mic playing speech on the left channel only (speech at −23.5 dBFS, peaks at −12): with no processing, Chromium delivers a two-channel track with the right channel silent, and D38 sent it like that. With noise suppression (or any processing) on, the track is mono with the channels averaged, so the voice arrived 6.3 dB quieter (−29.8 dBFS). Audio interfaces (input 1) and many headsets capture this way. D38 had also turned automatic gain off, so nothing brought a quiet mic up. Separately, the input device setting never took effect in the desktop app: Electron 44 returned the default mic for `deviceId: { ideal }` every time, while `exact` worked.
 **Decision:**
 - **Mono at full level:** the mic's two channels are summed (L + R, not averaged) into one before the mic volume. A one-sided raw capture is sent at its own level in both ears, and the processed mono track gets its 6 dB back. Measured after the change: −23.6 dBFS centred without processing and −23.7 with noise suppression, the same after an Opus loopback. The outgoing track stays stereo for the soundboard.
@@ -602,3 +602,63 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 - Off, 1440p60 is beyond what software encoding and drawing hold on most machines; the ladder (D45) settles lower.
 
 **Alternatives:** separate switches for drawing, decoding and encoding (more precise, more to explain, and nobody asked); storing it in the page's settings and relaunching to apply (the main process can't read `localStorage` before the window exists); always on with no switch (the issue's reading, but leaves no way out of a bad driver).
+
+## D47: Noise suppression is DeepFilterNet in a worklet, not the browser's · Active
+**Context:** after D38 the one mic option was the browser's (WebRTC's) noise suppression. It is on or off, and it leaves a lot behind: D35 measured noise-only stretches at −51 dB with it, against −68 to −71 dB with RNNoise, which D38 removed because it changed how people sounded (#44). Issue #72 asked for DeepFilterNet instead, a fullband (48 kHz) speech enhancer that D35 had passed over as too heavy without measuring it, and asked for it to be measured first, with "no" as a possible outcome.
+
+**Measured** (D35's method: speech at −20 dBFS over fan noise and key clicks at −38 dBFS, rendered offline through the worklet at 48 kHz and live with a fake mic; a recording of a person as well as D35's synthetic voice; Electron 44 on an Apple M4 Pro):
+
+| | Browser (D35) | RNNoise (D35) | DeepFilterNet 3 |
+|---|---|---|---|
+| Noise left in noise-only stretches | −51 dB | −68 to −71 dB | −66 to −69 dB at full strength, −59 dB limited to 24 dB, −49 dB limited to 12 dB |
+| Speech level | unchanged | unchanged | −0.3 dB, every band from 125 Hz to 12 kHz within 0.5 dB of the clean voice |
+| Added delay | | 21 ms | 39 ms |
+| CPU, offline render | | 0.7% of a core | 2.8% of a core |
+| Size | | 150 KB | 22 MB (14 MB wasm, 8 MB model) |
+
+Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loaded), at most 1 ms. On an idle machine the same work reads as 1.1 to 1.4 ms a frame and 15% of a core, because the core is clocked down; that is not a cost under load. Starting the model blocks the audio thread once for about 70 to 150 ms.
+
+**Decision:**
+- **The "Noise suppression" checkbox now switches DeepFilterNet.** `getUserMedia` always asks for `noiseSuppression: false`. It is still the only mic processing besides automatic gain (D44), on by default, and a saved on or off carries over.
+- **A strength slider** under it: the most the noise is turned down by, 6 to 40 dB, with "maximum" (no limit) at the top and as the default. It is libDF's attenuation limit, so it is exact: at 24 dB a noise is 24 dB quieter.
+- **A worklet of our own** (`denoise-worklet.js`, about 100 lines) around upstream's wasm, between `micMono` and `micGain`. It goes into the graph the first time the setting is on and stays; switching and the slider are messages, so nothing is rewired per toggle (the area #43 pointed at) and the mic doesn't restart. Off, it is a wire with no delay.
+- **Our own build of upstream, vendored** in `public/vendor/deepfilternet/` (`scripts/denoise/`, built in Docker from a pinned commit). No npm dependency and no bundler (D1); the server image gets nothing. It carries a patch, for two reasons found while measuring:
+  - The wasm binding uses the library's default thresholds, which skip the deep-filtering stage above 20 dB local SNR. With them the voice came out 5 dB down (10 dB in places, 9 dB at 1 to 2 kHz) over noise at −38 dBFS: the kind of change #44 complained about. Upstream's own `deep-filter` program uses −15/35/35 dB and keeps the voice level; the patch uses those.
+  - With the `tract` version upstream pins (0.21) the patched build cost 9.5% of a core. On 0.23 it costs 2.8% with the same output, so the patch also moves libDF to tract 0.23's API.
+- **If it can't run** (no 48 kHz context, a file missing, the wasm failing) the mic is sent unprocessed and Settings says why. There is no fallback to the browser's suppression: one behaviour to reason about.
+
+**Why this doesn't repeat D35/D38:** D35 added three kinds of processing with five options, and its RNNoise thinned voices. Here there is one switch and one slider, the speech level and spectrum were measured against the clean voice (−0.3 dB, 21.5 dB signal-to-distortion against 18 dB for the untouched noisy mic), and the one way found for it to change a voice was fixed in the build before shipping.
+
+**Consequences:**
+- The mic is 39 ms later with it on (30 ms in the model, 9 ms of queueing between 480-sample frames and 128-sample blocks), 18 ms more than RNNoise was.
+- It removes what isn't speech. At full strength a clap came out 67 dB down and music played into the mic 50 dB down; with a limit they are down by exactly the limit. Laughter was not measured (there is no way to synthesize it) and is the open risk from #44: the slider and the checkbox are the remedies. Soundboard clips don't pass through it.
+- Every installer grows by the 22 MB of wasm and model.
+- CPU and delay were measured on one fast machine. An older laptop will pay more than 2.8% of a core, on the audio thread that also plays friends' voices; if that crackles under load, this needs revisiting (a worker, or off by default).
+- The first switch-on in a session inserts the node and blocks the audio thread for about a tenth of a second, in a call if that is where it happens.
+- Friends on an older app still send with the browser's suppression.
+- The vendored wasm is ours to rebuild: upstream has had no release since 0.5.6 and its `main` doesn't compile against tract 0.23 without the patch.
+- `mic-worklet.js` (D35's gate, unused since D38) is deleted.
+
+**Alternatives:** the `deepfilternet3-noise-filter` npm package (its wasm is downloaded from the author's CDN at run time, is built from unpublished sources, and has the threshold problem: measured −24.6 dBFS speech from −19.5); upstream's wasm unpatched (same problem, and 2 to 3 times the CPU); upstream's low-latency model (10 ms instead of 30 ms in the model at about the same quality, but a 36 MB file); a limited default strength such as 24 dB (leaves key clicks audible, and what it would protect is equally gone at −24 dB); the model in a worker with shared buffers (keeps the audio thread free at the price of more delay and code; not needed at the measured cost); keeping the browser's suppression as a fallback or a second level (two behaviours, and D35's "levels" again); recording a "no" (the measured CPU and delay are four and two times RNNoise's, which is within what a call tolerates).
+
+## D48: Echo cancellation and a noise gate, both on by default · Active
+**Context:** D38 turned echo cancellation off and removed D35's noise gate, so headphones were expected: a friend on speakers sent everyone's voice back to them. The maintainer asked for echo cancellation back as a checkbox, on by default, and for a noise gate that is a slider only (no switch; its bottom is off), also on by default, with the mic's level shown on it.
+
+**Decision:**
+- **Echo cancellation is Chromium's** (`echoCancellation` on `getUserMedia`), a checkbox (`settings.echoCancellation`), on by default. Changing it restarts the capture; the outgoing track stays (D44). It works on the raw capture, ahead of our graph, which is where a canceller has to sit: before noise suppression.
+- **Not during a mic test:** the test plays your own voice back, and a canceller treats what the app plays as a friend's voice. The capture restarts without it for the test and with it after.
+- **The noise gate is ours** (`gate-worklet.js`), after noise suppression and before the mic volume, so its threshold is about the mic and not about how far it is turned up. One number, `settings.micGate`, in dB: −50 by default, and the slider's bottom (−80) is no gate. It opens in 2 ms, holds 250 ms, closes over 60 ms with 5 dB of hysteresis (D35's values), adds no delay, and passes the mic bit for bit while open.
+- **The slider sits on a level bar** (D35's display): the mic's level before the gate, reported by the worklet, so the bar and the gate agree exactly. It moves while the mic runs: in a call or a mic test.
+
+**Why this doesn't repeat D35/D38:** D38 removed five options that changed voices unasked. This is one checkbox and one slider, each asked for. D35's automatic threshold and speaker mode stay gone.
+
+**Consequences:**
+- With echo cancellation on, a voice can be turned down while a friend talks at the same time. People on headphones can switch it off and send the mic as before.
+- Everyone gets both on the next update, including people who had the plain mic.
+- A gate can clip a quiet word ending or a soft start; the hold and the slider are the remedies. With noise suppression on, a silent room sits near −70 to −80 dB on the bar, well under the default.
+- A mic test on speakers still feeds back, as before; the warning in Settings stays.
+- Starting or ending a mic test in a call restarts the capture (a moment of silence, while friends hear nothing from you anyway).
+- **Not measured on real speakers and microphones** (fake devices don't hear the output): whether Chromium's canceller takes the Web Audio graph's output as its reference in Electron 44, whether a non-default output device weakens it, and screen share audio, which plays in `<video>` elements. `echoCancellation: 'all'` (cancel everything the system plays) is the thing to try if friends still hear themselves. D35 left the same questions open.
+- Verified with a fake mic: the track reports `echoCancellation: true` (and `false` during a mic test); offline, a −20 dBFS tone passes unchanged, −60 dBFS around it is silenced (−95 dB and below) after the 250 ms hold, and with the gate off the output equals the input.
+
+**Alternatives:** an echo canceller of our own in the worklet (D35: a large job without Chromium's playout timing); the operating system's canceller (worse for fidelity); a gate switch next to the slider (asked not to); an automatic threshold (D35 had one; more to explain); the gate on the main thread from an analyser (timer jitter, throttled in a hidden window); the gate after the mic volume (the threshold would move with the volume slider).
