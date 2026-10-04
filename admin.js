@@ -1,8 +1,10 @@
-// The admin dashboard (D34): a web page at /admin, served by the friendspeak
-// server itself, plus the JSON API and the event stream behind it.
+// The admin dashboard (D34): a web page served by the friendspeak server
+// itself, plus the JSON API and the event stream behind it. Its path is random,
+// made on the first start (D52); ADMIN_PATH picks another or the plain /admin.
 //
 // Access: a request from this very machine (loopback peer, localhost Host, no
-// proxy headers) needs no key. Everything else needs an admin key and TLS.
+// proxy headers) needs no key. Everything else needs an admin key and TLS, and
+// a code from the authenticator app set up at the key's first sign-in (D52).
 // Keys are 32 random bytes, stored only as SHA-256 hashes in DATA_DIR/admin.json.
 // Sessions are opaque tokens held in memory. There are no accounts (D3): this
 // is the one place that is gated, because it shows IPs and logs.
@@ -17,6 +19,10 @@ const AUDIT_MAX = 5 * 1024 * 1024;
 const MAX_KEYS = 50;
 const MAX_TRACKED_IPS = 10000;
 const FREE_FAILURES = 5;
+const PLAIN_PATH = '/admin';
+// Paths the server already answers on: ADMIN_PATH can't be one of them
+const TAKEN_PATHS = /^\/(api|files|game|assets|world|socket\.io)$/i;
+const ENROLL_TTL = 600e3; // how long a 2-step setup waits for its first code
 
 const sha256 = (v) => crypto.createHash('sha256').update(v).digest();
 const sha256hex = (v) => sha256(v).toString('hex');
@@ -33,6 +39,58 @@ const clampInt = (v, def, max) => {
   return Number.isFinite(n) && n >= 1 ? Math.min(n, max) : def;
 };
 
+// ---------- TOTP (RFC 6238: SHA-1, 6 digits, 30 s) ----------
+
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const isBase32 = (v) => typeof v === 'string' && /^[A-Z2-7]{16,64}$/.test(v);
+function base32(buf) {
+  let out = '';
+  let v = 0;
+  let bits = 0;
+  for (const b of buf) {
+    v = (v << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32[(v >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+    v &= (1 << bits) - 1;
+  }
+  return bits ? out + B32[(v << (5 - bits)) & 31] : out;
+}
+function unbase32(text) {
+  const out = [];
+  let v = 0;
+  let bits = 0;
+  for (const ch of text) {
+    v = (v << 5) | B32.indexOf(ch);
+    bits += 5;
+    if (bits >= 8) {
+      out.push((v >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+    v &= (1 << bits) - 1;
+  }
+  return Buffer.from(out);
+}
+function totpAt(secret, step) {
+  const msg = Buffer.alloc(8);
+  msg.writeBigUInt64BE(BigInt(step));
+  const mac = crypto.createHmac('sha1', unbase32(secret)).update(msg).digest();
+  return String((mac.readUInt32BE(mac[19] & 15) & 0x7fffffff) % 1e6).padStart(6, '0');
+}
+// The time step a 6-digit code is good for: this one or a neighbor, and newer
+// than `after` (a code works once). 0 = wrong code.
+function totpStep(secret, code, after, now) {
+  const cur = Math.floor(now / 30e3);
+  let found = 0;
+  for (const step of [cur - 1, cur, cur + 1]) {
+    const ok = crypto.timingSafeEqual(Buffer.from(totpAt(secret, step)), Buffer.from(code));
+    if (ok && step > after && !found) found = step;
+  }
+  return found;
+}
+
 const HEADERS = {
   'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   'X-Frame-Options': 'DENY',
@@ -48,21 +106,45 @@ function createAdmin(ctx) {
   const AUDIT_FILE = path.join(dataDir, 'admin-audit.log');
   const UI_DIR = path.join(__dirname, 'admin-ui');
   const localAllowed = options.local !== false;
+  const mfaOn = options.mfa !== false;
 
   // ---------- keys ----------
 
   const newSecret = () => 'fsa_' + crypto.randomBytes(32).toString('base64url');
-  let stored = []; // { id, name, hash, created, lastUsed, bootstrap? }
+  // What a key's authenticator app shares with the server: { secret (base32), last (the time step of the last code used) }
+  const cleanTotp = (t) => (t && isBase32(t.secret) ? { secret: t.secret, last: Number(t.last) || 0 } : null);
+  let stored = []; // { id, name, hash, created, lastUsed, bootstrap?, totp? }
+  let storedPath = null; // the generated dashboard path
+  let envTotp = null; // the ADMIN_KEY key's { secret, last, hash }: it has no entry in `stored`
   try {
     const j = JSON.parse(fs.readFileSync(KEYS_FILE, 'utf8'));
-    stored = (Array.isArray(j.keys) ? j.keys : []).filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string' && /^[0-9a-f]{64}$/.test(k.hash)).map((k) => ({ id: k.id, name: cleanName(k.name) || 'key', hash: k.hash, created: Number(k.created) || Date.now(), lastUsed: Number(k.lastUsed) || null, bootstrap: !!k.bootstrap }));
+    stored = (Array.isArray(j.keys) ? j.keys : []).filter((k) => k && typeof k.id === 'string' && typeof k.hash === 'string' && /^[0-9a-f]{64}$/.test(k.hash)).map((k) => ({ id: k.id, name: cleanName(k.name) || 'key', hash: k.hash, created: Number(k.created) || Date.now(), lastUsed: Number(k.lastUsed) || null, bootstrap: !!k.bootstrap, totp: cleanTotp(k.totp) }));
+    if (typeof j.path === 'string' && /^\/admin-[0-9a-f]{32}$/.test(j.path)) storedPath = j.path;
+    if (cleanTotp(j.envTotp) && typeof j.envTotp.hash === 'string') envTotp = { ...cleanTotp(j.envTotp), hash: j.envTotp.hash };
   } catch {}
   function saveKeys() {
     fs.mkdirSync(dataDir, { recursive: true });
     const tmp = KEYS_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify({ keys: stored }, null, 2), { mode: 0o600 });
+    fs.writeFileSync(tmp, JSON.stringify({ path: storedPath || undefined, keys: stored.map((k) => ({ ...k, totp: k.totp || undefined })), envTotp: envTotp || undefined }, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, KEYS_FILE);
   }
+
+  // Where the dashboard is (D52): a random path made once and kept, unless
+  // ADMIN_PATH names one (`false` = the plain /admin).
+  const BASE = (() => {
+    if (options.path === false) return PLAIN_PATH;
+    if (typeof options.path === 'string' && options.path.trim()) {
+      const p = '/' + options.path.trim().replace(/^\/+|\/+$/g, '');
+      if (/^\/[A-Za-z0-9_~-][A-Za-z0-9._~-]{0,63}$/.test(p) && !TAKEN_PATHS.test(p)) return p;
+      console.error('[admin] ADMIN_PATH must be one path segment of letters, digits, "-", "_", "." or "~" that the server doesn’t already use; it is ignored');
+    }
+    if (!storedPath) {
+      storedPath = '/admin-' + crypto.randomBytes(16).toString('hex');
+      saveKeys();
+    }
+    return storedPath;
+  })();
+  if (BASE !== PLAIN_PATH) logs.redact?.(BASE); // the stored log never holds it
 
   let envKey = null;
   if (options.key) {
@@ -77,14 +159,20 @@ function createAdmin(ctx) {
     process.stdout.write(
       `\n  Admin key (generated on first boot):\n\n    ${secret}\n\n` +
         '  This is the only time it is shown. Use it to sign in to the admin dashboard\n' +
-        '  at /admin on this server (set ADMIN_KEY to choose your own instead).\n\n'
+        '  (its address is printed at every start; set ADMIN_KEY to choose your own key instead).\n\n'
     );
   }
 
   const isActive = (k) => !(k.bootstrap && envKey);
   const allKeys = () => (envKey ? [envKey, ...stored] : stored);
   const findKey = (kid) => allKeys().find((k) => k.id === kid);
-  const keyView = (k, current) => ({ id: k.id, name: k.name, created: k.created, lastUsed: k.lastUsed || null, env: !!k.env, bootstrap: !!k.bootstrap, active: isActive(k), current: k.id === current });
+  // A changed ADMIN_KEY is a new key: it sets up 2-step again
+  const totpOf = (k) => (k.env ? (envTotp && envTotp.hash === k.hash ? envTotp : null) : k.totp || null);
+  const setTotp = (k, t) => {
+    if (k.env) envTotp = t && { ...t, hash: k.hash };
+    else k.totp = t;
+  };
+  const keyView = (k, current) => ({ id: k.id, name: k.name, created: k.created, lastUsed: k.lastUsed || null, env: !!k.env, bootstrap: !!k.bootstrap, active: isActive(k), current: k.id === current, mfa: !!totpOf(k) });
 
   // Compare the submitted key against every active key, without stopping at the first match
   function matchKey(secret) {
@@ -171,6 +259,8 @@ function createAdmin(ctx) {
   const pruneTimer = setInterval(() => {
     const now = Date.now();
     for (const [sk, s] of sessions) if (sessionExpired(s, now)) sessions.delete(sk);
+    for (const [id, e] of enrolling) if (e.expires <= now) enrolling.delete(id);
+    for (const [id, f] of codeFails) if (now - f.last > 24 * 3600e3) codeFails.delete(id);
     pruneLimits(now);
   }, 60e3);
   pruneTimer.unref();
@@ -215,6 +305,25 @@ function createAdmin(ctx) {
     recent = recent.filter((t) => now - t < 600e3);
     if (recent.length > 100) globalUntil = now + 60e3;
   }
+
+  // ---------- 2-step sign-in (D52) ----------
+
+  const enrolling = new Map(); // key id -> { secret, expires }: shown at a key's first sign-in, kept once a code proves the app has it
+  const codeFails = new Map(); // key id -> { n, until, last }: wrong codes are also counted per key, whatever address they come from
+  function enrollment(key, now) {
+    let e = enrolling.get(key.id);
+    if (!e || e.expires <= now) enrolling.set(key.id, (e = { secret: base32(crypto.randomBytes(20)), expires: now + ENROLL_TTL }));
+    const account = `${ctx.state().name} (${key.name})`.slice(0, 60);
+    return { secret: e.secret, uri: `otpauth://totp/friendspeak:${encodeURIComponent(account)}?secret=${e.secret}&issuer=friendspeak` };
+  }
+  function noteCodeFailure(keyId, now) {
+    const f = codeFails.get(keyId) || { n: 0, until: 0, last: now };
+    f.n++;
+    f.last = now;
+    if (f.n >= FREE_FAILURES) f.until = now + Math.min(30e3 * 2 ** (f.n - FREE_FAILURES), 3600e3);
+    codeFails.set(keyId, f);
+  }
+  const forgetMfa = (keyId) => (enrolling.delete(keyId), codeFails.delete(keyId));
 
   // ---------- event stream ----------
 
@@ -267,15 +376,18 @@ function createAdmin(ctx) {
 
   // ---------- routes ----------
 
-  app.use('/admin', (req, res, next) => {
+  // This machine may still ask at /admin: it needs no key, so the path is no secret to it. Anyone else gets the 404 of any unknown path.
+  if (BASE !== PLAIN_PATH) app.use(PLAIN_PATH, (req, res, next) => (classify(req).local ? res.set(HEADERS).redirect(302, BASE + '/') : next()));
+
+  app.use(BASE, (req, res, next) => {
     res.set(HEADERS);
-    // /admin → /admin/ (relative URLs in the page need the slash)
-    if (req.path === '/' && !req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(302, '/admin/' + (req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''));
+    // <path> → <path>/ (relative URLs in the page need the slash)
+    if (req.path === '/' && !req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(302, BASE + '/' + (req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''));
     next();
   });
 
   const api = express.Router();
-  app.use('/admin/api', api);
+  app.use(BASE + '/api', api);
 
   // State-changing requests: JSON only, same origin. Applies to local requests too,
   // so a web page open in the host's browser can't drive the dashboard.
@@ -300,12 +412,12 @@ function createAdmin(ctx) {
   });
   api.use(express.json({ limit: '1mb' }));
 
-  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
+  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
 
   api.get('/session', (req, res) => {
     const c = classify(req);
     const me = who(req);
-    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
+    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, mfa: mfaOn, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
   });
 
   api.post('/login', (req, res) => {
@@ -327,9 +439,38 @@ function createAdmin(ctx) {
       console.log(`[admin] failed sign-in from ${c.ip}`);
       return res.status(401).json({ error: 'Wrong key' });
     }
+    // The second step: a code from the authenticator app, which a key sets up the first time it signs in
+    if (mfaOn) {
+      const code = typeof req.body.code === 'string' ? req.body.code.replace(/\s/g, '').slice(0, 12) : '';
+      const totp = totpOf(key);
+      const pend = enrolling.get(key.id);
+      const setup = !totp && (!code || !pend || pend.expires <= now);
+      if (setup) return res.json({ mfa: 'setup', ...enrollment(key, now), expired: !!code });
+      if (!code) return res.json({ mfa: 'code' });
+      const keyWait = (codeFails.get(key.id)?.until || 0) - now;
+      if (keyWait > 0) {
+        const retryAfter = Math.ceil(keyWait / 1000);
+        return res.set('Retry-After', String(retryAfter)).status(429).json({ error: 'Too many attempts. Try again later.', retryAfter });
+      }
+      const step = /^\d{6}$/.test(code) ? totpStep((totp || pend).secret, code, totp ? totp.last : 0, now) : 0;
+      if (!step) {
+        noteFailure(c.ip, now);
+        noteCodeFailure(key.id, now);
+        audit(key.name, c.ip, 'login.failed', 'wrong code');
+        console.log(`[admin] failed sign-in from ${c.ip}: wrong code for the key "${key.name}"`);
+        return res.status(401).json({ error: 'Wrong code' });
+      }
+      if (totp) totp.last = step;
+      else {
+        setTotp(key, { secret: pend.secret, last: step });
+        audit(key.name, c.ip, 'mfa.setup');
+        console.log(`[admin] 2-step sign-in set up for the key "${key.name}"`);
+      }
+      forgetMfa(key.id);
+    }
     failures.delete(c.ip);
     key.lastUsed = now;
-    if (!key.env) saveKeys();
+    saveKeys();
     const token = crypto.randomBytes(32).toString('base64url');
     sessions.set(sha256hex(token), { keyId: key.id, actor: key.name, created: now, seen: now });
     res.set('Set-Cookie', cookieHeader(token, SESSION_MAX / 1000, c.tls));
@@ -376,6 +517,8 @@ function createAdmin(ctx) {
       inviteOnly: st.inviteOnly !== false,
       invites: st.invites.filter((v) => !v.revoked && !(v.expires && v.expires <= Date.now()) && !(v.maxUses && v.uses >= v.maxUses)).length, // the ones that still work
       adminLocal: localAllowed,
+      adminMfa: mfaOn,
+      adminPathHidden: BASE !== PLAIN_PATH,
       counts: { online: ctx.users.size, profiles: Object.keys(st.profiles).length, bans: st.bans.length, channels: st.channels.length },
       storage: ctx.usage(),
       game: ctx.gameInfo(),
@@ -459,7 +602,7 @@ function createAdmin(ctx) {
     res.on('close', () => streams.delete(st));
   });
 
-  api.get('/keys', (req, res) => res.json({ keys: allKeys().map((k) => keyView(k, req.admin.keyId)) }));
+  api.get('/keys', (req, res) => res.json({ keys: allKeys().map((k) => keyView(k, req.admin.keyId)), mfa: mfaOn }));
 
   api.post('/keys', (req, res) => {
     const name = cleanName(req.body?.name);
@@ -480,9 +623,24 @@ function createAdmin(ctx) {
     if (!k) return res.status(400).json({ error: req.params.id === 'env' ? 'The ADMIN_KEY key is set in the server environment; remove it there' : 'No such key' });
     stored = stored.filter((x) => x !== k);
     saveKeys();
+    forgetMfa(k.id);
     revokeSessions(k.id);
     audit(req.admin.actor, peerOf(req), 'key.revoke', k.name);
     console.log(`[admin] ${req.admin.actor} revoked the key "${k.name}"`);
+    notify('keys');
+    res.json({ ok: true });
+  });
+
+  // A lost phone: the key sets 2-step up again at its next sign-in
+  api.post('/keys/:id/mfa/reset', (req, res) => {
+    const k = findKey(req.params.id);
+    if (!k) return res.status(400).json({ error: 'No such key' });
+    if (!totpOf(k)) return res.status(400).json({ error: '2-step sign-in isn’t set up for that key' });
+    setTotp(k, null);
+    saveKeys();
+    forgetMfa(k.id);
+    audit(req.admin.actor, peerOf(req), 'key.mfa.reset', k.name);
+    console.log(`[admin] ${req.admin.actor} reset 2-step sign-in for the key "${k.name}"`);
     notify('keys');
     res.json({ ok: true });
   });
@@ -782,10 +940,12 @@ function createAdmin(ctx) {
   });
 
   // The dashboard's files; util.js is shared with the desktop client
-  app.get('/admin/js/util.js', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
-  app.use('/admin', express.static(UI_DIR, { index: 'index.html', redirect: false }));
+  app.get(BASE + '/js/util.js', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
+  app.use(BASE, express.static(UI_DIR, { index: 'index.html', redirect: false }));
 
   return {
+    path: BASE,
+    mfa: mfaOn,
     notify,
     close() {
       clearInterval(pruneTimer);
