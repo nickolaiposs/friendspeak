@@ -252,10 +252,10 @@ async function startServer(opts = {}) {
   // ---------- invites (D51) ----------
 
   // An invite is a random token that lets a profile join: for good, a number of times, or until
-  // a date. Only its SHA-256 is kept (the token has 80 random bits, so a fast hash is enough),
-  // so state.json, a backup or the dashboard can't give one out again. Once in, a member is
-  // known by their pinned key (D42) and needs no invite to come back.
-  // { id, hash, label, maxUses|null, uses, expires|null, by: { id|null, name }, ts, revoked: null | { ts, by }, joins: [{ id, name, ts }] }
+  // a date. The token is kept next to its SHA-256, so an administrator or the dashboard can
+  // read a working invite again and hand it to someone else. Once in, a member is known by
+  // their pinned key (D42) and needs no invite to come back.
+  // { id, hash, token|null (null: made when only the hash was kept), label, maxUses|null, uses, expires|null, by: { id|null, name }, ts, revoked: null | { ts, by }, joins: [{ id, name, ts }] }
   const firstStart = !Array.isArray(state.invites);
   const cleanLabel = (v) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, MAX_INVITE_LABEL) : '');
   const posInt = (v, max) => (Number.isInteger(v) && v >= 1 ? Math.min(v, max) : null);
@@ -267,6 +267,7 @@ async function startServer(opts = {}) {
     .map((v) => ({
       id: v.id.slice(0, 32),
       hash: v.hash,
+      token: typeof v.token === 'string' ? v.token.slice(0, 64) : null, // checked against the hash below
       label: cleanLabel(v.label),
       maxUses: posInt(v.maxUses, MAX_INVITE_USES),
       uses: Number.isInteger(v.uses) && v.uses > 0 ? v.uses : 0,
@@ -297,17 +298,19 @@ async function startServer(opts = {}) {
     for (const v of state.invites) if (crypto.timingSafeEqual(given, Buffer.from(v.hash, 'hex'))) hit = v;
     return hit && inviteStatus(hit) === 'active' ? hit : null;
   }
-  // Without the hash: what the app and the dashboard list
-  const publicInvites = () => state.invites.map(({ hash, ...v }) => v);
-  // Make and store an invite; the token is returned once and can't be read back
+  for (const v of state.invites) if (v.token && inviteHash(normInvite(v.token)).toString('hex') !== v.hash) v.token = null;
+  // What the app and the dashboard list: never the hash. The token of a working invite goes to
+  // whoever may hand it out: `all` (an administrator, the dashboard), else only to who made it.
+  const publicInvites = (all, pid = null) => state.invites.map(({ hash, token, ...v }) => ({ ...v, token: inviteStatus(v) === 'active' && (all || (pid && v.by.id === pid)) ? token : null }));
+  // Make and store an invite
   function addInvite({ label = '', maxUses = null, expires = null, by }) {
     const token = newInviteToken();
-    const invite = { id: id(), hash: inviteHash(normInvite(token)).toString('hex'), label, maxUses, uses: 0, expires, by, ts: Date.now(), revoked: null, joins: [] };
+    const invite = { id: id(), hash: inviteHash(normInvite(token)).toString('hex'), token, label, maxUses, uses: 0, expires, by, ts: Date.now(), revoked: null, joins: [] };
     state.invites.push(invite);
     return { invite, token };
   }
   // A server with no invite list yet (a new one, or one from before invites): one that never
-  // expires, shown once by the CLI. It goes to stdout only, never through the log.
+  // expires, shown by the CLI. It goes to stdout only, never through the log.
   const firstInvite = firstStart ? addInvite({ label: 'First start', by: { id: null, name: 'Server' } }).token : null;
 
   // Wrong invites per address: after INVITE_FAILURES in INVITE_WINDOW it waits out the window (memory only)
@@ -933,8 +936,10 @@ async function startServer(opts = {}) {
 
     // The invite list changed: tell the sockets that may see it (nobody else is sent any of it)
     function invitesChanged() {
-      const list = publicInvites();
-      for (const [sid, u] of users) if (permsOf(u.profile.id).createInvites) io.to(sid).emit('invites', { invites: list });
+      for (const [sid, u] of users) {
+        const g = permsOf(u.profile.id);
+        if (g.createInvites) io.to(sid).emit('invites', { invites: publicInvites(g.admin, u.profile.id) });
+      }
     }
 
     // Disconnect every chat and DM-signaling socket that matches, telling it why
@@ -1227,11 +1232,11 @@ async function startServer(opts = {}) {
       // --- invites (D51) ---
 
       listInvites(actor) {
-        return need(actor, 'createInvites', 'see invites') || { ok: true, invites: publicInvites(), inviteOnly: state.inviteOnly };
+        return need(actor, 'createInvites', 'see invites') || { ok: true, invites: publicInvites(isDash(actor) || permsOf(actor.profileId).admin, actor.profileId), inviteOnly: state.inviteOnly };
       },
 
       // maxUses: how many people it lets in (null: any number). expiresIn: ms from now (null: never).
-      // Neither: it works until it is revoked. The token is in the answer and nowhere else.
+      // Neither: it works until it is revoked.
       createInvite(actor, { label, maxUses = null, expiresIn = null } = {}) {
         const denied = need(actor, 'createInvites', 'create invites');
         if (denied) return denied;
@@ -1250,7 +1255,7 @@ async function startServer(opts = {}) {
         invitesChanged();
         console.log(`[mod] ${actorName(actor)} created invite ${invite.id.slice(0, 8)}: ${maxUses === null ? 'any number of uses' : maxUses === 1 ? 'one use' : maxUses + ' uses'}, ${expiresIn === null ? 'no end date' : 'expires ' + new Date(invite.expires).toISOString()}`);
         const { hash, ...pub } = invite;
-        return { ok: true, invite: pub, token };
+        return { ok: true, invite: pub, token }; // `token` on its own too: what apps from before tokens were listed read
       },
 
       // A working invite is revoked and stays listed (with who joined); one that no longer works is
@@ -1994,7 +1999,7 @@ async function startServer(opts = {}) {
     https: USE_HTTPS,
     fingerprint,
     name: state.name,
-    firstInvite, // the token of the invite made on a first start, else null: shown once by the CLI
+    firstInvite, // the token of the invite made on a first start, else null: shown by the CLI
     get inviteOnly() {
       return state.inviteOnly;
     },
@@ -2106,9 +2111,9 @@ if (require.main === module) {
     // stdout, not console: the token must never enter the log the dashboard shows
     if (s.firstInvite) {
       process.stdout.write(
-        `  Invite (never expires; made on the first start, shown only now):\n\n    ${s.firstInvite}\n\n` +
+        `  Invite (never expires; made on the first start):\n\n    ${s.firstInvite}\n\n` +
           '  Friends paste it into the Invite field of "Connect to a server".\n' +
-          '  Revoke it or make more in Server settings → Invites, or in the admin dashboard.\n\n'
+          '  See it again, revoke it or make more under Invites, in Server settings or the admin dashboard.\n\n'
       );
     }
 
