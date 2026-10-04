@@ -63,12 +63,13 @@ function mentionSpan(c, inner) {
 // may contain spaces), then the end or a char that isn't [\w-]. Longest candidate wins.
 // server.js repeats these rules (it is CommonJS), keep the two in step.
 // candidates: [{ kind: 'everyone' | 'role' | 'user', id, name }]
-function scanMentions(text, candidates, onMatch) {
+// Channel links follow the same rules with '#' (`sigil`).
+function scanMentions(text, candidates, onMatch, sigil = '@') {
   const list = candidates
     .filter((c) => c && typeof c.name === 'string' && c.name)
     .map((c) => ({ c, key: c.name.toLowerCase() }))
     .sort((a, b) => b.key.length - a.key.length);
-  for (let i = text.indexOf('@'); i >= 0; i = text.indexOf('@', i + 1)) {
+  for (let i = text.indexOf(sigil); i >= 0; i = text.indexOf(sigil, i + 1)) {
     if (i > 0 && !/\s/.test(text[i - 1])) continue;
     const hit = list.find(({ key }) => text.slice(i + 1, i + 1 + key.length).toLowerCase() === key && !/[\w-]/.test(text[i + 1 + key.length] || ''));
     if (hit) onMatch(hit.c, i, i + 1 + hit.key.length);
@@ -92,6 +93,64 @@ export function findMentions(text, candidates) {
   return [...found.values()];
 }
 
+// A link to a text channel around its name, which is already safe. `gone`: deleted, or not ours to see.
+function channelSpan(c, name) {
+  return c.gone
+    ? `<span class="chan-link gone" title="This channel was deleted, or you can’t see it">#${name}</span>`
+    : `<span class="chan-link" role="link" tabindex="0" data-channel="${escapeHtml(String(c.id ?? ''))}">#${name}</span>`;
+}
+
+// A link to a message on a server (D54), as it is written in a message
+export const messageLink = (server, channel, message) => `friendspeak://msg/${server}/${channel}/${message}`;
+const MESSAGE_LINK = /(&lt;)?friendspeak:\/\/msg\/([\w-]{1,64})\/([\w-]{1,64})\/([\w-]{1,64})(&gt;)?/g;
+
+// The text around a match, on one line: what a search result shows. server.js repeats it.
+export function snippetAround(text, at, len) {
+  const from = Math.max(0, at - 40);
+  const to = Math.min(text.length, at + len + 120);
+  return (from > 0 ? '…' : '') + text.slice(from, to).replace(/\s+/g, ' ').trim() + (to < text.length ? '…' : '');
+}
+
+// What is typed in a search field: words, plus filters like from:bob in:general has:image
+// before:2026-10-04 after:yesterday on:today (a name with spaces goes in "quotes").
+// Returns { q, from: [name], in: [name], has: [kind], before, after (times, local days), bad: [what couldn't be read] }.
+export const SEARCH_FILTERS = ['from', 'in', 'has', 'before', 'after', 'on'];
+export const SEARCH_HAS = ['file', 'image', 'gif', 'link'];
+export function parseSearch(input) {
+  const out = { q: '', from: [], in: [], has: [], before: null, after: null, bad: [] };
+  const words = [];
+  const day = (v, add = 0) => {
+    const now = new Date();
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(v);
+    const d = v === 'today' ? [now.getFullYear(), now.getMonth(), now.getDate()] : v === 'yesterday' ? [now.getFullYear(), now.getMonth(), now.getDate() - 1] : m ? [+m[1], +m[2] - 1, +m[3]] : null;
+    const t = d ? new Date(d[0], d[1], d[2] + add).getTime() : NaN;
+    return Number.isFinite(t) ? t : null;
+  };
+  for (const m of String(input).matchAll(/\b(from|in|has|before|after|on|during):(?:"([^"]*)"?|(\S*))|(\S+)/gi)) {
+    if (!m[1]) {
+      words.push(m[4]);
+      continue;
+    }
+    const op = m[1].toLowerCase();
+    const v = (m[2] ?? m[3] ?? '').trim().toLowerCase();
+    if (!v) continue; // still being typed
+    if (op === 'from' || op === 'in') out[op].push(op === 'in' ? v.replace(/^#/, '') : v.replace(/^@/, ''));
+    else if (op === 'has') {
+      const kind = SEARCH_HAS.find((k) => k === v || k + 's' === v);
+      if (kind) out.has.push(kind);
+      else out.bad.push(`has:${v}`);
+    } else if (day(v) == null) out.bad.push(`${op}:${v}`);
+    else if (op === 'before') out.before = Math.min(out.before ?? Infinity, day(v));
+    else if (op === 'after') out.after = Math.max(out.after ?? -Infinity, day(v, 1));
+    else {
+      out.after = Math.max(out.after ?? -Infinity, day(v));
+      out.before = Math.min(out.before ?? Infinity, day(v, 1));
+    }
+  }
+  out.q = words.join(' ');
+  return out;
+}
+
 // Markdown-lite renderer. Input is raw user text; output is safe HTML plus
 // the embeds its links produce (rendered by the caller). Wrapping a link in
 // <angle brackets> keeps it a plain link without an embed.
@@ -99,7 +158,11 @@ export function findMentions(text, candidates) {
 // the raw text: each is drawn with the name given (the current one), so renames carry over.
 // Otherwise mentionables ([{ kind, id, name, me, color? }]) turn known @names (with spaces) into
 // highlighted spans; without either only @word is marked, and `me` goes by myName.
-export function formatText(text, { emojis = [], myName = '', mentionables = null, mentions = null } = {}) {
+// Channel links work the same way: channelMarks ([{ at, len, id, name, gone? }]) are where the
+// server found #channel, else channels ([{ id, name }]) turns the #names it knows into links.
+// A message link (see messageLink) becomes a pill labelled by linkLabel({ server, channel, message })
+// and is listed in `links`, for the caller to draw a preview; in <angle brackets> it is only the pill.
+export function formatText(text, { emojis = [], myName = '', mentionables = null, mentions = null, channels = null, channelMarks = null, linkLabel = null } = {}) {
   const emojiMap = new Map(emojis.map((e) => [e.name, e.url]));
   const jumbo = EMOJI_ONLY.test(text) && [...text.replace(/:[a-z0-9_]+:/g, 'x')].length <= 27;
   const blocks = [];
@@ -108,13 +171,12 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
   // position still holds; the marker becomes the mention at the end
   const marks = [];
   let raw = String(text).replace(/\u0002/g, '\ufffd'); // same length, so positions hold
-  if (Array.isArray(mentions)) {
-    let end = Infinity;
-    for (const m of mentions.filter((m) => m && Number.isInteger(m.at) && Number.isInteger(m.len) && m.len > 0).sort((a, b) => b.at - a.at)) {
-      if (m.at + m.len > end || raw[m.at] !== '@') continue;
-      raw = raw.slice(0, m.at) + `\u0002${marks.push(m) - 1}\u0002` + raw.slice(m.at + m.len);
-      end = m.at;
-    }
+  const known = [...(Array.isArray(mentions) ? mentions : []), ...(Array.isArray(channelMarks) ? channelMarks.map((m) => m && { ...m, kind: 'channel' }) : [])];
+  let end = Infinity;
+  for (const m of known.filter((m) => m && Number.isInteger(m.at) && Number.isInteger(m.len) && m.len > 0).sort((a, b) => b.at - a.at)) {
+    if (m.at + m.len > end || raw[m.at] !== (m.kind === 'channel' ? '#' : '@')) continue;
+    raw = raw.slice(0, m.at) + `\u0002${marks.push(m) - 1}\u0002` + raw.slice(m.at + m.len);
+    end = m.at;
   }
   let s = escapeHtml(raw);
 
@@ -129,6 +191,17 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
     if (e && !embeds.some((x) => x.url === e.url)) embeds.push(e);
     return stash(`<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
   };
+  const links = [];
+  s = s.replace(MESSAGE_LINK, (_, lt, server, channel, message, gt) => {
+    const l = { server, channel, message };
+    const bare = !(lt && gt);
+    if (bare && links.length < MAX_EMBEDS && !links.some((x) => x.server === server && x.channel === channel && x.message === message)) links.push(l);
+    return (
+      (bare ? lt || '' : '') +
+      stash(`<span class="msg-link" role="link" tabindex="0" data-server="${server}" data-channel="${channel}" data-message="${message}">${escapeHtml(String(linkLabel?.(l) || 'message link'))}</span>`) +
+      (bare ? gt || '' : '')
+    );
+  });
   s = s.replace(/&lt;(https?:\/\/(?:(?!&gt;)[^\s])+)&gt;/g, (_, url) => link(url, false));
   s = s.replace(/https?:\/\/(?:(?!&lt;|&gt;|&quot;)[^\s\u0000])+/g, (url) => {
     // trailing punctuation belongs to the sentence, not the link
@@ -169,7 +242,21 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
     }
     return o + t.slice(at);
   };
-  const inline = (t) => (mentions ? inlineBase(t) : mentionHtml(inlineBase(t)));
+  // Known channels, the same way
+  const channelHtml = (t) => {
+    if (channelMarks || !channels?.length || !t.includes('#')) return t;
+    const hits = [];
+    scanMentions(t, channels.map((c) => ({ ...c, name: escapeHtml(c.name) })), (c, from, to) => hits.push([c, from, to]), '#');
+    let o = '';
+    let at = 0;
+    for (const [c, from, to] of hits) {
+      if (from < at) continue;
+      o += t.slice(at, from) + channelSpan(c, t.slice(from + 1, to));
+      at = to;
+    }
+    return o + t.slice(at);
+  };
+  const inline = (t) => channelHtml(mentions ? inlineBase(t) : mentionHtml(inlineBase(t)));
 
   // Line-level blocks: headings, -# subtext, > quotes, - and 1. lists.
   // Plain lines are joined with <br>; block elements bring their own spacing.
@@ -210,9 +297,10 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
   s = out.join('').replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[i]);
   s = s.replace(/\u0002(\d+)\u0002/g, (_, i) => {
     const c = marks[i];
+    if (c.kind === 'channel') return channelSpan(c, escapeHtml(String(c.name)));
     return mentionSpan(c, '@' + escapeHtml(String(c.name)) + (c.tag ? `<span class="mention-tag">#${escapeHtml(String(c.tag))}</span>` : ''));
   });
-  return { html: s, jumbo, embeds };
+  return { html: s, jumbo, embeds, links };
 }
 
 export function fmtBytes(n) {
