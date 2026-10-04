@@ -120,7 +120,7 @@ export default {
       } }, 'Save default permissions');
       return h('section', { class: 'rolecard' },
         h('div', { class: 'head' }, h('span', { class: 'name' }, 'Default permissions (everyone)')),
-        h('p', { class: 'muted small' }, 'What every member can do unless a role they hold says otherwise. Giving Administrator here makes everyone an administrator.'),
+        h('p', { class: 'muted small' }, 'What every member can do unless a role says otherwise.'),
         h('div', { class: 'permgrid' }, rows.map(({ label, input }) => h('label', { class: 'permrow' }, input, h('span', {}, label)))),
         h('div', { class: 'field' }, h('label', {}, 'Roles everyone may give and take away, when Manage roles is on'), grants.el),
         err, save);

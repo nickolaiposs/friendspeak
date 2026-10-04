@@ -194,7 +194,7 @@ export default {
         h('div', { class: 'row' },
           u.mode !== 'off' && h('button', { class: 'btn ghost', onClick: () => act('update/check') }, 'Check now'),
           hasNew && u.canInstall && !u.installing && !u.manual && h('button', { class: 'btn', onClick: updateNow }, 'Update now')),
-        u.mode === 'off' && h('p', { class: 'small muted' }, 'Update checks are off. Choose Notify or Install automatically above to turn them on.'),
+        u.mode === 'off' && h('p', { class: 'small muted' }, 'Update checks are off.'),
         hasNew && !u.canInstall && howTo(),
         msg);
     }

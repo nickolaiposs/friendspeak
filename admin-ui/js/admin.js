@@ -64,12 +64,11 @@ setUnauthorizedHandler(() => start());
 
 function showLogin() {
   const s = session;
-  const card = h('div', { class: 'login-card' }, h('h1', {}, s.name || 'friendspeak'),
-    h('p', { class: 'muted' }, 'Admin dashboard. Anyone with an admin key has full control of this server.'));
+  const card = h('div', { class: 'login-card' }, h('h1', {}, s.name || 'friendspeak'));
   if (!s.canLogin) {
     card.append(
       h('p', {}, 'Admin access from another machine needs an encrypted connection. Start the server with ', h('code', {}, 'HTTPS=1'), ', or put it behind a TLS reverse proxy.'),
-      h('p', { class: 'muted' }, 'On the server’s own machine, ', h('code', {}, `http://localhost:${location.port || 80}/admin`), ' works without a key, unless the server runs with ', h('code', {}, 'ADMIN_LOCAL=off'), '.'));
+      h('p', { class: 'muted' }, 'On the server’s own machine, use ', h('code', {}, `http://localhost:${location.port || 80}/admin`), '.'));
   } else {
     card.append(loginForm(s));
   }
@@ -77,7 +76,7 @@ function showLogin() {
     card.append(h('div', { class: 'field' },
       h('label', {}, 'Server certificate SHA-256 fingerprint'),
       h('div', { class: 'fp' }, s.fingerprint),
-      h('span', { class: 'muted small' }, 'Compare it with the Certificate: line in the server log and with what the browser shows for this site’s certificate.')));
+      h('span', { class: 'muted small' }, 'Compare it with the Certificate: line in the server log.')));
   }
   root.replaceChildren(h('div', { class: 'login' }, card));
   card.querySelector('input')?.focus();

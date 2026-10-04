@@ -47,13 +47,11 @@ export default {
           h('form', { class: 'field', onSubmit: (e) => { e.preventDefault(); if (link.value.trim()) patch({ icon: link.value.trim() }, 'Icon updated.'); } },
             h('label', { for: 'slink' }, 'Or an https:// image link'), h('div', { class: 'row' }, h('div', { class: 'grow' }, link), h('button', { type: 'submit', class: 'btn ghost' }, 'Use link')))),
         h('div', { class: 'card stack' },
-          h('div', { class: 'field' }, h('label', { for: 'squality' }, 'Voice quality'), quality),
-          h('span', { class: 'small muted' }, 'The bitrate everyone sends their voice at in the voice channels. Each person sends to every other person in a channel.')),
+          h('div', { class: 'field' }, h('label', { for: 'squality' }, 'Voice quality'), quality)),
         h('div', { class: 'card stack' },
           h('label', { class: 'row', for: 'sgame' }, toggle, 'Penguin game'),
           !g.available && h('span', { class: 'small muted' }, g.reason || 'Not available on this server.')),
-        out,
-        h('p', { class: 'small muted' }, 'These are the same settings anyone can change in the app under Server settings. Who can join is under Invites.'));
+        out);
     }
 
     async function refresh(force) {
