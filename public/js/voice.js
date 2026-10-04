@@ -395,6 +395,8 @@ export class VoiceClient {
       codec: { screen: null, camera: null }, // codec of their latest sample, for the ladder's bits-per-pixel
       soft: { screen: 0, camera: 0 }, // consecutive samples of software H.264 (see guard)
       note: { screen: null, camera: null }, // shown in the stats panel
+      known: false, // they have our first offer or answer, so they have a peer for us (see sendSdp)
+      early: [], // watch requests made before that
     };
     this.peers.set(sid, peer);
     for (const track of audio.outStream.getAudioTracks()) peer.voiceSender = pc.addTrack(track, audio.outStream);
@@ -405,7 +407,7 @@ export class VoiceClient {
       this.enqueue(sid, async () => {
         if (pc.signalingState !== 'stable') return; // re-fires once we're back to stable
         await this.setLocal(pc);
-        this.send(sid, { sdp: pc.localDescription });
+        this.sendSdp(sid, peer);
       });
     pc.onconnectionstatechange = () => {
       peer.state = pc.connectionState;
@@ -526,7 +528,7 @@ export class VoiceClient {
         await pc.setRemoteDescription({ type: data.sdp.type, sdp: tuneOpus(String(data.sdp.sdp)) }); // rolls back our own offer if we're polite
         if (data.sdp.type === 'offer') {
           await this.setLocal(pc);
-          this.send(from, { sdp: pc.localDescription });
+          this.sendSdp(from, peer);
         }
         this.capVoice(peer); // a sender has no encodings to cap before its first negotiation in some browsers
       } else if (data.candidate) {
@@ -934,7 +936,19 @@ export class VoiceClient {
     if (!peer) return;
     if (!on) (peer.in[kind] = null), this.closeStream(peer, kind), this.statPrev.delete(`in|${sid}|${kind}`);
     // stream: we can receive a native stream on a connection of its own (D45)
-    this.send(sid, on && !peer.noStream[kind] ? { watch: kind, on, stream: 1 } : { watch: kind, on });
+    const msg = on && !peer.noStream[kind] ? { watch: kind, on, stream: 1 } : { watch: kind, on };
+    if (peer.known) return this.send(sid, msg);
+    peer.early = peer.early.filter((m) => m.watch !== kind);
+    if (on) peer.early.push(msg);
+  }
+
+  // Our offer or answer. The other side only makes a peer for us when our
+  // first offer arrives and drops anything that comes before it, so a watch
+  // request made right after joining waits for this.
+  sendSdp(sid, peer) {
+    this.send(sid, { sdp: peer.pc.localDescription });
+    peer.known = true;
+    for (const msg of peer.early.splice(0)) this.send(sid, msg);
   }
 
   // What the encoders/decoder are doing, for the stage header and the stats

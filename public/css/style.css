@@ -491,6 +491,12 @@ body.game-visible #main { display: none; }
 .user-pop p { margin: 0; }
 .user-pop-head { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
 
+.watch-tip { padding: 6px; min-width: 240px; max-width: 340px; max-height: min(320px, 70vh); overflow-y: auto; display: flex; flex-direction: column; }
+.watch-row { display: flex; align-items: center; gap: 10px; padding: 6px; }
+.watch-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
+.watch-who strong { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.watch-row .avatar, .watch-row .btn { flex: none; }
+
 .emoji-pop { padding: 0; overflow: hidden; }
 emoji-picker { --background: var(--bg-1); --border-color: var(--line); --input-border-color: var(--bg-3); --input-font-color: var(--text); --indicator-color: var(--accent); --button-hover-background: var(--bg-3); --button-active-background: var(--bg-active); height: 400px; width: 360px; }
 
