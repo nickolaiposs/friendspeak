@@ -2276,21 +2276,19 @@ function profileSwitcher(anchor) {
   );
 }
 
+// A profile is its own account (D50): leave the previous one's servers and
+// call, then open this one's DMs, server list and the server it was last on.
 function switchProfile(id) {
-  profiles.setActive(id);
-  if (inDmView()) S.channelId = null; // those DMs belong to the previous profile
   DMCALL.stop();
-  DM.start(me(), servers.all());
-  renderUserPanel();
-  // Servers identify you by profile id, so reconnect as the new one. A call on
-  // the server in view is rejoined; one on another server ends.
-  const rejoinVoice = S.call === S.conn ? S.voiceChannel : null;
   endCall();
-  if (S.entry) {
-    const entry = S.entry;
-    disconnect();
-    connectTo(entry, { rejoinVoice });
-  } else renderAll();
+  S.channelId = null; // a DM in view belongs to the previous profile
+  disconnect();
+  S.entry = null;
+  profiles.setActive(id);
+  DM.start(me(), servers.all());
+  renderAll();
+  const last = servers.get(servers.last());
+  if (last) connectTo(last);
 }
 
 // ---------------------------------------------------------------- members
@@ -5045,7 +5043,7 @@ function settingsProfile(body) {
       }, 'Save profile')
     ),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Each has its own servers and direct messages. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
     h(
       'div',
       { class: 'profile-list' },
@@ -5063,7 +5061,7 @@ function settingsProfile(body) {
                 {
                   class: 'btn small ghost danger',
                   onclick: async () => {
-                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
+                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys and its server list go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
                     profiles.remove(x.id);
                     if (x.id === p.id) switchProfile(profiles.all()[0].id);
                     settingsProfile(body.replaceChildren() || body);

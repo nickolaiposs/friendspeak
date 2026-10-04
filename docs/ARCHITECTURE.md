@@ -342,14 +342,17 @@ Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail
 | `fs.profiles` | `[{ id (uuid), name, color, avatar (data URL, https link or emoji), banner (data URL, https link, #hex color or ''), status }]` |
 | `fs.activeProfile` | profile id |
 | `fs.keys` | `{ <profileId>: { sign: { pub, priv }, dh: { pub, priv } } }`: the profile's key pairs (base64url; raw public, PKCS#8 private). Included in profile export files as `keys` |
-| `fs.servers` | `[{ id, address (origin), password, serverName, serverIcon }]` (name and icon are cached from the server for the rail; there are no per-user nicknames) |
-| `fs.lastServer` | server bookmark id |
+| `fs.servers:<profileId>` | `[{ id, address (origin), password, serverName, serverIcon }]`: that profile's server list (D50). Name and icon are cached from the server for the rail; there are no per-user nicknames |
+| `fs.lastServer:<profileId>` | server bookmark id: where that profile reconnects at start and when it's switched to |
+| `fs.mentionUnread:<profileId>` | `{ <serverId>: { <channelId>: count } }`: that profile's unread mentions |
 | `fs.settings` | see `DEFAULT_SETTINGS` (devices, camera background, volumes, mic processing, PTT, GIPHY key, per-user volumes, last channel per server, theme and custom palette, font, text size, density, UI size, screen share `shareTier` and `shareMode`, …) |
 | IndexedDB `friendspeak/sounds` | `{ id, name, emoji, volume, hotkey, blob, type, created }` |
 | IndexedDB `friendspeak/dmContacts` | `{ key: "<myId>\|<theirId>", owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, relays: [address], seen: [opId], wants: [fileId], conflict? }` (index `owner`). Queued ops also carry `at` and `mailed` (timestamps) |
 | IndexedDB `friendspeak/dmMessages` | `{ key: "<thread>\|<msgId>", thread, id, author, name, text, gif, replyTo, reactions, ts, edited?, pending?, mailed?, files?, note? }` (index `thread`); `note` marks a local-only line such as a call result |
 | IndexedDB `friendspeak/backgrounds` | `{ id, name, blob (JPEG, at most 1920×1080), created }`: your own camera background pictures (D37) |
 | IndexedDB `friendspeak/dmFiles` | `{ key: "<thread>\|<fileId>", thread, id, msg, blob, type, name, size }` (index `thread`): DM images, sent and received |
+
+A profile is its own account (D50). `store.js` reads and writes the three per-profile keys for the active profile (`mine()`), so `servers` and `mentionUnread` need no profile argument; DMs are keyed by owner in IndexedDB. Settings, sounds and camera backgrounds belong to the device. `switchProfile()` in `main.js` ends the call, closes every connection, restarts `DM` with the new profile's servers and connects to that profile's last server, if it has one. Deleting a profile deletes its three keys. The first start after an update from before D50 copies the old shared `fs.servers` and `fs.lastServer` to every existing profile (same bookmark ids, which `lastChannel` and `notifyMutedServers` in settings refer to), gives `fs.mentionUnread` to the active one and removes the old keys.
 
 Profiles can be exported and imported as JSON (`exportProfile` / `importProfile`).
 
