@@ -98,6 +98,8 @@ const DEFAULT_SETTINGS = {
   noiseSuppression: true, // DeepFilterNet, in a worklet (D47)
   noiseSuppressionLimit: 100, // dB the noise is turned down by at most; 100 is no limit (DENOISE_LIMIT in audio.js)
   autoGain: true, // the browser's automatic gain: levels a quiet or loud mic (D44)
+  echoCancellation: true, // the browser's echo canceller: keeps what the speakers play out of the mic (D48)
+  micGate: -50, // dB the noise gate opens at; GATE.min (audio.js) and below is no gate (D48)
   userVolumes: {}, // profileId -> 0..3 (above 1 boosts, see audio.js)
   userMutes: {}, // profileId -> true: muted for us only
   muteHotkey: '', // combos like the soundboard's (comboFromEvent)
