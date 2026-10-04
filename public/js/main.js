@@ -1894,8 +1894,8 @@ function renderHeader() {
 
 function renderChannels() {
   const box = $('#channel-list');
-  if (inDmView()) return box.replaceChildren(dmSidebar());
-  if (!S.server) return box.replaceChildren();
+  if (inDmView()) return (box.replaceChildren(dmSidebar()), syncWatchTip());
+  if (!S.server) return (box.replaceChildren(), syncWatchTip());
   const text = S.server.channels.filter((c) => c.type === 'text');
   const voice = S.server.channels.filter((c) => c.type === 'voice');
   const chMenu = (ch) => (e) => {
@@ -1962,6 +1962,7 @@ function renderChannels() {
           'div',
           {
             class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : '') + (canCh(ch.id, 'send') ? '' : ' locked'),
+            'data-watch': video ? 'ch:' + ch.id : null, // the hover card with "Start watching"
             onclick: () => (canCh(ch.id, 'send') ? joinVoice(ch.id) : toast('You don’t have permission to join this voice channel', 'error')),
             oncontextmenu: chMenu(ch),
           },
@@ -1973,7 +1974,7 @@ function renderChannels() {
                 'button',
                 {
                   class: 'video-badge',
-                  title: inCall(ch.id) ? 'Open video grid' : 'Join and open video grid',
+                  'aria-label': inCall(ch.id) ? 'Open video grid' : 'Join and open video grid', // not a title: the hover card explains it
                   onclick: (e) => (e.stopPropagation(), openVideoGrid(ch.id)),
                 },
                 icon('cam')
@@ -1986,6 +1987,7 @@ function renderChannels() {
     }),
     gamesSection() || '' // replaceChildren(null) would print "null"
   );
+  syncWatchTip();
 }
 
 // The sidebar while the DM view is open: every conversation on this device
@@ -2118,7 +2120,8 @@ function voiceUserEl(u) {
     {
       class: 'voice-user' + (peer && peer.state !== 'connected' && !isMe ? ' pending' : ''),
       'data-sid': u.sid,
-      title: peer && !isMe ? `connection: ${peer.state}` : '',
+      'data-watch': u.sharing || u.camera ? 'u:' + u.sid : null,
+      title: peer && !isMe && !u.sharing && !u.camera ? `connection: ${peer.state}` : '', // a streamer's row has the hover card instead
       onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
       oncontextmenu: (e) => {
         const el = e.currentTarget;
@@ -2133,12 +2136,8 @@ function voiceUserEl(u) {
           'button',
           {
             class: 'live-badge' + (S.stage?.tiles.get('screen:' + u.sid)?.live ? ' watching' : ''),
-            title: together ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : 'Join the channel to watch',
-            onclick: (e) => {
-              e.stopPropagation();
-              if (together) openStage({ screen: u.sid });
-              else toast('Join the voice channel to watch');
-            },
+            'aria-label': together ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : `Join and watch ${u.name}'s screen`,
+            onclick: (e) => (e.stopPropagation(), watchStream(u, 'screen')),
           },
           'LIVE'
         )
@@ -2148,12 +2147,8 @@ function voiceUserEl(u) {
           'button',
           {
             class: 'cam-badge' + (S.stage && together ? ' watching' : ''),
-            title: together ? 'Show cameras' : 'Join the channel to see cameras',
-            onclick: (e) => {
-              e.stopPropagation();
-              if (together) openStage();
-              else toast('Join the voice channel to see cameras');
-            },
+            'aria-label': together ? 'Show cameras' : 'Join and show cameras',
+            onclick: (e) => (e.stopPropagation(), watchStream(u, 'camera')),
           },
           icon('cam')
         )
@@ -2219,6 +2214,142 @@ function userVolumePopover(anchor, u, align = 'right') {
     ),
     { align }
   );
+}
+
+// ---------------------------------------------------------------- watch tip
+//
+// Hovering a voice channel where someone streams, or a streamer's row, opens
+// a card next to it with who is streaming and a "Start watching" button. It
+// is an ordinary popover, opened after a short pause and closed a moment
+// after the pointer leaves both the row and the card, so the pointer can
+// cross the gap between them. It never opens over another popover (a menu, a
+// profile card), and opening one of those closes it. Rows carry their key in
+// `data-watch`: "ch:<channel id>" or "u:<sid>".
+
+const WATCH_TIP_OPEN_MS = 350;
+const WATCH_TIP_CLOSE_MS = 300;
+let watchTip = null; // { key, pop, body, passed }
+let watchTipWant = null; // the key under the pointer or the keyboard focus
+let watchTipTimer = null;
+
+const watchTipRow = (key) => $(`#channel-list [data-watch="${CSS.escape(key)}"]`);
+const watchKeyAt = (el) => el?.closest?.('#channel-list [data-watch]')?.dataset.watch || null;
+
+function watchTipRows(key) {
+  const id = key.slice(key.indexOf(':') + 1);
+  const users = S.users.filter((u) => u.voice && (key.startsWith('ch:') ? u.voice === id : u.sid === id));
+  return users
+    .flatMap((u) => [u.sharing && { u, kind: 'screen' }, u.camera && { u, kind: 'camera' }])
+    .filter(Boolean)
+    .map(({ u, kind }) => {
+      const mine = u.sid === S.sid;
+      const screen = kind === 'screen';
+      // Cameras, and our own share, are shown for as long as the stage is open
+      const on = inCall(u.voice) && !!S.stage && (!screen || mine || S.stage.watching.has(u.sid));
+      const btn = !on
+        ? h('button', { class: 'btn small', onclick: () => watchStream(u, kind) }, 'Start watching')
+        : screen && !mine
+          ? h('button', { class: 'btn small ghost', onclick: () => watchScreen(u.sid, false) }, 'Stop watching')
+          : h('button', { class: 'btn small ghost', disabled: true }, 'Watching');
+      return h(
+        'div',
+        { class: 'watch-row' },
+        avatarEl(u, 28),
+        h('div', { class: 'watch-who' }, h('strong', {}, u.name), h('span', { class: 'muted small' }, screen ? 'Sharing their screen' : 'Camera on')),
+        btn
+      );
+    });
+}
+
+function showWatchTip(key) {
+  clearTimeout(watchTipTimer);
+  if (watchTip?.key === key) return;
+  if (activePopover && activePopover !== watchTip?.pop) return;
+  if (inDmView() || !S.server || !watchTipRow(key)) return;
+  const rows = watchTipRows(key);
+  if (!rows.length) return;
+  const inside = (el) => !!el && (body.contains(el) || !!watchTipRow(key)?.contains(el));
+  const body = h(
+    'div',
+    {
+      class: 'watch-tip',
+      onmouseenter: () => wantWatchTip(key),
+      onmouseleave: () => wantWatchTip(null),
+      onfocusin: () => wantWatchTip(key), // also when a rebuild (syncWatchTip) puts the focus back
+      onfocusout: (e) => inside(e.relatedTarget) || wantWatchTip(null),
+      // Tab leaves the card the way it came in: back to the row
+      onkeydown: (e) => {
+        if (e.key !== 'Tab') return;
+        const btns = [...body.querySelectorAll('button:not(:disabled)')];
+        const i = btns.indexOf(document.activeElement);
+        if (e.shiftKey ? i > 0 : i < btns.length - 1) return;
+        const back = watchTipRow(key)?.querySelector('button');
+        if (!back) return;
+        e.preventDefault();
+        if (watchTip && !e.shiftKey) watchTip.passed = true; // the next Tab goes on down the list
+        back.focus();
+      },
+    },
+    rows
+  );
+  // The channel list is rebuilt often, so the row is looked up each time
+  const anchor = { getBoundingClientRect: () => (watchTipRow(key) || body).getBoundingClientRect(), contains: (el) => !!watchTipRow(key)?.contains(el) };
+  const pop = popover(anchor, body, { align: 'right', onClose: () => watchTip?.pop === pop && (watchTip = null) });
+  watchTip = { key, pop, body, passed: false };
+}
+
+// What the pointer or the focus is on now: a row's key, or null for neither
+function wantWatchTip(key, now = false) {
+  if (key === watchTipWant && !now) return;
+  watchTipWant = key;
+  clearTimeout(watchTipTimer);
+  if (key === (watchTip?.key ?? null)) return;
+  const go = () => (key ? showWatchTip(key) : watchTip?.pop.close());
+  if (now) go();
+  else watchTipTimer = setTimeout(go, key ? WATCH_TIP_OPEN_MS : WATCH_TIP_CLOSE_MS);
+}
+
+// After the channel list is rebuilt: refresh the open card, or close it when
+// its row is gone or nobody there streams any more
+function syncWatchTip() {
+  if (!watchTip) return;
+  const { key, body, pop } = watchTip;
+  const rows = !inDmView() && S.server && watchTipRow(key) ? watchTipRows(key) : [];
+  if (!rows.length) return pop.close();
+  const focused = body.contains(document.activeElement);
+  body.replaceChildren(...rows);
+  pop.place();
+  if (!focused) return;
+  (body.querySelector('button:not(:disabled)') || watchTipRow(key)?.querySelector('button'))?.focus();
+  wantWatchTip(key); // the old button going away looked like the focus leaving
+}
+
+{
+  const list = $('#channel-list');
+  list.addEventListener('mouseover', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key) wantWatchTip(key);
+  });
+  list.addEventListener('mouseout', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && watchKeyAt(e.relatedTarget) !== key) wantWatchTip(null);
+  });
+  // Keyboard: focusing a row's badge opens the card at once, and Tab goes into it
+  list.addEventListener('focusin', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && e.target.matches(':focus-visible')) wantWatchTip(key, true);
+  });
+  list.addEventListener('focusout', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && watchKeyAt(e.relatedTarget) !== key && !watchTip?.body.contains(e.relatedTarget)) wantWatchTip(null);
+  });
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || e.shiftKey || !watchTip || watchTip.passed || watchKeyAt(e.target) !== watchTip.key) return;
+    const first = watchTip.body.querySelector('button:not(:disabled)');
+    if (!first) return;
+    e.preventDefault();
+    first.focus();
+  });
 }
 
 function renderVoicePanel() {
@@ -4757,6 +4888,21 @@ async function openVideoGrid(channelId) {
   if (!inCall(channelId)) return;
   openStage();
   if (S.stage?.focus) setStageFocus(S.stage.focus);
+}
+
+// The LIVE and camera badges and the hover card's button: join the person's
+// voice channel if needed, then show their screen share on the stage, or the
+// stage's grid for cameras
+async function watchStream(u, kind) {
+  const channelId = u.voice;
+  if (!inCall(channelId)) {
+    if (!canCh(channelId, 'send')) return toast('You don’t have permission to join this voice channel', 'error');
+    await joinVoice(channelId);
+  }
+  if (!inCall(channelId)) return;
+  // They may have stopped or left while we joined
+  const still = kind === 'screen' && S.users.some((x) => x.sid === u.sid && x.voice === channelId && x.sharing);
+  openStage(still ? { screen: u.sid } : {});
 }
 
 function statsTile() {
