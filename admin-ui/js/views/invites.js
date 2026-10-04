@@ -95,10 +95,10 @@ export default {
       usesField, lastsField, make);
 
     root.append(
-      h('p', { class: 'prose' }, 'An invite is a token someone enters once to join, in the app under "Connect to a server". After that the server knows them by their profile key. Working invites can be copied again here and by administrators in the app; each records who made it and who joined with it.'),
+      h('p', { class: 'prose' }, 'A token someone enters once to join.'),
       h('div', { class: 'card stack' },
         h('label', { class: 'row', for: 'invreq' }, required, 'Require an invite to join'),
-        h('span', { class: 'small muted' }, 'Off: anyone who knows the address can join. People already on the server never need an invite to come back.'),
+        h('span', { class: 'small muted' }, 'Off: anyone who knows the address can join.'),
         out),
       h('h2', {}, 'New invite'),
       form, err,

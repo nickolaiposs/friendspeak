@@ -24,6 +24,11 @@ jobs:
         run: |
           for f in server.js updater.js admin.js logbuffer.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
           for f in public/js/*.js admin-ui/js/*.js admin-ui/js/views/*.js; do node --check --input-type=module < "$f" || { echo "in $f"; exit 1; }; done
+      - name: Deploy stack
+        run: |
+          bash -n deploy/install.sh
+          DOMAIN=chat.example.com docker compose -f deploy/docker-compose.yaml config -q
+          docker run --rm -e DOMAIN=chat.example.com -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
       - name: Server starts
         run: |
           DATA_DIR="$RUNNER_TEMP/data" GAME=off PORT=3999 node server.js &

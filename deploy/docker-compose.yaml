@@ -1,29 +1,20 @@
-# friendspeak for Docker / Portainer (Stacks → Add stack → Web editor).
+# friendspeak on a domain, with real HTTPS (D53): friendspeak behind Caddy, which
+# gets and renews a Let's Encrypt certificate by itself. For a VPS/droplet, or a
+# machine at home with ports 80 and 443 forwarded to it.
 #
-# Everything (chat, voice signaling, the penguin game) runs on ONE port. There is no
-# chat web UI: friends connect with the friendspeak desktop app. The admin
-# dashboard is at https://<host>:<port>/admin-<random>: the server prints the
-# address at every start (docker logs friendspeak). See ADMIN_KEY below.
-# Set the variables below in Portainer's "Environment variables" section, or in
-# a .env file next to this file when using `docker compose` directly.
+# The quick way is deploy/install.sh, which asks for the domain, writes .env and
+# starts this. By hand:
+#   1. Point the domain at this machine (README → Deploy on a domain).
+#   2. Put this file and Caddyfile in one folder, with a .env next to them
+#      (deploy/.env.example); DOMAIN is the only setting it must have.
+#   3. docker compose up -d && docker compose logs friendspeak
 #
-# TLS, pick one:
-#   - HTTPS=1 (default): the server makes a self-signed certificate. The desktop
-#     app pins it after asking once.
-#   - HTTPS=0 behind your own reverse proxy (Nginx Proxy Manager, Traefik,
-#     Caddy…) with a real certificate. Enable WebSocket support on the proxy
-#     and remove the `ports:` mapping (or bind it to 127.0.0.1).
+# Friends connect to https://DOMAIN with the desktop app. The admin dashboard is
+# at https://DOMAIN/admin-<random>: the log prints its address at every start,
+# and the admin key and the first invite once, on the first start.
 #
-# Voice is peer-to-peer WebRTC: the server only relays signaling, so no UDP
-# ports need to be opened here.
-#
-# Updates (D29), optional: with AUTO_UPDATE=on, friendspeak checks GitHub for
-# new releases, warns everyone, and at the maintenance window (MAINTENANCE_CRON,
-# default Sunday 06:00 in TZ) asks the watchtower service below to pull the new
-# image and recreate the container. To turn it on, set
-#   COMPOSE_PROFILES=autoupdate
-#   WATCHTOWER_TOKEN=<openssl rand -hex 32>
-# Without them only friendspeak runs, and new versions are just announced.
+# No domain? Use the docker-compose.yaml in the repo's root instead: it serves a
+# self-signed certificate on port 3000 that the app pins.
 
 name: friendspeak
 
@@ -34,9 +25,14 @@ services:
     image: ${FRIENDSPEAK_IMAGE:-ghcr.io/nickolaiposs/friendspeak:latest}
     restart: unless-stopped
     init: true
-    ports:
-      - "${FRIENDSPEAK_PORT:-3000}:3000"
+    # Not published: only Caddy reaches it, on the stack's own network
+    expose:
+      - "3000"
     environment:
+      # Plain HTTP inside the stack; Caddy does TLS
+      HTTPS: "0"
+      # The address the log prints for friends and for the dashboard
+      PUBLIC_URL: https://${DOMAIN:?Set DOMAIN in .env to the domain that points at this machine, e.g. chat.example.com}
       SERVER_NAME: ${SERVER_NAME:-friendspeak}
       GIPHY_API_KEY: ${GIPHY_API_KEY:-}
       # Total space for files uploaded to channels (stored in the data volume)
@@ -46,9 +42,8 @@ services:
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
       # off = only members can pass direct messages through this server
       DM_GUESTS: ${DM_GUESTS:-on}
-      HTTPS: ${HTTPS:-1}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
-      # and printed once in the container log on first start (docker logs friendspeak).
+      # and printed once in the container log on first start.
       ADMIN_KEY: ${ADMIN_KEY:-}
       # The dashboard's path. Empty = a random one, made on the first start and printed at every
       # start. off = the plain /admin. Or a path of your own, such as /backoffice
@@ -74,14 +69,12 @@ services:
       # Watchtower only touches containers with this label
       com.centurylinklabs.watchtower.enable: "true"
     volumes:
-      # Chat history, emojis, penguins (game.sqlite), secrets and the TLS cert.
-      # Back this volume up; deleting it changes the certificate fingerprint.
+      # Chat history, uploaded files, emojis, penguins (game.sqlite) and secrets. Back this volume up.
       - friendspeak-data:/data
-      # Game assets (optional; not shipped in the image). Use absolute
-      # host paths: Portainer doesn't resolve relative paths to your files.
-      # Empty folders are fine; the game then reports its assets as missing.
-      - ${GAME_ASSETS_PATH:-/opt/friendspeak/assets-pack}:/app/game/assets-pack:ro
-      - ${GAME_EXTRA_ASSETS_PATH:-/opt/friendspeak/assets-extra}:/app/game/assets-extra:ro
+      # Game assets (optional; not shipped in the image). Empty folders are
+      # fine; the game then reports its assets as missing.
+      - ${GAME_ASSETS_PATH:-./assets-pack}:/app/game/assets-pack:ro
+      - ${GAME_EXTRA_ASSETS_PATH:-./assets-extra}:/app/game/assets-extra:ro
     read_only: true
     tmpfs:
       - /tmp
@@ -96,10 +89,42 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # The only service the internet reaches. 80 is for Let's Encrypt and for
+  # forwarding http:// to https://; 443/udp is HTTP/3; 3000 is the port the app
+  # tries for an address typed without https:// (see Caddyfile).
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - friendspeak
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+      - "3000:3000"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The certificates and their keys. Keep this volume: Let's Encrypt limits
+      # how often a domain can get new ones.
+      - caddy-data:/data
+      - caddy-config:/config
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Replaces the friendspeak container when friendspeak asks it to (HTTP API
-  # only: it never polls on its own). The maintained fork of containrrr/watchtower,
-  # which was archived in 2025. It's the only service with the Docker socket.
-  # Runs only with COMPOSE_PROFILES=autoupdate.
+  # only: it never polls on its own). It's the only service with the Docker
+  # socket. Runs only with COMPOSE_PROFILES=autoupdate (README → Automatic updates).
   watchtower:
     image: nickfedor/watchtower:latest
     profiles: [autoupdate]
@@ -120,3 +145,5 @@ services:
 
 volumes:
   friendspeak-data:
+  caddy-data:
+  caddy-config:
