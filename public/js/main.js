@@ -1281,7 +1281,7 @@ function renderRail() {
               active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
               calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
-              { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
+              { label: 'Remove', danger: true, run: async () => (await leaveServer(s), active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
             ]),
         },
         s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label),
@@ -1407,6 +1407,26 @@ const hostOf = (address) => {
   }
 };
 
+// Tell a server we're leaving it for good (its bookmark is being removed), so that coming back
+// takes an invite again (D51). Best effort: a server that can't be reached still has us as a member.
+async function leaveServer(entry) {
+  const live = conns().find((c) => c.entry.id === entry.id && c.connected);
+  if (live) return live.socket.timeout(2000).emitWithAck('server:leave', {}).catch(() => {});
+  // Not connected: say hello on a socket of its own, in the background
+  const profile = me();
+  const socket = io(entry.address, { transports: ['websocket', 'polling'], reconnection: false, timeout: 5000 });
+  const done = () => socket.disconnect();
+  socket.on('connect_error', done);
+  socket.on('connect', async () => {
+    try {
+      const identity = await identityFor(profile).catch(() => null);
+      const res = await socket.timeout(5000).emitWithAck('hello', { profile: { ...profile, card: identity?.card }, proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)) });
+      if (res.ok) await socket.timeout(5000).emitWithAck('server:leave', {});
+    } catch {}
+    done();
+  });
+}
+
 function openSocket(entry, rejoinVoice = null) {
   const host = hostOf(entry.address); // the only thing about a server that is logged
   log.info(`connecting to ${host}`);
@@ -1500,7 +1520,7 @@ function openSocket(entry, rejoinVoice = null) {
         banned
           ? 'You were banned from this server.'
           : removed
-            ? 'Someone removed you from this server. Click the server to rejoin.'
+            ? 'Someone removed you from this server. You need an invite to rejoin.'
             : replaced
             ? 'You connected to this server from another window or device with this profile. Click the server to reconnect here.'
             : 'The server closed the connection. Click the server to reconnect.'
