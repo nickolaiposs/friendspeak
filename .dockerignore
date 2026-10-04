@@ -22,3 +22,6 @@ game/assets-pack
 game/assets-extra
 game/client/assets/media
 game/client/assets/fonts
+
+# The domain stack (README → Deploy on a domain): files for the Docker host, not for the image
+deploy

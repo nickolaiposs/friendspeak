@@ -115,7 +115,7 @@ The client is the **desktop app**; the server does not serve a chat web UI. Each
 
 For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
-To play over the internet instead of a LAN, forward the TCP port on the host's router. Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
+To play over the internet instead of a LAN, forward the TCP port on the host's router, or host it on a domain with a real certificate ([Deploy on a domain](#deploy-on-a-domain-docker--caddy)). Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
 
 ## Server options (environment variables)
 
@@ -129,6 +129,7 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `LOG_MAX_SIZE`  | `50MB`        | Most disk space the log history may use; the oldest days are deleted first |
 | `DM_GUESTS`     | on            | `off` = only members can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without having joined; they see nothing else |
 | `HTTPS`         | off           | `1` = serve over HTTPS with an auto-generated self-signed cert |
+| `PUBLIC_URL`    | none          | The address people reach the server at when it's behind a reverse proxy, e.g. `https://chat.example.com`. Only changes the addresses the server prints at start |
 | `DATA_DIR`      | `./data`      | Where channels, history, emojis, certs and the game database are stored |
 | `GAME`          | on            | `off` = disable the game entirely (not served, not started, can't be turned on in Settings) |
 | `GAME_ASSETS_DIR` | none        | Extra folder containing the Yukon asset pack                   |
@@ -198,7 +199,7 @@ The server hosts a small web dashboard on the same port, at a random path it mak
 
 **2. Docker / Portainer on a LAN.** Open `https://<lan-ip>:3000` followed by the path from the container log. The image always asks for a key (`ADMIN_LOCAL=off`). On the first start the server generates one and prints it once in the container log (`docker logs friendspeak`, or Portainer's log view). Copy it then: only its hash is stored. Or set `ADMIN_KEY` (16+ characters) in the stack's environment instead. The certificate is self-signed, so the browser shows a warning. To check you are talking to your own server, compare the fingerprint shown on the login page with the `Certificate:` line in the log before you click through. A key is never accepted over plain HTTP from another machine.
 
-**3. A public host.** Use a real certificate. A browser warning you click through on the public internet makes interception easy. Put a TLS reverse proxy in front, such as Caddy, and run friendspeak with `HTTPS=0`:
+**3. A public host.** Use a real certificate. A browser warning you click through on the public internet makes interception easy. [Deploy on a domain](#deploy-on-a-domain-docker--caddy) sets all of this up. To do it yourself, put a TLS reverse proxy in front, such as Caddy, and run friendspeak with `HTTPS=0`:
 
 ```
 your.domain {
@@ -220,6 +221,88 @@ your.domain {
 - Failed sign-ins are rate limited per address: five are free, then the wait grows up to an hour. Wrong codes are also counted per key.
 - The audit log is also a file, `admin-audit.log` in the data folder (it rotates at 5 MB).
 - `ADMIN=off` turns the dashboard off completely.
+
+## Deploy on a domain (Docker + Caddy)
+
+The easy way to host for friends over the internet: friendspeak behind [Caddy](https://caddyserver.com/) on a domain of yours, with a real HTTPS certificate that Caddy gets and renews by itself. Friends connect to `https://chat.example.com` and nobody sees a certificate warning. It works on a rented server (a DigitalOcean droplet, Hetzner, …) and on a machine at home. Everything is in [`deploy/`](deploy/).
+
+You need a machine that runs Docker and is reachable from the internet, and a domain (or a subdomain of one you have). Without a domain, use [Docker / Portainer](#docker--portainer) below, which serves a self-signed certificate.
+
+### 1. Point the domain at the server
+
+At the company where the domain is registered (or wherever its DNS is managed), add a record:
+
+| To use | Type | Name / host | Value |
+|---|---|---|---|
+| a subdomain, `chat.example.com` | `A` | `chat` | the server's public IPv4 address |
+| the domain itself, `example.com` | `A` | `@` | the server's public IPv4 address |
+
+Add an `AAAA` record with the IPv6 address too, but only if the server really answers on IPv6. A record that points nowhere makes some connections fail. Leave the TTL at its default. A new record is usually live within minutes; check with `dig +short chat.example.com` (or `nslookup chat.example.com`), which should print the server's address.
+
+- **A subdomain is the better choice** if the domain already has a website: the two don't get in each other's way.
+- **Cloudflare:** set the record to **DNS only** (the grey cloud). Proxied (orange) can work, but uploads over 100 MB are refused and port 3000 isn't passed on.
+- **At home:** the value is your router's public address (search "what is my IP"). Forward TCP ports 80 and 443 on the router to the machine. If the address changes, use a dynamic DNS service, or your DNS provider's updater. Some providers block these ports or share one address between customers (CGNAT); then this setup can't get a certificate, and a tunnel (Cloudflare Tunnel, Tailscale Funnel) in front of the plain [Docker stack](#docker--portainer) with `HTTPS=0` is the way.
+
+### 2. Open the ports
+
+| Port | For |
+|---|---|
+| 80 TCP | getting the certificate, and forwarding `http://` to `https://` |
+| 443 TCP | everything: chat, voice signaling, files, the game, the admin dashboard |
+| 443 UDP | optional: HTTP/3 |
+| 3000 TCP | optional: lets friends type `chat.example.com` without `https://` (the app reads that as port 3000) |
+
+Open them in the provider's firewall (DigitalOcean: **Networking → Firewalls**), if there is one. On the server itself Docker opens what it publishes, `ufw` included. Voice is peer to peer, so it needs no ports here.
+
+### 3. Run the installer
+
+On the server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nickolaiposs/friendspeak/prod/deploy/install.sh -o install.sh
+sudo bash install.sh
+```
+
+It installs Docker if it's missing (after asking), asks for the domain, the server's name and whether to install updates automatically, writes the stack to `/opt/friendspeak` and starts it. Then it shows the server's first lines, which have everything you need:
+
+```
+  Friends connect:   https://chat.example.com
+  Admin dashboard:   https://chat.example.com/admin-5c1e…  (admin key and authenticator code required)
+```
+
+plus, on the first start only, the **admin key** and the **first invite**. Copy the key then: it is shown once. Open the dashboard's address, sign in with the key and set up the 2-step code ([Admin dashboard](#admin-dashboard)). Friends install the desktop app, click **+**, enter `https://chat.example.com` and paste an invite.
+
+Without questions: `sudo bash install.sh --domain chat.example.com --name "Game Night" --yes` (`--help` lists the options). While the repo and image are private, give it tokens: `sudo GITHUB_TOKEN=… GHCR_USER=… GHCR_TOKEN=… bash install.sh`.
+
+**By hand instead:** copy `deploy/docker-compose.yaml`, `deploy/Caddyfile` and `deploy/.env.example` (as `.env`) into one folder, set `DOMAIN` in `.env`, and run `docker compose up -d && docker compose logs friendspeak`.
+
+### HTTPS
+
+There is nothing to switch on. When the stack starts, Caddy asks [Let's Encrypt](https://letsencrypt.org/) for a certificate for `DOMAIN`, proves it controls the domain over port 80 or 443, and serves HTTPS on 443. It renews the certificate in the background, about a month before it runs out. friendspeak itself runs plain HTTP inside the stack (`HTTPS=0`) and isn't reachable from outside; only Caddy is.
+
+If `https://chat.example.com` doesn't answer after a minute or two, `docker compose logs caddy` says why. The usual causes:
+
+- the DNS record isn't live yet, or points somewhere else. Caddy keeps trying, so it fixes itself once the record is right
+- port 80 or 443 is closed in a firewall, or another web server on the machine already has them. In that case use your existing proxy instead: run the plain [Docker stack](#docker--portainer) with `HTTPS=0` and point the proxy at it
+- too many certificates were asked for (Let's Encrypt limits it per domain per week). Don't delete the `caddy-data` volume, which holds the certificate
+
+### Day to day
+
+Run these in the stack's folder (`/opt/friendspeak`):
+
+| | |
+|---|---|
+| Change a setting | edit `.env` (all of them are in `deploy/.env.example`), then `docker compose up -d` |
+| Logs | `docker compose logs -f friendspeak` (or `caddy`) |
+| Update | automatic if you said yes ([Automatic updates](#automatic-updates)). By hand: `docker compose pull && docker compose up -d` |
+| Change the domain | add the new DNS record, change `DOMAIN` in `.env`, `docker compose up -d`. Friends add the server again under the new address; they stay members |
+| Game assets | put the packs in `assets-pack/` and `assets-extra/` in the stack's folder ([Game assets](#game-assets-host-only)), then `docker compose restart friendspeak` |
+| Back up | the `friendspeak_friendspeak-data` volume (chat, files, keys) |
+| Edit the proxy | `Caddyfile`, then `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile` |
+
+**Coming from the self-signed stack on the same machine?** Both stacks are named `friendspeak` and use the same data volume, so nothing is lost: `docker compose down` the old one, then run the installer. Friends add the server again under its new `https://` address and stay members, because the server knows them by their key.
+
+**The admin dashboard behind the proxy.** Sign-in works as it is: Caddy passes the original `Host` header and `X-Forwarded-Proto`. Every request reaches friendspeak from Caddy's address, and friendspeak never trusts `X-Forwarded-For`, so the audit log and the user list show Caddy's address, sign-in lockouts are shared by everyone, and an IP ban only bans the profile. See [A public host](#admin-dashboard) for more layers.
 
 ## Docker / Portainer
 
@@ -249,7 +332,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 
 **3. Game assets (optional).** Copy the asset pack to the Docker host (e.g. `game/assets-pack` → `/opt/friendspeak/assets-pack`, and `game/assets-extra` → `/opt/friendspeak/assets-extra`). Without them, chat and voice work, and the game says its assets are missing.
 
-**TLS.** With `HTTPS=1`, desktop-app users are asked once to trust the server's certificate fingerprint (printed in the container log). Alternatively, put the container behind a reverse proxy with a real certificate (Nginx Proxy Manager, Traefik, Caddy, …), set `HTTPS=0`, **enable WebSocket support** on the proxy, and stop publishing the port publicly.
+**TLS.** With `HTTPS=1`, desktop-app users are asked once to trust the server's certificate fingerprint (printed in the container log). Alternatively, put the container behind a reverse proxy with a real certificate (Nginx Proxy Manager, Traefik, Caddy, …), set `HTTPS=0`, **enable WebSocket support** on the proxy, and stop publishing the port publicly. With a domain, [Deploy on a domain](#deploy-on-a-domain-docker--caddy) is that, ready made.
 
 **Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `mail.json` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes, the dashboard's path and the 2-step secrets) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
 
@@ -329,6 +412,7 @@ scripts/build-game.js  Builds game/server/dist and game/client/dist
 Dockerfile          Server image (multi-stage; game built inside, assets mounted at runtime)
 docker-compose.yaml Production stack for Docker / Portainer (settings in .env.example)
 docker/             Container health check
+deploy/             The stack for a domain: friendspeak behind Caddy with real HTTPS, and its install script
 build/              Desktop app icon and macOS entitlements (electron-builder resources)
 ```
 

@@ -62,6 +62,7 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 | `port` | `PORT` | 3000 | `0` = any free port |
 | `host` | none | all interfaces | |
 | `https` | `HTTPS=1` | off | self-signed cert generated into `dataDir` |
+| none | `PUBLIC_URL` | none | CLI only: the origin people reach the server at behind a reverse proxy (`https://chat.example.com`). Replaces the LAN addresses and `localhost` in the `Friends connect:` and `Admin dashboard:` lines of the startup output; nothing else reads it. Not an http(s) address → ignored with a line (D53) |
 | `dataDir` | `DATA_DIR` | `./data` | `state.json`, `mail.json`, `admin.json`, `admin-audit.log`, `game.sqlite`, `game-secret`, certs, `logs/`, `crashes/` |
 | `serverName` | `SERVER_NAME` | `friendspeak` | name for a *new* server only; after that the name in `state.json` wins (renamed from Settings → Server) |
 | `giphyKey` | `GIPHY_API_KEY` | none | server-side GIF search |
