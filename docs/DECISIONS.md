@@ -294,7 +294,7 @@ Without a mic, users join **listen-only** instead of failing.
 - The background connection carries voice only: it keeps `users`, channels and the server's name current for the voice panel and the stage, but ignores messages. Coming back loads history again, like a fresh connect.
 - No server or protocol change. To the call's server you are simply still connected, and you appear online there.
 
-**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect).
+**Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect); since D50 it ends any call and leaves every server.
 **Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
 
 ## D32: DMs get keypair identities, end-to-end sealing, server mailboxes, friend codes and images · Active
@@ -688,3 +688,20 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - **Not exercised:** a full disk while logging, the app's main-process exception and child-process paths, its Save and Open folder dialogs, and anything on Windows.
 
 **Alternatives:** SQLite for the log (`node:sqlite` is there, but plain files can be read with any tool when the server won't start, which is when they matter); a logging library (a dependency for what `console` plus a tag already does); exiting on unhandled rejections (Node's default; a friends' server going down mid-call for a failed lookup costs more than it protects); Electron's `crashReporter` with an upload URL (needs a service); sending client reports to the connected server (see above).
+
+## D50: A profile is its own account on the device: its own servers, last server and mentions · Active
+**Context:** the server list was one per device. Switching profiles reconnected the new profile to the server in view, so a profile made a moment ago was in a server it never joined, with a password it never entered, and showed up in that server's member list (issue #56). DMs were already kept per profile (D28).
+**Decision:**
+- Server bookmarks (with their passwords), the last server and unread mentions are stored per profile (`fs.servers:<profileId>` and so on). A new or imported profile starts with an empty list and joins each server itself.
+- Switching profiles ends the call, leaves every server and opens the new profile's DMs, list and last server. Nothing carries over.
+- Deleting a profile deletes its server list. Its DMs stay in IndexedDB, as before, for a later import of the same profile file.
+- Settings, the soundboard and camera backgrounds stay per device: they describe the computer (devices, volumes, theme, hotkeys), not who you are.
+- **Migration:** every profile that exists at the update gets a copy of the old shared list, with the same bookmark ids. Nobody loses a server they were using; a profile that was only in a server by accident removes it once. The old keys are deleted, since they hold passwords.
+- No server or protocol change, and still no accounts (D3): this is only about what the app stores.
+
+**Consequences:**
+- A profile export doesn't carry the server list (it never did): on another device a profile starts with none.
+- A few settings are keyed by profile or bookmark id but shared by all profiles: muted people, per-person volumes, and for the migrated copies (same bookmark ids) a muted server and the last channel. Bookmarks added after the update have their own ids.
+- An app from before this decision run on the same data afterwards finds no server list.
+
+**Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
