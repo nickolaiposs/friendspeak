@@ -112,6 +112,7 @@ async function startServer(opts = {}) {
   }
   const STATE_FILE = path.join(DATA_DIR, 'state.json');
   const MAX_HISTORY = 500;
+  const MAX_SEARCH_RESULTS = 50;
   const MAX_MESSAGE_LEN = 4000;
   const MAX_EMOJI_BYTES = 256 * 1024;
   const MAX_AVATAR_BYTES = 384 * 1024;
@@ -202,6 +203,9 @@ async function startServer(opts = {}) {
   } catch {
     state = defaultState();
   }
+  // What message links name this server by: made once, the same at every address it has
+  const newServerId = typeof state.id !== 'string' || !/^[\w-]{8,64}$/.test(state.id);
+  if (newServerId) state.id = crypto.randomBytes(8).toString('hex');
 
   // A hand-edited or damaged state.json must not crash the role code
   const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
@@ -424,6 +428,7 @@ async function startServer(opts = {}) {
     }
   }
   const pinOf = (pid) => state.pins[pid] || null;
+  if (newServerId) save(); // links made today must still name this server after a restart
   // What a client signs to say hello: the socket id is a fresh value the server
   // chose, and the host it dialed stops another server from passing its hello on
   const helloText = (sid, host) => 'friendspeak-hello-v1|' + sid + '|' + host;
@@ -564,6 +569,69 @@ async function startServer(opts = {}) {
     h = Math.imul(h ^ (h >>> 16), 0x45d9f3b) >>> 0; // spread it, so similar ids get unlike tags
     h = (h ^ (h >>> 16)) >>> 0;
     return (h % 1679616).toString(36).padStart(4, '0');
+  }
+
+  // ---------- channel links, message links, search ----------
+
+  // The text channels a message links with #name: [[at, length, channelId]], positions in `text`
+  // like the mention spans, so clients draw each with today's name (null when none). Only channels
+  // the sender can read. Same rules as mentions, and as formatText()'s `channels` in util.js:
+  // '#' at the start or after whitespace, then a name, then the end or a char outside [\w-].
+  function channelLinksOf(text, senderId) {
+    if (!text.includes('#')) return null;
+    const plain = text.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => ' '.repeat(m.length));
+    const may = permsOf(senderId).channels;
+    const names = state.channels.filter((c) => c.type === 'text' && c.name && may[c.id]?.view).sort((a, b) => b.name.length - a.name.length);
+    const spans = [];
+    for (let i = plain.indexOf('#'); i >= 0; i = plain.indexOf('#', i + 1)) {
+      if (i > 0 && !/\s/.test(plain[i - 1])) continue;
+      const hit = names.find((c) => plain.slice(i + 1, i + 1 + c.name.length).toLowerCase() === c.name.toLowerCase() && !/[\w-]/.test(plain[i + 1 + c.name.length] || ''));
+      if (hit) spans.push([i, 1 + hit.name.length, hit.id]);
+    }
+    return spans.length ? spans : null;
+  }
+
+  // What a link to a message shows (D54): a short preview, only for someone who can read the
+  // channel. One answer for "no such message" and "not for you".
+  function peekMessage(pid, channelId, messageId) {
+    const cid = str(channelId, 64);
+    const mid = str(messageId, 64);
+    const m = cid && mid && canView(pid, cid) && thread(cid)?.find((x) => x.id === mid);
+    if (!m) return { error: 'unavailable' };
+    return {
+      message: { id: m.id, channelId: cid, channelName: channel(cid).name, author: m.author, name: m.name, text: String(m.text || '').slice(0, 300), ts: m.ts, gif: m.gif ? true : undefined, files: m.files?.length || undefined },
+    };
+  }
+
+  // The text around a match, on one line. snippetAround() in public/js/util.js is the same.
+  function snippetAround(text, at, len) {
+    const from = Math.max(0, at - 40);
+    const to = Math.min(text.length, at + len + 120);
+    return (from > 0 ? '…' : '') + text.slice(from, to).replace(/\s+/g, ' ').trim() + (to < text.length ? '…' : '');
+  }
+
+  // What `has:` in a search can ask for. hasKind() in public/js/main.js is the same.
+  const SEARCH_HAS = ['file', 'image', 'gif', 'link'];
+  const hasKind = (m, k) =>
+    k === 'gif' ? !!m.gif : k === 'link' ? /https?:\/\//.test(m.text || '') : Array.isArray(m.files) && (k === 'image' ? m.files.some((f) => /^image\//.test(f?.type || '')) : m.files.length > 0);
+
+  // Messages whose text or file names contain `q`, newest first, in the text channels `pid` can
+  // read (or just the one). f narrows it: { from: [profileId], before, after (times), has: [kind] }
+  function searchMessages(pid, q, channelId, f) {
+    const may = permsOf(pid).channels;
+    const hits = [];
+    for (const ch of state.channels) {
+      if (ch.type !== 'text' || !may[ch.id]?.view || (channelId && ch.id !== channelId)) continue;
+      for (const m of state.messages[ch.id] || []) {
+        if ((f.from.length && !f.from.includes(m.author)) || (f.before != null && !(m.ts < f.before)) || (f.after != null && !(m.ts >= f.after)) || !f.has.every((k) => hasKind(m, k))) continue;
+        const text = typeof m.text === 'string' ? m.text : '';
+        const at = text.toLowerCase().indexOf(q); // 0 for a search by filters alone
+        const file = at < 0 && Array.isArray(m.files) && m.files.find((f) => typeof f?.name === 'string' && f.name.toLowerCase().includes(q));
+        if (at >= 0 || file) hits.push({ channelId: ch.id, id: m.id, author: m.author, name: m.name, ts: m.ts, text: snippetAround(text, Math.max(0, at), at < 0 ? 0 : q.length), file: file ? file.name : undefined });
+      }
+    }
+    hits.sort((a, b) => b.ts - a.ts);
+    return { results: hits.slice(0, MAX_SEARCH_RESULTS), more: hits.length > MAX_SEARCH_RESULTS };
   }
 
   // ---------- bans ----------
@@ -840,6 +908,7 @@ async function startServer(opts = {}) {
 
   function publicState(g) {
     return {
+      id: state.id,
       name: state.name,
       icon: state.icon,
       audioQuality: audioQuality(),
@@ -1021,7 +1090,7 @@ async function startServer(opts = {}) {
 
       // Mailboxes: prove who you are by signing this nonce
       const nonce = crypto.randomBytes(16).toString('base64url');
-      socket.emit('challenge', { nonce });
+      socket.emit('challenge', { nonce, server: state.id });
       socket.on('identify', ({ s, sig } = {}, ack) => {
         if (typeof ack !== 'function') return;
         const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
@@ -1060,6 +1129,12 @@ async function startServer(opts = {}) {
         saveMail();
         dm.to('a:' + to).emit('mail', [{ id: item.id, blob }]);
         ack({ ok: true });
+      });
+      // A message link in a DM (D54): its preview, for a member who can read the channel
+      socket.on('msg:peek', ({ channelId, messageId } = {}, ack) => {
+        if (typeof ack !== 'function') return;
+        if (!socket.data.verified || guest || !Object.hasOwn(state.profiles, pid)) return ack({ error: 'unavailable' });
+        ack(peekMessage(pid, channelId, messageId));
       });
       // Collected: the owner has it now
       socket.on('mail:ack', ({ ids } = {}) => {
@@ -1555,6 +1630,21 @@ async function startServer(opts = {}) {
         ack({ messages: list.slice(Math.max(0, end - 50), end < 0 ? list.length : end) });
       });
 
+      on('msg:get', ({ channelId, messageId }, ack) => ack(peekMessage(myId(), channelId, messageId)));
+
+      // The query is never logged (D49)
+      on('msg:search', ({ q, channelId, from, before, after, has }, ack) => {
+        q = str(q, 100).trim().toLowerCase();
+        const f = {
+          from: Array.isArray(from) ? from.slice(0, 50).map((v) => str(v, 64)).filter(Boolean) : [],
+          before: Number.isFinite(before) ? before : null,
+          after: Number.isFinite(after) ? after : null,
+          has: Array.isArray(has) ? SEARCH_HAS.filter((k) => has.includes(k)) : [],
+        };
+        if (!q && !f.from.length && f.before == null && f.after == null && !f.has.length) return ack({ results: [] });
+        ack(searchMessages(myId(), q, str(channelId, 64), f));
+      });
+
       on('msg:send', ({ channelId, text, gif, replyTo, files }, ack) => {
         const list = thread(channelId);
         if (!list) return ack({ error: 'no such channel' });
@@ -1581,6 +1671,7 @@ async function startServer(opts = {}) {
           files: attached.length ? attached.map((f) => ({ id: f.id, name: f.name, size: f.size, type: f.type })) : undefined,
           replyTo: replyTo || null,
           mentions: mentions || undefined,
+          channels: channelLinksOf(text, u.profile.id) || undefined,
           reactions: {}, // emoji -> [profileId]
           ts: Date.now(),
         };
@@ -1619,6 +1710,9 @@ async function startServer(opts = {}) {
         const mentions = mentionsOf(text, m.replyTo && thread(channelId).find((x) => x.id === m.replyTo), m.author);
         if (mentions) m.mentions = mentions;
         else delete m.mentions;
+        const links = channelLinksOf(text, m.author);
+        if (links) m.channels = links;
+        else delete m.channels;
         save();
         toViewers(channelId, 'msg:update', { channelId, message: m });
       });

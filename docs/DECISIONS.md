@@ -771,3 +771,21 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - It needs ports 80 and 443 reachable. A host whose provider blocks them needs a tunnel or a DNS challenge, which takes a Caddy build with a DNS plugin; neither is set up here.
 
 **Alternatives:** a `caddy` profile in the root compose file (the friendspeak service would need `HTTPS` and `ports` to differ per profile, which compose can't express); `extends` from the root file (Portainer's web editor can't follow it); the Caddyfile inline in the compose file (`configs.content` needs a recent compose, and a file is easier to edit); nginx or Traefik with certbot/ACME setup (more moving parts for the same result); ACME inside `server.js` (a dependency and port 80, against the one-port rule); trusting `X-Forwarded-For` from the bundled proxy (changes D34's rule; left for its own decision).
+
+## D54: Channel links, message links and search · Active
+**Context:** issues #52 and #73, plus links to single messages. Three questions needed an answer: what a link is written as, what happens to it when its target changes, and who may see what it points to.
+
+**Decision:**
+- **`#name` links a text channel.** The server records where it found one (`message.channels`, positions and the channel id), the way it does for mentions, so the link shows the channel's current name after a rename. Only channels the sender can read are recorded. A channel the reader can't find (deleted, or hidden from them) is drawn greyed out with the name as written: the two cases look the same on purpose. Messages without positions (older ones, older servers) are matched by name when drawn. Voice channels aren't linked: their names have spaces, and a click that joins a call is a surprise.
+- **Channel links don't cross servers and don't exist in DMs.** A DM has no server to resolve a name against.
+- **A message link is `friendspeak://msg/<serverId>/<channelId>/<messageId>`**, copied from a message's actions. The server id is random, made once and kept in `state.json`, because people reach the same server at different addresses. The app learns it from `hello` and from the `/dm` socket's `challenge`, and keeps it on the bookmark.
+- **The preview comes from the server, every time, for the person looking.** `msg:get` (chat socket) and `msg:peek` (`/dm`, for a bookmarked server that isn't in view) answer only a member who can read the channel. That is what makes links safe in DMs: the link carries no text, so a friend who isn't on the server, or can't read the channel, sees "Message Unavailable". So does everyone once the message is deleted.
+- **Search runs where the history is.** Servers search their own (`msg:search`, the same `view` check as history); DMs are searched in the app, over the decrypted history on the device. Plain substring match, newest 50. Filters are typed into the same field (`from:`, `in:`, `has:`, `before:`, `after:`, `on:`) and offered as chips, so there is one field and no form; the app resolves names and days, and the server only ever gets ids and times.
+
+**Consequences:**
+- Older apps show a message link as plain text and `#name` as text. Older servers send no id, so the app offers no "Copy message link" there, and search says the server needs an update after 8 s without an answer.
+- `msg:peek` trusts a `/dm` socket as much as the `mention` push does (D41): a profile whose id has no pinned key (D42) can be impersonated there, as everywhere.
+- Search only reaches what the server keeps (500 messages per channel). Queries are not logged (D49).
+- A server whose `state.json` is copied to a second server shares its id with it; links then resolve to whichever of the two the app has bookmarked first.
+
+**Alternatives:** the address in the link (differs per person: LAN IP, domain); embedding the quoted text in the link or the DM (leaks a channel's messages to anyone the link is forwarded to); linking channels by id in the text, like `<#id>` (unreadable in older apps and in notifications); a search index (nothing to gain at 500 messages per channel); searching server history in the app (it only holds the pages it has loaded).
