@@ -2084,6 +2084,16 @@ function lanAddresses() {
     .map((i) => i.address);
 }
 
+// "https://chat.example.com/" → "https://chat.example.com"; anything that isn't an http(s) address → ''
+function publicOrigin(v) {
+  try {
+    const u = new URL(String(v || '').trim());
+    return /^https?:$/.test(u.protocol) ? u.origin : '';
+  } catch {
+    return '';
+  }
+}
+
 module.exports = { startServer, lanAddresses };
 
 if (require.main === module) {
@@ -2112,12 +2122,17 @@ if (require.main === module) {
     },
   }).then((s) => {
     const scheme = s.https ? 'https' : 'http';
+    // PUBLIC_URL: the address people use from outside, when it isn't this machine's own
+    // (a domain on a reverse proxy, D53). Only printed: the server never needs to know it.
+    const publicUrl = publicOrigin(env.PUBLIC_URL);
+    if (env.PUBLIC_URL && !publicUrl) console.warn('  PUBLIC_URL ignored: it must look like https://chat.example.com');
     console.log(`\n  friendspeak server "${s.name}" is running\n`);
     console.log(`  Local address:     ${scheme}://localhost:${s.port}  (connect with the desktop app)`);
     // The app reads an address without a scheme as https, so a plain http server prints its scheme
-    for (const ip of lanAddresses()) console.log(`  Friends connect:   ${s.https ? '' : 'http://'}${ip}:${s.port}`);
+    if (publicUrl) console.log(`  Friends connect:   ${publicUrl}`);
+    else for (const ip of lanAddresses()) console.log(`  Friends connect:   ${s.https ? '' : 'http://'}${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
-    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${scheme}://localhost:${s.port}${s.admin.path}  (${s.admin.local ? 'no key needed from this machine' : 'admin key' + (s.admin.mfa ? ' and authenticator code' : '') + ' required'})`}`);
+    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${publicUrl || `${scheme}://localhost:${s.port}`}${s.admin.path}  (${s.admin.local ? 'no key needed from this machine' : 'admin key' + (s.admin.mfa ? ' and authenticator code' : '') + ' required'})`}`);
     console.log(`  Joining:           ${s.inviteOnly ? 'needs an invite (make them in Server settings or the admin dashboard)' : 'open to anyone with the address (invites are off)'}`);
     if (env.PASSWORD) console.warn('  PASSWORD is no longer used: people join with invites, and everyone already on the server stays');
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');
