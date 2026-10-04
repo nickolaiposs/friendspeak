@@ -21,6 +21,7 @@
 // (a phone, say) can watch; and anything that can offer such a connection can
 // be the sharer. A viewer that doesn't say `stream: 1` (an older app) gets the
 // share the old way, from a capture of the browser engine's.
+import { log } from './log.js';
 import { audio, Level, MAX_USER_VOLUME } from './audio.js';
 import { nativeMedia } from './native.js';
 import { settings } from './store.js';
@@ -408,7 +409,7 @@ export class VoiceClient {
       });
     pc.onconnectionstatechange = () => {
       peer.state = pc.connectionState;
-      if (pc.connectionState === 'failed') pc.restartIce?.();
+      if (pc.connectionState === 'failed') (log.warn(`voice connection failed for peer ${sid}`), pc.restartIce?.()); // by socket id, not name
       this.onPeersChange();
     };
     pc.ontrack = (e) => {
@@ -634,6 +635,7 @@ export class VoiceClient {
       pc.onconnectionstatechange = () => {
         // No route for a connection of its own (a strict NAT): ask for the share the old way instead
         if (pc.connectionState !== 'failed' || peer.nin[kind]?.pc !== pc) return;
+        log.warn(`native ${kind} connection failed for peer ${sid}`);
         peer.noStream[kind] = true;
         this.watch(sid, kind, false);
         this.watch(sid, kind, true);
