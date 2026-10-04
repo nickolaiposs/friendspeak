@@ -1,6 +1,7 @@
 import { h } from './util.js';
 import { api, connectEvents, setUnauthorizedHandler } from './api.js';
 import { loadingState, closeAllDialogs } from './ui.js';
+import { qrCanvas } from './qr.js';
 import overview from './views/overview.js';
 import users from './views/users.js';
 import roles from './views/roles.js';
@@ -63,12 +64,11 @@ setUnauthorizedHandler(() => start());
 
 function showLogin() {
   const s = session;
-  const card = h('div', { class: 'login-card' }, h('h1', {}, s.name || 'friendspeak'),
-    h('p', { class: 'muted' }, 'Admin dashboard. Anyone with an admin key has full control of this server.'));
+  const card = h('div', { class: 'login-card' }, h('h1', {}, s.name || 'friendspeak'));
   if (!s.canLogin) {
     card.append(
       h('p', {}, 'Admin access from another machine needs an encrypted connection. Start the server with ', h('code', {}, 'HTTPS=1'), ', or put it behind a TLS reverse proxy.'),
-      h('p', { class: 'muted' }, 'On the server’s own machine, ', h('code', {}, `http://localhost:${location.port || 80}/admin`), ' works without a key.'));
+      h('p', { class: 'muted' }, 'On the server’s own machine, use ', h('code', {}, `http://localhost:${location.port || 80}/admin`), '.'));
   } else {
     card.append(loginForm(s));
   }
@@ -76,7 +76,7 @@ function showLogin() {
     card.append(h('div', { class: 'field' },
       h('label', {}, 'Server certificate SHA-256 fingerprint'),
       h('div', { class: 'fp' }, s.fingerprint),
-      h('span', { class: 'muted small' }, 'Compare it with the Certificate: line in the server log and with what the browser shows for this site’s certificate.')));
+      h('span', { class: 'muted small' }, 'Compare it with the Certificate: line in the server log.')));
   }
   root.replaceChildren(h('div', { class: 'login' }, card));
   card.querySelector('input')?.focus();
@@ -89,9 +89,16 @@ function loginForm() {
     input.type = show ? 'text' : 'password';
     toggle.textContent = show ? 'Hide' : 'Show';
   } }, 'Show');
+  const keyField = h('div', { class: 'field' }, h('label', { for: 'key' }, 'Admin key'), h('div', { class: 'row' }, h('div', { class: 'grow' }, input), toggle));
+  // The second step (D52): a code from the authenticator app, set up at a key's first sign-in
+  const code = h('input', { id: 'code', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 7, spellcheck: 'false', 'aria-describedby': 'login-err' });
+  const setup = h('div', { class: 'mfa-setup', hidden: true });
+  const codeField = h('div', { class: 'field', hidden: true }, h('label', { for: 'code' }, '6-digit code from your authenticator app'), code);
   const err = h('div', { id: 'login-err', class: 'error-text small', role: 'alert' });
   const btn = h('button', { type: 'submit', class: 'btn' }, 'Sign in');
+  const back = h('button', { type: 'button', class: 'btn ghost', hidden: true, onClick: () => showLogin() }, 'Start over');
   let timer = null;
+  let key = ''; // kept while the code is asked for: it is sent again with the code
 
   const lock = (secs) => {
     btn.disabled = true;
@@ -105,27 +112,52 @@ function loginForm() {
     timer = setInterval(tick, 1000);
   };
 
-  return h('form', { class: 'field', onSubmit: async (e) => {
+  const askCode = (r) => {
+    keyField.hidden = true;
+    codeField.hidden = back.hidden = false;
+    if (r.mfa === 'setup') {
+      setup.hidden = false;
+      setup.replaceChildren(
+        h('strong', {}, 'Set up 2-step sign-in'),
+        h('p', { class: 'small' }, r.expired ? 'The setup timed out, so this is a new secret. Remove the old entry from your app, then scan' : 'This key hasn’t signed in before. Scan', ' this with an authenticator app (Google Authenticator, Aegis, 1Password, …), or type the secret into it. From now on, signing in with this key also needs the app’s code.'),
+        qrCanvas(r.uri),
+        h('div', { class: 'fp' }, r.secret.match(/.{1,4}/g).join(' ')));
+      btn.textContent = 'Finish setup';
+    }
+    code.value = '';
+    code.focus();
+  };
+
+  return h('form', { class: 'login-form', onSubmit: async (e) => {
     e.preventDefault();
-    const key = input.value.trim();
-    if (!key) return;
+    const body = key ? { key, code: code.value.replace(/\s/g, '') } : { key: input.value.trim() };
+    if (!body.key || (key && !body.code)) return;
     btn.disabled = true;
     err.textContent = '';
     try {
-      await api.post('login', { key });
-      input.value = '';
+      const r = await api.post('login', body);
+      if (r.mfa) {
+        key = body.key;
+        input.value = '';
+        askCode(r);
+        btn.disabled = false;
+        return;
+      }
+      key = '';
       clearInterval(timer);
       start();
     } catch (ex) {
       if (ex.status === 429) return lock(Math.ceil(ex.data?.retryAfter || 30));
       err.textContent = ex.message;
       btn.disabled = false;
+      if (key) { code.value = ''; code.focus(); }
     }
   } },
-    h('label', { for: 'key' }, 'Admin key'),
-    h('div', { class: 'row' }, h('div', { class: 'grow' }, input), toggle),
+    keyField,
+    setup,
+    codeField,
     err,
-    h('div', {}, btn));
+    h('div', { class: 'row' }, btn, back));
 }
 
 // ---------------------------------------------------------------- app

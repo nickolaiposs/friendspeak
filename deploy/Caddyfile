@@ -1,0 +1,24 @@
+# Caddy in front of friendspeak (deploy/docker-compose.yaml, D53).
+#
+# Caddy gets a certificate for DOMAIN from Let's Encrypt by itself and renews
+# it. That needs DOMAIN to point at this machine (an A/AAAA record) and ports
+# 80 and 443 to be reachable from the internet.
+#
+# DOMAIN comes from .env. After editing this file:
+#   docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+# Port 3000 too: the app reads an address typed without https:// as port 3000,
+# so both "https://chat.example.com" and "chat.example.com" work.
+{$DOMAIN}, {$DOMAIN}:3000 {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# Chat, voice signaling, files, the game and the admin dashboard are all this
+	# one upstream. Caddy passes the original Host header and sets
+	# X-Forwarded-Proto, which sign-in needs, and proxies WebSockets as they are.
+	reverse_proxy friendspeak:3000
+}

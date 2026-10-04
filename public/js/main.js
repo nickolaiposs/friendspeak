@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -186,6 +186,8 @@ const I = {
   download: '<svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>',
   jump: '<svg viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>',
   bellOff: '<svg viewBox="0 0 24 24"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68c-.6.14-1.14.37-1.63.66L18 12.2V16zM4.27 3 3 4.27l3.07 3.07A5.9 5.9 0 0 0 6 11v5l-2 2v1h14.73l1 1L21 18.73 4.27 3z"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>',
+  link: '<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
 };
 const icon = (name, cls = '') => h('span', { class: 'icon ' + cls, html: I[name] });
@@ -311,12 +313,26 @@ function mentionMarks(m, server = S.server) {
 function editableText(m, server = S.server) {
   let t = String(m.text || '');
   const dup = sharedNames(server);
-  for (const group of (spanGroups(m) || []).reverse()) {
+  const edits = (spanGroups(m) || []).map((group) => {
     const [at, len, kind, id] = group[0];
-    const now = group.length === 1 && t[at] === '@' && mentionText(kind, id, server, dup);
-    if (now) t = t.slice(0, at) + now + t.slice(at + len);
-  }
+    return { at, len, now: group.length === 1 && t[at] === '@' && mentionText(kind, id, server, dup) };
+  });
+  for (const c of channelMarks(m, server) || []) edits.push({ at: c.at, len: c.len, now: !c.gone && t[c.at] === '#' && '#' + c.name });
+  for (const { at, len, now } of edits.sort((a, b) => b.at - a.at)) if (now) t = t.slice(0, at) + now + t.slice(at + len);
   return t;
+}
+// The text channels we can read on the server in view: what #name links to
+const textChannels = (server = S.server) => (server?.channels || []).filter((c) => c.type === 'text' && typeof c.name === 'string' && c.name);
+// formatText's `channelMarks`, from the server's positions ([at, length, channelId]): drawn with
+// today's name. A channel we can't find was deleted or isn't ours to see, and keeps the name as written.
+function channelMarks(m, server = S.server) {
+  if (!Array.isArray(m?.channels)) return null;
+  return m.channels
+    .filter((sp) => Array.isArray(sp) && Number.isInteger(sp[0]) && Number.isInteger(sp[1]) && sp[1] > 1)
+    .map(([at, len, id]) => {
+      const ch = textChannels(server).find((c) => c.id === id);
+      return { at, len, id, name: ch ? ch.name : String(m.text || '').slice(at + 1, at + len), gone: !ch };
+    });
 }
 const myRoleIds = (server = S.server) => (Array.isArray(server?.memberRoles?.[me().id]) ? server.memberRoles[me().id] : []);
 // For formatText: the same list, flagged with the ones that concern us
@@ -460,7 +476,7 @@ function friendDialog() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below. It holds your public key and the addresses of your saved servers, which pass messages along without being able to read them.'),
+      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below.'),
       h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
       h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
       h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
@@ -1188,7 +1204,7 @@ function welcome() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'No sign-up, no accounts. Your profile is saved only on this device. You can keep several and switch any time.'),
+      h('p', { class: 'muted' }, 'No sign-up, no accounts. Your profile is saved only on this device.'),
       el,
       importInput
     ),
@@ -1281,7 +1297,7 @@ function renderRail() {
               active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
               calling && { label: 'Leave voice', run: leaveVoice },
               active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
-              { label: 'Remove', danger: true, run: () => (active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
+              { label: 'Remove', danger: true, run: async () => (await leaveServer(s), active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
             ]),
         },
         s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label),
@@ -1361,6 +1377,7 @@ function disconnect(manual = false, keepCall = false) {
 }
 
 function connectTo(entry, { rejoinVoice = null } = {}) {
+  if (pendingJump && pendingJump.entryId !== entry.id) pendingJump = null;
   if (S.entry?.id === entry.id && S.connected) return inDmView() && leaveDmView();
   // Switching servers keeps the call going; clicking the same server again is a fresh start
   disconnect(false, S.entry?.id !== entry.id);
@@ -1388,6 +1405,7 @@ function viewConn(c) {
   else renderAll();
 }
 
+let pendingJump = null; // { entryId, channelId, messageId }: a message link into a server that is still connecting
 // Draw the server in view from scratch. Messages aren't tracked in the background, so they load again.
 function showServer(c) {
   S.messages.clear();
@@ -1395,7 +1413,10 @@ function showServer(c) {
   const target = chatById(S.channelId) || chatById(last) || c.server.channels.find((ch) => ch.type === 'text');
   S.channelId = null;
   renderAll();
-  if (target) selectChannel(target.id);
+  const jump = pendingJump?.entryId === c.entry.id ? pendingJump : null;
+  pendingJump = null;
+  if (jump) jumpToMessage(jump.channelId, jump.messageId);
+  else if (target) selectChannel(target.id);
   checkAppAgainstServer();
 }
 
@@ -1406,6 +1427,26 @@ const hostOf = (address) => {
     return 'unknown';
   }
 };
+
+// Tell a server we're leaving it for good (its bookmark is being removed), so that coming back
+// takes an invite again (D51). Best effort: a server that can't be reached still has us as a member.
+async function leaveServer(entry) {
+  const live = conns().find((c) => c.entry.id === entry.id && c.connected);
+  if (live) return live.socket.timeout(2000).emitWithAck('server:leave', {}).catch(() => {});
+  // Not connected: say hello on a socket of its own, in the background
+  const profile = me();
+  const socket = io(entry.address, { transports: ['websocket', 'polling'], reconnection: false, timeout: 5000 });
+  const done = () => socket.disconnect();
+  socket.on('connect_error', done);
+  socket.on('connect', async () => {
+    try {
+      const identity = await identityFor(profile).catch(() => null);
+      const res = await socket.timeout(5000).emitWithAck('hello', { profile: { ...profile, card: identity?.card }, proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)) });
+      if (res.ok) await socket.timeout(5000).emitWithAck('server:leave', {});
+    } catch {}
+    done();
+  });
+}
 
 function openSocket(entry, rejoinVoice = null) {
   const host = hostOf(entry.address); // the only thing about a server that is logged
@@ -1500,7 +1541,7 @@ function openSocket(entry, rejoinVoice = null) {
         banned
           ? 'You were banned from this server.'
           : removed
-            ? 'Someone removed you from this server. Click the server to rejoin.'
+            ? 'Someone removed you from this server. You need an invite to rejoin.'
             : replaced
             ? 'You connected to this server from another window or device with this profile. Click the server to reconnect here.'
             : 'The server closed the connection. Click the server to reconnect.'
@@ -1623,6 +1664,7 @@ function openSocket(entry, rejoinVoice = null) {
     renderChannels();
     renderHeader();
     refreshChatTitle();
+    if (S.channelId && !inDmView()) renderMessages(true); // #channel links follow renames
   });
 
   socket.on('emojis', (emojis) => {
@@ -1671,6 +1713,7 @@ function openSocket(entry, rejoinVoice = null) {
   });
 
   socket.on('msg:update', ({ channelId, message }) => {
+    linkPreviews.delete(`${c.server.id}/${channelId}/${message.id}`);
     if (!viewed()) return;
     const list = S.messages.get(channelId);
     const i = list?.findIndex((m) => m.id === message.id) ?? -1;
@@ -1682,6 +1725,7 @@ function openSocket(entry, rejoinVoice = null) {
   });
 
   socket.on('msg:deleted', ({ channelId, messageId }) => {
+    linkPreviews.delete(`${c.server.id}/${channelId}/${messageId}`);
     if (!viewed()) return;
     const list = S.messages.get(channelId);
     if (list) S.messages.set(channelId, list.filter((m) => m.id !== messageId));
@@ -1718,7 +1762,7 @@ function openSocket(entry, rejoinVoice = null) {
 
 // Cache the server's name and icon on its bookmark, so the rail shows them offline too
 function rememberServerLook(c) {
-  const look = { serverName: c.server.name, serverIcon: c.server.icon || '' };
+  const look = { serverName: c.server.name, serverIcon: c.server.icon || '', ...(typeof c.server.id === 'string' ? { serverId: c.server.id } : {}) };
   Object.assign(c.entry, look);
   servers.upsert({ id: c.entry.id, ...look });
 }
@@ -1850,8 +1894,8 @@ function renderHeader() {
 
 function renderChannels() {
   const box = $('#channel-list');
-  if (inDmView()) return box.replaceChildren(dmSidebar());
-  if (!S.server) return box.replaceChildren();
+  if (inDmView()) return (box.replaceChildren(dmSidebar()), syncWatchTip());
+  if (!S.server) return (box.replaceChildren(), syncWatchTip());
   const text = S.server.channels.filter((c) => c.type === 'text');
   const voice = S.server.channels.filter((c) => c.type === 'voice');
   const chMenu = (ch) => (e) => {
@@ -1918,6 +1962,7 @@ function renderChannels() {
           'div',
           {
             class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : '') + (canCh(ch.id, 'send') ? '' : ' locked'),
+            'data-watch': video ? 'ch:' + ch.id : null, // the hover card with "Start watching"
             onclick: () => (canCh(ch.id, 'send') ? joinVoice(ch.id) : toast('You don’t have permission to join this voice channel', 'error')),
             oncontextmenu: chMenu(ch),
           },
@@ -1929,7 +1974,7 @@ function renderChannels() {
                 'button',
                 {
                   class: 'video-badge',
-                  title: inCall(ch.id) ? 'Open video grid' : 'Join and open video grid',
+                  'aria-label': inCall(ch.id) ? 'Open video grid' : 'Join and open video grid', // not a title: the hover card explains it
                   onclick: (e) => (e.stopPropagation(), openVideoGrid(ch.id)),
                 },
                 icon('cam')
@@ -1942,6 +1987,7 @@ function renderChannels() {
     }),
     gamesSection() || '' // replaceChildren(null) would print "null"
   );
+  syncWatchTip();
 }
 
 // The sidebar while the DM view is open: every conversation on this device
@@ -1966,7 +2012,7 @@ function dmSidebar() {
         c.unread ? h('span', { class: 'count' }, c.unread) : null
       )
     ),
-    h('p', { class: 'muted small dm-hint' }, 'Messages are encrypted between your two devices. No server can read them. Start one from anyone’s name in a server’s member list, or add a friend with a friend code.')
+    h('p', { class: 'muted small dm-hint' }, 'End-to-end encrypted. Start one from a member list, or add a friend with a friend code.')
   );
 }
 
@@ -1988,7 +2034,7 @@ async function banPrompt(profileId) {
         {},
         h('p', {}, `${name} will be disconnected and can't come back with this profile. People who can ban can lift it in Server settings → Bans.`),
         h('label', { class: 'field inline' }, withIp, h('span', {}, 'Also ban their IP address')),
-        h('p', { class: 'muted small' }, 'There are no accounts, so a new profile gets around a profile ban. The IP ban is skipped when they share your network.')
+        h('p', { class: 'muted small' }, 'A new profile gets around a profile ban. The IP ban is skipped when they share your network.')
       ),
       {
         actions: [
@@ -2074,7 +2120,8 @@ function voiceUserEl(u) {
     {
       class: 'voice-user' + (peer && peer.state !== 'connected' && !isMe ? ' pending' : ''),
       'data-sid': u.sid,
-      title: peer && !isMe ? `connection: ${peer.state}` : '',
+      'data-watch': u.sharing || u.camera ? 'u:' + u.sid : null,
+      title: peer && !isMe && !u.sharing && !u.camera ? `connection: ${peer.state}` : '', // a streamer's row has the hover card instead
       onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
       oncontextmenu: (e) => {
         const el = e.currentTarget;
@@ -2089,12 +2136,8 @@ function voiceUserEl(u) {
           'button',
           {
             class: 'live-badge' + (S.stage?.tiles.get('screen:' + u.sid)?.live ? ' watching' : ''),
-            title: together ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : 'Join the channel to watch',
-            onclick: (e) => {
-              e.stopPropagation();
-              if (together) openStage({ screen: u.sid });
-              else toast('Join the voice channel to watch');
-            },
+            'aria-label': together ? (isMe ? 'Preview your stream' : `Watch ${u.name}'s screen`) : `Join and watch ${u.name}'s screen`,
+            onclick: (e) => (e.stopPropagation(), watchStream(u, 'screen')),
           },
           'LIVE'
         )
@@ -2104,12 +2147,8 @@ function voiceUserEl(u) {
           'button',
           {
             class: 'cam-badge' + (S.stage && together ? ' watching' : ''),
-            title: together ? 'Show cameras' : 'Join the channel to see cameras',
-            onclick: (e) => {
-              e.stopPropagation();
-              if (together) openStage();
-              else toast('Join the voice channel to see cameras');
-            },
+            'aria-label': together ? 'Show cameras' : 'Join and show cameras',
+            onclick: (e) => (e.stopPropagation(), watchStream(u, 'camera')),
           },
           icon('cam')
         )
@@ -2175,6 +2214,142 @@ function userVolumePopover(anchor, u, align = 'right') {
     ),
     { align }
   );
+}
+
+// ---------------------------------------------------------------- watch tip
+//
+// Hovering a voice channel where someone streams, or a streamer's row, opens
+// a card next to it with who is streaming and a "Start watching" button. It
+// is an ordinary popover, opened after a short pause and closed a moment
+// after the pointer leaves both the row and the card, so the pointer can
+// cross the gap between them. It never opens over another popover (a menu, a
+// profile card), and opening one of those closes it. Rows carry their key in
+// `data-watch`: "ch:<channel id>" or "u:<sid>".
+
+const WATCH_TIP_OPEN_MS = 350;
+const WATCH_TIP_CLOSE_MS = 300;
+let watchTip = null; // { key, pop, body, passed }
+let watchTipWant = null; // the key under the pointer or the keyboard focus
+let watchTipTimer = null;
+
+const watchTipRow = (key) => $(`#channel-list [data-watch="${CSS.escape(key)}"]`);
+const watchKeyAt = (el) => el?.closest?.('#channel-list [data-watch]')?.dataset.watch || null;
+
+function watchTipRows(key) {
+  const id = key.slice(key.indexOf(':') + 1);
+  const users = S.users.filter((u) => u.voice && (key.startsWith('ch:') ? u.voice === id : u.sid === id));
+  return users
+    .flatMap((u) => [u.sharing && { u, kind: 'screen' }, u.camera && { u, kind: 'camera' }])
+    .filter(Boolean)
+    .map(({ u, kind }) => {
+      const mine = u.sid === S.sid;
+      const screen = kind === 'screen';
+      // Cameras, and our own share, are shown for as long as the stage is open
+      const on = inCall(u.voice) && !!S.stage && (!screen || mine || S.stage.watching.has(u.sid));
+      const btn = !on
+        ? h('button', { class: 'btn small', onclick: () => watchStream(u, kind) }, 'Start watching')
+        : screen && !mine
+          ? h('button', { class: 'btn small ghost', onclick: () => watchScreen(u.sid, false) }, 'Stop watching')
+          : h('button', { class: 'btn small ghost', disabled: true }, 'Watching');
+      return h(
+        'div',
+        { class: 'watch-row' },
+        avatarEl(u, 28),
+        h('div', { class: 'watch-who' }, h('strong', {}, u.name), h('span', { class: 'muted small' }, screen ? 'Sharing their screen' : 'Camera on')),
+        btn
+      );
+    });
+}
+
+function showWatchTip(key) {
+  clearTimeout(watchTipTimer);
+  if (watchTip?.key === key) return;
+  if (activePopover && activePopover !== watchTip?.pop) return;
+  if (inDmView() || !S.server || !watchTipRow(key)) return;
+  const rows = watchTipRows(key);
+  if (!rows.length) return;
+  const inside = (el) => !!el && (body.contains(el) || !!watchTipRow(key)?.contains(el));
+  const body = h(
+    'div',
+    {
+      class: 'watch-tip',
+      onmouseenter: () => wantWatchTip(key),
+      onmouseleave: () => wantWatchTip(null),
+      onfocusin: () => wantWatchTip(key), // also when a rebuild (syncWatchTip) puts the focus back
+      onfocusout: (e) => inside(e.relatedTarget) || wantWatchTip(null),
+      // Tab leaves the card the way it came in: back to the row
+      onkeydown: (e) => {
+        if (e.key !== 'Tab') return;
+        const btns = [...body.querySelectorAll('button:not(:disabled)')];
+        const i = btns.indexOf(document.activeElement);
+        if (e.shiftKey ? i > 0 : i < btns.length - 1) return;
+        const back = watchTipRow(key)?.querySelector('button');
+        if (!back) return;
+        e.preventDefault();
+        if (watchTip && !e.shiftKey) watchTip.passed = true; // the next Tab goes on down the list
+        back.focus();
+      },
+    },
+    rows
+  );
+  // The channel list is rebuilt often, so the row is looked up each time
+  const anchor = { getBoundingClientRect: () => (watchTipRow(key) || body).getBoundingClientRect(), contains: (el) => !!watchTipRow(key)?.contains(el) };
+  const pop = popover(anchor, body, { align: 'right', onClose: () => watchTip?.pop === pop && (watchTip = null) });
+  watchTip = { key, pop, body, passed: false };
+}
+
+// What the pointer or the focus is on now: a row's key, or null for neither
+function wantWatchTip(key, now = false) {
+  if (key === watchTipWant && !now) return;
+  watchTipWant = key;
+  clearTimeout(watchTipTimer);
+  if (key === (watchTip?.key ?? null)) return;
+  const go = () => (key ? showWatchTip(key) : watchTip?.pop.close());
+  if (now) go();
+  else watchTipTimer = setTimeout(go, key ? WATCH_TIP_OPEN_MS : WATCH_TIP_CLOSE_MS);
+}
+
+// After the channel list is rebuilt: refresh the open card, or close it when
+// its row is gone or nobody there streams any more
+function syncWatchTip() {
+  if (!watchTip) return;
+  const { key, body, pop } = watchTip;
+  const rows = !inDmView() && S.server && watchTipRow(key) ? watchTipRows(key) : [];
+  if (!rows.length) return pop.close();
+  const focused = body.contains(document.activeElement);
+  body.replaceChildren(...rows);
+  pop.place();
+  if (!focused) return;
+  (body.querySelector('button:not(:disabled)') || watchTipRow(key)?.querySelector('button'))?.focus();
+  wantWatchTip(key); // the old button going away looked like the focus leaving
+}
+
+{
+  const list = $('#channel-list');
+  list.addEventListener('mouseover', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key) wantWatchTip(key);
+  });
+  list.addEventListener('mouseout', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && watchKeyAt(e.relatedTarget) !== key) wantWatchTip(null);
+  });
+  // Keyboard: focusing a row's badge opens the card at once, and Tab goes into it
+  list.addEventListener('focusin', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && e.target.matches(':focus-visible')) wantWatchTip(key, true);
+  });
+  list.addEventListener('focusout', (e) => {
+    const key = watchKeyAt(e.target);
+    if (key && watchKeyAt(e.relatedTarget) !== key && !watchTip?.body.contains(e.relatedTarget)) wantWatchTip(null);
+  });
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || e.shiftKey || !watchTip || watchTip.passed || watchKeyAt(e.target) !== watchTip.key) return;
+    const first = watchTip.body.querySelector('button:not(:disabled)');
+    if (!first) return;
+    e.preventDefault();
+    first.focus();
+  });
 }
 
 function renderVoicePanel() {
@@ -2381,6 +2556,7 @@ function renderMembers() {
 function renderMain(error) {
   const main = $('#main');
   mentionMenu = null; // its element goes with the composer
+  search = null; // and the search field with the header
   if (!inDmView() && (!S.entry || (!S.connected && !S.server))) {
     const list = servers.all();
     main.replaceChildren(
@@ -2407,7 +2583,7 @@ function renderMain(error) {
               )
             )
           : null,
-        h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server (npm start or Docker) and connect to it here. It prints its LAN addresses on startup.')
+        h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server and connect to it here.')
       )
     );
     return;
@@ -2458,6 +2634,7 @@ function renderMain(error) {
       dm ? h('button', { class: 'badge warn dm-conflict', hidden: !DM.contacts.get(ch.with)?.conflict, title: 'Messages from a different key are being refused', onclick: () => trustKeyPrompt(ch.with) }, 'different key') : null,
       h('div', { class: 'spacer' }),
       dm ? h('div', { class: 'dm-call-btns' }) : null,
+      searchBox(ch),
       canUpload && !dm ? h('button', { class: 'icon-btn', title: 'Files in this channel', onclick: () => openFileBrowser(ch.id) }, icon('folder')) : null,
       h(
         'button',
@@ -2587,7 +2764,12 @@ function messageEl(m, prev) {
   const author = profileOf(m.author, m.name);
   const mine = m.author === me().id;
   const inServer = !m.thread && !inDmView() && !!S.server; // DMs keep the plain @name matching
-  const { html, jumbo, embeds } = formatText(m.text || '', { emojis: S.server?.emojis || [], myName: me().name, ...(inServer ? ((marks) => (marks ? { mentions: marks } : { mentionables: mentionables() }))(mentionMarks(m)) : {}) });
+  const { html, jumbo, embeds, links } = formatText(m.text || '', {
+    emojis: S.server?.emojis || [],
+    myName: me().name,
+    linkLabel: messageLinkLabel,
+    ...(inServer ? { ...((marks) => (marks ? { mentions: marks } : { mentionables: mentionables() }))(mentionMarks(m)), channelMarks: channelMarks(m), channels: textChannels() } : {}),
+  });
   const mentioned = !mine && (inServer ? mentionsMe(m) : /class="mention me"/.test(html));
   const replied = m.replyTo && S.messages.get(S.channelId)?.find((x) => x.id === m.replyTo);
 
@@ -2629,6 +2811,7 @@ function messageEl(m, prev) {
             ),
         m.text ? h('div', { class: 'msg-text' + (jumbo ? ' jumbo' : ''), html: m.edited ? html.replace(/(<\/p>)?$/, (end) => ' <span class="edited">(edited)</span>' + end) : html }) : null,
         m.files?.length ? h('div', { class: 'attachments' }, m.files.map(m.thread ? (f) => dmAttachmentEl(m, f) : attachmentEl)) : null,
+        links.length ? h('div', { class: 'embeds' }, links.map(messagePreviewEl)) : null,
         embeds.length ? h('div', { class: 'embeds' }, embeds.map(embedEl)) : null,
         m.gif
           ? h(
@@ -2666,6 +2849,7 @@ function messageEl(m, prev) {
       // A note (e.g. "Missed call") exists only on this device: nothing to react to, reply to or edit
       m.note ? null : h('button', { title: 'Add reaction', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'react', messageId: m.id }) }, icon('addReact')),
       m.note ? null : h('button', { title: 'Reply', onclick: () => setReply(m) }, icon('reply')),
+      inServer && S.server.id ? h('button', { title: 'Copy message link', onclick: () => copyMessageLink(m) }, icon('link')) : null,
       mine && m.text && !m.note ? h('button', { title: 'Edit', onclick: () => editMessage(m) }, icon('edit')) : null,
       mine || m.note || (hasPerms() && !inDmView() && can('manageMessages'))
         ? h(
@@ -2734,7 +2918,15 @@ function appendMessage(m, force) {
   const box = $('#messages');
   if (!box) return;
   const list = S.messages.get(S.channelId);
+  if (!list) return; // the channel is still loading: the history on its way has this message
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  // A DM sorts in by when it was sent: one sent just before yours but delivered after it goes
+  // above yours, not at the end. Drawn at the end it would sit under your name.
+  if (list[list.length - 1] !== m) {
+    renderMessages(true);
+    if (atBottom || force) box.scrollTop = box.scrollHeight;
+    return;
+  }
   const el = messageEl(m, list[list.length - 2]);
   box.append(el);
   if (atBottom || force) {
@@ -2823,7 +3015,8 @@ function closeMentionMenu() {
 function updateMentionMenu(ta) {
   if (inDmView() || !S.server) return closeMentionMenu();
   const upto = ta.value.slice(0, ta.selectionStart);
-  const m = /(?:^|\s)@([^\n@]*)$/.exec(upto);
+  const hash = /(?:^|\s)#([^\s#]*)$/.exec(upto);
+  const m = hash || /(?:^|\s)@([^\n@]*)$/.exec(upto);
   if (!m) return closeMentionMenu();
   const q = m[1].toLowerCase();
   const at = upto.length - m[1].length - 1;
@@ -2837,11 +3030,15 @@ function updateMentionMenu(ta) {
   const all = mentionCandidates()
     .filter((c) => !c.tagged)
     .map((c) => (c.kind === 'user' && nameTag(c.id, c.name, dup) ? { ...c, tag: mentionTag(c.id), name: `${c.name}#${mentionTag(c.id)}` } : c));
-  const items = [
-    ...all.filter((c) => c.kind === 'everyone' && can('mentionEveryone') && match(c)),
-    ...all.filter((c) => c.kind === 'role' && can('mentionRoles') && match(c)).sort(rank),
-    ...all.filter((c) => c.kind === 'user' && c.id !== me().id && !isBanned(c.id) && match(c)).sort((a, b) => rank(a, b) || online(b) - online(a) || a.name.localeCompare(b.name)),
-  ].slice(0, 60);
+  const items = (
+    hash
+      ? textChannels().map((c) => ({ kind: 'channel', id: c.id, name: c.name })).filter(match).sort(rank)
+      : [
+      ...all.filter((c) => c.kind === 'everyone' && can('mentionEveryone') && match(c)),
+      ...all.filter((c) => c.kind === 'role' && can('mentionRoles') && match(c)).sort(rank),
+      ...all.filter((c) => c.kind === 'user' && c.id !== me().id && !isBanned(c.id) && match(c)).sort((a, b) => rank(a, b) || online(b) - online(a) || a.name.localeCompare(b.name)),
+    ]
+  ).slice(0, 60);
   if (!items.length) return closeMentionMenu();
   const keep = mentionMenu && mentionMenu.ta === ta;
   const index = keep ? Math.min(mentionMenu.index, items.length - 1) : 0;
@@ -2855,6 +3052,13 @@ function drawMentionMenu() {
   const mm = mentionMenu;
   mm.el.replaceChildren(
     ...mm.items.map((c, i) => {
+      if (c.kind === 'channel')
+        return h(
+          'div',
+          { class: 'mm-item' + (i === mm.index ? ' active' : ''), role: 'option', onmousedown: (e) => (e.preventDefault(), insertMention(i)), onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()) },
+          icon('hash', 'mm-hash'),
+          channelNameEl(c.name, S.server?.emojis, 'mm-name')
+        );
       const p = c.kind === 'user' ? profileOf(c.id) : null;
       const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : 'var(--muted)';
       return h(
@@ -2877,7 +3081,7 @@ function insertMention(i) {
   const { items, at, ta } = mentionMenu;
   const c = items[i];
   const end = ta.selectionStart;
-  const text = `@${c.name} `;
+  const text = `${c.kind === 'channel' ? '#' : '@'}${c.name} `;
   ta.value = ta.value.slice(0, at) + text + ta.value.slice(end);
   ta.setSelectionRange(at + text.length, at + text.length);
   closeMentionMenu();
@@ -3226,10 +3430,11 @@ function lightbox(url, f) {
 }
 
 async function jumpToMessage(channelId, messageId) {
+  if (!chatById(channelId)) return toast('Message Unavailable');
   await selectChannel(channelId);
-  const find = () => $(`.msg[data-id="${messageId}"]`);
+  const find = () => $(`.msg[data-id="${CSS.escape(messageId)}"]`);
   // Page back through history until the message is loaded (≤500 are kept)
-  for (let i = 0; i < 12 && !find() && S.hasMore.get(channelId) && S.channelId === channelId; i++) {
+  for (let i = 0; i < 12 && !find() && S.hasMore.get(channelId) && S.channelId === channelId && S.connected; i++) {
     const list = S.messages.get(channelId);
     const res = await S.socket.emitWithAck('msg:history', { channelId, before: list[0]?.id });
     const older = res.messages || [];
@@ -3243,6 +3448,299 @@ async function jumpToMessage(channelId, messageId) {
   el.classList.add('flash');
   setTimeout(() => el.classList.remove('flash'), 1600);
 }
+
+// ---------------------------------------------------------------- message links (D54) and channel links
+
+// The bookmark of the server a message link names: known from connecting to it, or from its /dm socket
+function linkedServer(serverId) {
+  const list = servers.all();
+  const address = DM.addressOf(serverId);
+  return list.find((s) => s.serverId === serverId) || (address && list.find((s) => s.address === address)) || null;
+}
+// The pill a message link reads as: its channel on the server in view, else the server it is on
+function messageLinkLabel({ server, channel }) {
+  if (S.server?.id === server) {
+    const ch = textChannels().find((c) => c.id === channel);
+    return ch ? `#${ch.name} › message` : 'message link';
+  }
+  const entry = linkedServer(server);
+  return entry ? `${serverLabel(entry)} › message` : 'message link';
+}
+function copyMessageLink(m) {
+  navigator.clipboard.writeText(messageLink(S.server.id, S.channelId, m.id)).then(
+    () => toast('Message link copied'),
+    () => toast('Could not copy', 'error')
+  );
+}
+
+// Previews are asked for once a minute at most; "server/channel/message" -> { at, preview: Promise<message | null> }
+const linkPreviews = new Map();
+function linkPreview(l) {
+  const key = `${l.server}/${l.channel}/${l.message}`;
+  const hit = linkPreviews.get(key);
+  if (hit && Date.now() - hit.at < 60e3) return hit.preview;
+  const preview = fetchLinkPreview(l).catch(() => null);
+  linkPreviews.set(key, { at: Date.now(), preview });
+  return preview;
+}
+// From the server itself, which only answers a member who can read the channel: over the
+// connection in view (or the call's), else over the /dm socket kept to every bookmarked server
+async function fetchLinkPreview({ server, channel, message }) {
+  const live = conns().find((c) => c.connected && c.server?.id === server);
+  let m;
+  if (live) m = (await live.socket.timeout(8000).emitWithAck('msg:get', { channelId: channel, messageId: message }).catch(() => null))?.message;
+  else {
+    const entry = linkedServer(server);
+    m = entry && (await DM.peek(entry.address, channel, message));
+  }
+  return m && typeof m === 'object' && typeof m.author === 'string' ? { ...m, profile: live?.server.profiles?.[m.author] } : null;
+}
+
+// The small preview under a message that links another one. Its height never changes, so the chat doesn't jump.
+function messagePreviewEl(l) {
+  const el = h('button', { class: 'msg-preview loading', type: 'button', disabled: true }, h('span', { class: 'muted' }, 'Loading message…'));
+  linkPreview(l).then((p) => {
+    el.classList.remove('loading');
+    if (!p) {
+      el.classList.add('gone');
+      return el.replaceChildren(icon('link'), 'Message Unavailable');
+    }
+    const author = p.profile || profileOf(p.author, String(p.name || 'unknown').slice(0, 60));
+    const where = S.server?.id === l.server ? '' : serverLabel(linkedServer(l.server) || { serverName: 'another server' });
+    el.disabled = false;
+    el.title = 'Go to message';
+    el.onclick = () => openMessageLink(l);
+    el.replaceChildren(
+      h(
+        'div',
+        { class: 'mp-head' },
+        avatarEl(author, 16),
+        h('strong', { style: { color: author.color } }, author.name),
+        h('span', { class: 'muted small' }, '#' + String(p.channelName || '').slice(0, 60) + (where ? ` · ${where}` : '')),
+        h('span', { class: 'muted small' }, fmtTime(+p.ts || 0))
+      ),
+      h('div', { class: 'mp-text' }, plainText(String(p.text || '').replace(/<?friendspeak:\/\/msg\/[\w/-]+>?/g, '[message link]'), { gif: p.gif, files: p.files ? [0] : [] }))
+    );
+  });
+  return el;
+}
+
+// Follow a message link: on the server in view, or connect to the one it names first
+function openMessageLink({ server, channel, message }) {
+  if (S.connected && S.server?.id === server) return jumpToMessage(channel, message);
+  const entry = linkedServer(server);
+  if (!entry) return toast('Message Unavailable');
+  pendingJump = { entryId: entry.id, channelId: channel, messageId: message };
+  connectTo(entry);
+}
+
+// Clicks on the links formatText() draws inside messages
+function onLinkActivate(e) {
+  if (e.type === 'keydown' && e.key !== 'Enter') return;
+  const el = e.target.closest?.('.msg-text .chan-link[data-channel], .msg-text .msg-link');
+  if (!el) return;
+  e.preventDefault();
+  if (el.classList.contains('msg-link')) return openMessageLink({ server: el.dataset.server, channel: el.dataset.channel, message: el.dataset.message });
+  if (chatById(el.dataset.channel)) selectChannel(el.dataset.channel);
+}
+document.addEventListener('click', onLinkActivate);
+document.addEventListener('keydown', onLinkActivate);
+
+// ---------------------------------------------------------------- search
+
+// The search field in the chat header: a server's text channels (or just the one in view), or the
+// DM in view. Servers search their own history; DMs are searched here, where they are stored.
+let search = null; // { box, input, drop, results, index, seq, q, note } for the header in view
+let searchHere = false; // "this channel only"
+function closeSearch(clear) {
+  if (!search) return;
+  search.drop.hidden = true;
+  search.seq++; // an answer still on its way is dropped
+  if (clear) search.input.value = '';
+}
+function searchBox(ch) {
+  const input = h('input', {
+    id: 'search-input',
+    type: 'text',
+    placeholder: 'Search',
+    spellcheck: 'false',
+    autocomplete: 'off',
+    'aria-label': ch.type === 'dm' ? 'Search this conversation' : 'Search messages',
+    oninput: () => (drawSearch(), runSearch()),
+    onfocus: () => (drawSearch(), runSearch()),
+    onkeydown: (e) => {
+      const st = search;
+      const n = st.results.length;
+      if (e.key === 'Escape') return e.preventDefault(), closeSearch(true), input.blur();
+      // Tab finishes the filter being typed with the first suggestion
+      if (e.key === 'Tab' && !e.shiftKey && searchSuggestions()[0]?.finishes) return e.preventDefault(), searchSuggestions()[0].run();
+      if (st.drop.hidden || !n) return;
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        st.index = (st.index + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+        drawSearch();
+      } else if (e.key === 'Enter') (e.preventDefault(), pickSearch(st.index));
+    },
+  });
+  const drop = h('div', { class: 'search-drop', hidden: true });
+  const box = h('div', { class: 'search' }, icon('search'), input, drop);
+  search = { box, input, drop, results: [], index: 0, seq: 0, q: '', note: '', idle: true };
+  return box;
+}
+// Who a search can be `from:`: the server's people, or the two of us in a DM
+function searchPeople() {
+  if (inDmView()) return [me(), { ...profileOf(peerOf(S.channelId)), id: peerOf(S.channelId) }].map((p) => ({ id: p.id, name: String(p.name || '') }));
+  return Object.entries(S.server?.profiles || {}).map(([id, p]) => ({ id, name: String(p?.name || '') })).filter((p) => p.name);
+}
+// Same as hasKind() in server.js
+const hasKind = (m, k) => (k === 'gif' ? !!m.gif : k === 'link' ? /https?:\/\//.test(m.text || '') : Array.isArray(m.files) && (k === 'image' ? m.files.some((f) => /^image\//.test(f?.type || '')) : m.files.length > 0));
+// The chips under the field: the filters there are, or ways to finish the one being typed.
+// [{ label, run, finishes? }]; `run` rewrites the field, `finishes`: it completes what is being typed.
+function searchSuggestions() {
+  const st = search;
+  if (!st) return [];
+  const value = st.input.value;
+  const put = (text) => () => {
+    st.input.value = text;
+    st.input.focus();
+    drawSearch();
+    runSearch();
+  };
+  const typing = /(?:^|\s)(from|in|has|before|after|on|during):("[^"]*|\S*)$/i.exec(value);
+  if (!typing) {
+    const lead = value && !/\s$/.test(value) ? value + ' ' : value;
+    return SEARCH_FILTERS.filter((op) => op !== 'in' || !inDmView()).map((op) => ({ label: op + ':', run: put(lead + op + ':') }));
+  }
+  const op = typing[1].toLowerCase();
+  const part = typing[2].replace(/^"/, '').toLowerCase();
+  const head = value.slice(0, value.length - typing[2].length);
+  const quoted = (v) => (/\s/.test(v) ? `"${v}"` : v);
+  const options =
+    op === 'from'
+      ? [...new Set(searchPeople().map((p) => p.name))]
+      : op === 'in'
+        ? textChannels().map((c) => c.name)
+        : op === 'has'
+          ? SEARCH_HAS
+          : ['today', 'yesterday', new Date(Date.now() - new Date().getTimezoneOffset() * 60e3).toISOString().slice(0, 10)];
+  return options
+    .filter((v) => v.toLowerCase().includes(part) && v.toLowerCase() !== part)
+    .sort((a, b) => b.toLowerCase().startsWith(part) - a.toLowerCase().startsWith(part))
+    .slice(0, 6)
+    .map((v) => ({ label: v, finishes: true, run: put(head + quoted(v) + ' ') }));
+}
+const runSearch = debounce(async () => {
+  const st = search;
+  const cid = S.channelId;
+  if (!st || st.drop.hidden) return;
+  const dm = isDm(cid);
+  const f = parseSearch(st.input.value.slice(0, 300));
+  const q = f.q.slice(0, 100);
+  const seq = ++st.seq;
+  const show = (results, note = '', idle = false) => search === st && seq === st.seq && (Object.assign(st, { results, index: 0, q, note, idle }), drawSearch());
+  // Names become ids here: the server is asked about people and one channel, never about names
+  const people = searchPeople();
+  const from = [];
+  for (const name of f.from) {
+    const ids = name === 'me' ? [me().id] : people.filter((p) => p.name.toLowerCase() === name || `${p.name}#${mentionTag(p.id)}`.toLowerCase() === name).map((p) => p.id);
+    if (!ids.length) return show([], `No one here is called “${name}”`);
+    from.push(...ids);
+  }
+  const inChannel = dm ? null : f.in.map((name) => textChannels().find((c) => c.name.toLowerCase() === name) || name)[0];
+  if (typeof inChannel === 'string') return show([], `There’s no channel called #${inChannel}`);
+  if (f.bad.length) return show([], /^has:/.test(f.bad[0]) ? `“${f.bad[0]}” isn’t a filter: has: takes ${SEARCH_HAS.join(', ')}` : `“${f.bad[0]}” isn’t a date: use 2026-10-04, today or yesterday`);
+  if (!q && !from.length && !f.has.length && f.before == null && f.after == null && !inChannel) return show([], '', true);
+  if (dm) {
+    const lower = q.toLowerCase();
+    const hits = (await DM.history(peerOf(cid)))
+      .filter((m) => !m.note && (!from.length || from.includes(m.author)) && (f.before == null || m.ts < f.before) && (f.after == null || m.ts >= f.after) && f.has.every((k) => hasKind(m, k)))
+      .map((m) => {
+        const text = String(m.text || '');
+        const at = text.toLowerCase().indexOf(lower);
+        const file = at < 0 && m.files?.find((x) => String(x.name || '').toLowerCase().includes(lower));
+        return at >= 0 || file ? { channelId: cid, id: m.id, author: m.author, name: m.name, ts: m.ts, text: snippetAround(text, Math.max(0, at), at < 0 ? 0 : q.length), file: file ? file.name : undefined } : null;
+      })
+      .filter(Boolean)
+      .reverse();
+    return show(hits.slice(0, 50), hits.length > 50 ? 'Showing the newest 50 matches' : '');
+  }
+  const res = S.connected
+    ? await S.socket
+        .timeout(8000)
+        .emitWithAck('msg:search', { q, channelId: inChannel ? inChannel.id : searchHere ? cid : undefined, from: from.length ? from : undefined, before: f.before ?? undefined, after: f.after ?? undefined, has: f.has.length ? f.has : undefined })
+        .catch(() => null)
+    : null;
+  if (!Array.isArray(res?.results)) return show([], S.connected ? 'This server didn’t answer. Search needs a newer friendspeak server.' : 'Not connected');
+  show(res.results.filter((r) => r && typeof r.id === 'string' && typeof r.channelId === 'string').slice(0, 50), res.more ? 'Showing the newest 50 matches' : '');
+}, 200);
+// `text` with every occurrence of `q` marked, as nodes (never HTML: this is user text)
+function highlighted(text, q) {
+  const out = [];
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let at = 0;
+  for (let i = lower.indexOf(needle); needle && i >= 0; i = lower.indexOf(needle, at)) {
+    out.push(text.slice(at, i), h('mark', {}, text.slice(i, i + needle.length)));
+    at = i + needle.length;
+  }
+  return [...out, text.slice(at)];
+}
+function drawSearch() {
+  const st = search;
+  const dm = inDmView();
+  const scope = (here, label) => h('button', { class: 'chip' + (searchHere === here ? ' on' : ''), onmousedown: (e) => (e.preventDefault(), (searchHere = here), drawSearch(), runSearch()) }, label);
+  const hints = searchSuggestions();
+  st.drop.hidden = false;
+  st.drop.replaceChildren(
+    ...[
+    dm ? null : h('div', { class: 'search-scope' }, scope(false, 'All channels'), scope(true, '#' + (channelById(S.channelId)?.name || 'this channel'))),
+    hints.length ? h('div', { class: 'search-filters' }, hints.map((s) => h('button', { class: 'chip', onmousedown: (e) => (e.preventDefault(), s.run()) }, s.label))) : null,
+    h(
+      'div',
+      { class: 'search-results', role: 'listbox' },
+      st.results.map((r, i) => {
+        const author = profileOf(r.author, String(r.name || 'unknown').slice(0, 60));
+        const text = String(r.text || '');
+        return h(
+          'div',
+          {
+            class: 'sr' + (i === st.index ? ' active' : ''),
+            role: 'option',
+            onmousedown: (e) => (e.preventDefault(), pickSearch(i)), // before the field loses focus
+            onmousemove: () => st.index !== i && ((st.index = i), st.drop.querySelector('.sr.active')?.classList.remove('active'), st.drop.querySelectorAll('.sr')[i]?.classList.add('active')),
+          },
+          avatarEl(author, 28),
+          h(
+            'div',
+            { class: 'sr-body' },
+            h(
+              'div',
+              { class: 'sr-head' },
+              h('strong', { style: { color: author.color } }, author.name),
+              dm ? null : h('span', { class: 'muted small sr-channel' }, '#' + (channelById(r.channelId)?.name || 'unknown')),
+              h('span', { class: 'muted small sr-time' }, fmtTime(+r.ts || 0))
+            ),
+            text ? h('div', { class: 'sr-text' }, highlighted(text, st.q)) : null,
+            typeof r.file === 'string' ? h('div', { class: 'sr-text' }, '📎 ', highlighted(r.file.slice(0, 200), st.q)) : null
+          )
+        );
+      })
+    ),
+    st.results.length ? null : h('div', { class: 'search-empty muted' }, st.note || (st.idle ? 'Type to search. Filters narrow it down: from:name, has:image, before:2026-10-04…' : 'No messages match')),
+    st.results.length && st.note ? h('div', { class: 'search-note muted small' }, st.note) : null,
+    ].filter(Boolean) // replaceChildren(null) would insert the text "null"
+  );
+  st.drop.querySelector('.sr.active')?.scrollIntoView({ block: 'nearest' });
+}
+function pickSearch(i) {
+  const r = search?.results[i];
+  if (!r) return;
+  closeSearch(true);
+  search.input.blur();
+  jumpToMessage(r.channelId, r.id);
+}
+// composedPath: a chip that was clicked has already been redrawn, so it is no longer inside the box
+document.addEventListener('mousedown', (e) => search && !search.drop.hidden && !e.composedPath().includes(search.box) && closeSearch());
 
 // TeamSpeak-style file browser: one channel or the whole server
 let fileBrowser = null; // { reload } while open
@@ -3485,7 +3983,7 @@ function openGifPicker(anchor, onPick) {
               'div',
               { class: 'gif-nokey' },
               h('p', {}, 'GIFs need a free GIPHY API key.'),
-              h('p', { class: 'muted small' }, 'Get one at developers.giphy.com, then paste it in Settings → Integrations (or the server host can set GIPHY_API_KEY).'),
+              h('p', { class: 'muted small' }, 'Get one at developers.giphy.com and paste it in Settings → Integrations.'),
               onPick ? null : h('button', { class: 'btn small', onclick: () => (pop.close(), openSettings('integrations')) }, 'Open settings')
             )
           : h('div', { class: 'error-text center' }, e.message)
@@ -3787,7 +4285,6 @@ async function screenPicker({ switching = false } = {}) {
         {},
         h('div', { class: 'share-choices' }, choice('monitor', 'screen', 'Entire screen', 'A whole display'), choice('window', 'window', 'Window', 'One app window')),
         audioBox('Share audio'),
-        h('p', { class: 'muted small' }, 'Your browser asks which screen or window next. Chrome and Edge can share system audio on Windows and window audio on recent macOS; other browsers may send video only.'),
         quality
       )
     );
@@ -4223,8 +4720,7 @@ function cameraDialog() {
       'div',
       { class: 'cam-dialog' },
       preview.el,
-      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
-      h('p', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')
+      h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el)
     ),
     {
       actions: live
@@ -4400,6 +4896,21 @@ async function openVideoGrid(channelId) {
   if (!inCall(channelId)) return;
   openStage();
   if (S.stage?.focus) setStageFocus(S.stage.focus);
+}
+
+// The LIVE and camera badges and the hover card's button: join the person's
+// voice channel if needed, then show their screen share on the stage, or the
+// stage's grid for cameras
+async function watchStream(u, kind) {
+  const channelId = u.voice;
+  if (!inCall(channelId)) {
+    if (!canCh(channelId, 'send')) return toast('You don’t have permission to join this voice channel', 'error');
+    await joinVoice(channelId);
+  }
+  if (!inCall(channelId)) return;
+  // They may have stopped or left while we joined
+  const still = kind === 'screen' && S.users.some((x) => x.sid === u.sid && x.voice === channelId && x.sharing);
+  openStage(still ? { screen: u.sid } : {});
 }
 
 function statsTile() {
@@ -4867,7 +5378,12 @@ function handleKeyUp(e) {
   if (st.ptt && e.code === st.pttKey) audio.setPttHeld(false);
 }
 
-window.addEventListener('keydown', (e) => handleKeyDown(e, typingInField(e)) && e.preventDefault());
+window.addEventListener('keydown', (e) => {
+  if (handleKeyDown(e, typingInField(e))) return e.preventDefault();
+  // Ctrl/Cmd+F: the search field of the chat in view
+  const field = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === 'KeyF' && !S.game.visible && !$('#modal-root')?.childElementCount && $('#search-input');
+  if (field) (e.preventDefault(), field.focus(), field.select());
+});
 window.addEventListener('keyup', handleKeyUp);
 window.addEventListener('blur', () => !S.game.open && audio.setPttHeld(false));
 document.addEventListener('visibilitychange', () => !document.hidden && (document.title = 'friendspeak'));
@@ -5058,7 +5574,7 @@ function settingsProfile(body) {
       }, 'Save profile')
     ),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only on this device, with their keys. Each has its own servers and direct messages. Servers only let in the keys they first saw for a profile, so export it to use it on another device, and keep the file private: whoever has it can be you.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device. Export one to use it on another device.'),
     h(
       'div',
       { class: 'profile-list' },
@@ -5095,7 +5611,7 @@ function settingsProfile(body) {
       h('button', { class: 'btn small ghost', onclick: () => importInput.click() }, 'Import…'),
       importInput
     ),
-    h('p', { class: 'muted small' }, 'An exported profile includes its private keys for direct messages. Keep the file to yourself: whoever has it can read and send DMs as you.')
+    h('p', { class: 'muted small' }, 'Keep the file private; whoever has it can impersonate you.')
   );
 }
 
@@ -5172,13 +5688,13 @@ function settingsAppearance(body) {
     h('h3', {}, 'Theme'),
     h('div', { class: 'theme-grid' }, Object.entries(THEMES).map(([id, t]) => tile(t.name, t.colors, id))),
     h('h3', {}, 'Color schemes'),
-    h('p', { class: 'muted small' }, 'Popular terminal color schemes from the Gogh collection. Click one to load its colors, then adjust them below.'),
+    h('p', { class: 'muted small' }, 'Click a scheme to load its colors, then adjust them below.'),
     h('div', { class: 'theme-grid scroll' }, SCHEMES.map((s) => tile(s.name, s.colors))),
     h('h3', {}, 'Colors', customBadge),
     h('p', { class: 'muted small' }, 'Changing a color makes a custom theme from the one in use.'),
     ...COLOR_GROUPS.flatMap(([title, colors]) => [h('div', { class: 'color-group' }, title), h('div', { class: 'color-grid' }, colors.map(picker))]),
     h('h3', {}, 'Size'),
-    h('p', { class: 'muted small' }, `UI size scales the whole window: text, icons and spacing. ${mod} + and ${mod} − change it too.`),
+    h('p', { class: 'muted small' }, `${mod} + and ${mod} − change UI size too.`),
     h(
       'div',
       { class: 'field' },
@@ -5413,22 +5929,22 @@ function settingsVoice(body) {
       icon('head'),
       h('div', {}, h('strong', {}, 'Only test your mic with headphones on. '), 'On speakers your mic picks up its own playback and makes a loud feedback screech.')
     ),
-    h('p', { class: 'muted small' }, 'Test mic plays your microphone back to you. While it runs you hear nobody else, and nobody hears you.'),
+    h('p', { class: 'muted small' }, 'While it runs you hear nobody else, and nobody hears you.'),
     h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
-    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn, h('span', { class: 'muted small' }, 'Your background is replaced on this device, before the camera reaches anyone.')), preview.el),
+    h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn), preview.el),
     ...streamingSettings(check),
     h('h3', {}, 'Volume'),
     slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
     slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
-    h('p', { class: 'muted small' }, 'Master volume covers everything friendspeak plays except the game. To turn one person up or down, click them in a voice channel: up to 300%, for you only.'),
+    h('p', { class: 'muted small' }, 'Covers everything except the game. Click someone in a voice channel to change only their volume.'),
     h('h3', {}, 'Microphone'),
     slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
     check('autoGain', 'Automatic gain', restartMic),
     h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
     check('echoCancellation', 'Echo cancellation', restartMic),
-    h('p', { class: 'muted small' }, 'Keeps what your speakers play out of your mic, so friends don’t hear themselves. With headphones on you can turn it off: your voice is then sent untouched while others talk.'),
+    h('p', { class: 'muted small' }, 'Keeps your speakers out of your mic. With headphones on you can turn it off.'),
     check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
     denoiseLimit,
     h(
@@ -5472,7 +5988,7 @@ function settingsVoice(body) {
 function streamingSettings(check) {
   if (!desktop?.media) return [];
   const status = h('p', { class: 'muted small' }, 'Checking what this computer can do…');
-  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak for the change to reach the app’s own drawing and video playback. Your next share already uses it.');
+  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak to apply this everywhere.');
   const hwBox = h('input', { type: 'checkbox', checked: true });
   const describe = (caps, prefs) => {
     const hw = prefs.hardwareAcceleration;
@@ -5492,9 +6008,9 @@ function streamingSettings(check) {
   return [
     h('h3', {}, 'Streaming'),
     check('nativeStreaming', 'Native streaming'),
-    h('p', { class: 'muted small' }, 'Screen shares and the camera are captured and encoded outside the browser engine: more frames, sharper, and encoded once however many friends watch. A camera with a background, and anything this can’t capture, uses the standard pipeline.'),
+    h('p', { class: 'muted small' }, 'Smoother, sharper screen shares and camera.'),
     h('label', { class: 'check-row' }, hwBox, h('span', {}, 'Hardware acceleration')),
-    h('p', { class: 'muted small' }, 'Use the graphics card to encode your streams, play video and draw the app. Turn it off if streams or the window show glitches; everything then runs on the processor.'),
+    h('p', { class: 'muted small' }, 'Uses the graphics card. Turn it off if streams or the window show glitches.'),
     status,
     restart,
   ];
@@ -5529,9 +6045,9 @@ function settingsNotifications(body) {
       check('notify', 'All notifications'),
       check('notifyMentions', 'Mentions & replies', { disabled: !st.notify }),
       check('notifyDms', 'Direct messages & calls', { disabled: !st.notify }),
-      h('p', { class: 'muted small' }, 'Regular messages in a server never notify you. They only mark the channel unread. Mentions and DMs always show an unread badge, even when muted.'),
+      h('p', { class: 'muted small' }, 'Only mentions and DMs notify you. They show an unread badge even when muted.'),
       h('h3', {}, 'Muted people'),
-      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”: they won’t notify you in DMs or on any server.')]),
+      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”.')]),
       h('h3', {}, 'Muted servers'),
       ...(muted.length
         ? muted.map((id) => {
@@ -5661,7 +6177,7 @@ function logsSection() {
     'div',
     { class: 'logs-section' },
     h('h3', {}, 'Logs and crash reports'),
-    h('p', { class: 'muted small' }, 'Logs record errors and connection events on this computer only, never your messages. Nothing is sent anywhere unless you share a report yourself.'),
+    h('p', { class: 'muted small' }, 'Logs stay on this computer and never include your messages.'),
     status,
     h(
       'div',
@@ -5747,7 +6263,7 @@ const VOICE_QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', st
 
 // The server's permission keys, in its order: key, label, what it lets someone do
 const PERM_INFO = [
-  ['admin', 'Administrator', 'Everything. Ignores every other setting and every channel’s own settings.'],
+  ['admin', 'Administrator', 'Everything. Ignores every other setting.'],
   ['view', 'See channels', 'Read messages and files in this server’s channels.'],
   ['send', 'Send messages and join voice', 'Message in text channels and join voice channels.'],
   ['mentionRoles', 'Mention roles', '@role mentions notify people.'],
@@ -5757,11 +6273,11 @@ const PERM_INFO = [
   ['ban', 'Ban members', 'Ban and unban people.'],
   ['forceMute', 'Force mute', 'Mute people in voice so they can’t unmute themselves.'],
   ['manageRoles', 'Manage roles', 'Create and delete roles without permissions, and hand them out.'],
-  ['manageChannels', 'Manage channels', 'Create channels, and rename or delete them unless a channel says otherwise.'],
+  ['manageChannels', 'Manage channels', 'Create, rename and delete channels.'],
   ['manageEmojis', 'Manage emojis', 'Add and remove custom emojis.'],
   ['manageFiles', 'Manage files', 'Delete other people’s files.'],
   ['manageMessages', 'Delete messages', 'Delete other people’s messages.'],
-  ['createInvites', 'Create invites', 'Make invites for new people, and see the server’s invites and who joined with them.'],
+  ['createInvites', 'Create invites', 'Make invites and see who joined with them.'],
 ];
 
 // Inherit / Allow / Deny for a setting that may be unset (true, false or undefined)
@@ -5847,7 +6363,7 @@ function channelPermsDialog(ch) {
     h(
       'div',
       {},
-      h('p', { class: 'muted small' }, 'A channel’s settings beat the server-wide ones, and a role’s beats everyone’s. Inherit keeps the server-wide setting. Administrators always have everything.'),
+      h('p', { class: 'muted small' }, 'Inherit keeps the server-wide setting.'),
       S.conn.perms?.open ? h('p', { class: 'muted small' }, 'Permissions are off on this server, so these only take effect once someone is an administrator.') : null,
       h(
         'div',
@@ -5984,7 +6500,7 @@ function serverOverview(body) {
     ),
     h('h3', {}, 'Voice'),
     h('label', { class: 'field' }, h('span', {}, 'Voice quality'), quality),
-    h('p', { class: 'muted small' }, 'How much data everyone’s voice uses in this server’s voice channels. Each person sends their voice to every other person in the channel, so lower it if a big channel strains someone’s upload.'),
+    h('p', { class: 'muted small' }, 'Lower it if a big channel strains someone’s upload.'),
     h('h3', {}, 'Games'),
     h('label', { class: 'check-row' + (gameToggle.disabled ? ' disabled' : '') }, gameToggle, h('span', {}, 'Club Penguin')),
     h('p', { class: 'muted small' }, g.available ? 'Shows Club Penguin under Games for everyone on this server.' : g.reason || 'Club Penguin is not available on this server.'),
@@ -5994,7 +6510,7 @@ function serverOverview(body) {
           h(
             'div',
             { class: 'row' },
-            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used. ${can('manageFiles') ? 'You can delete anyone’s files.' : 'You can delete your own files.'} The host sets the limit with MAX_STORAGE.`),
+            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used.`),
             h('button', { class: 'btn small', onclick: () => openFileBrowser() }, 'Browse files')
           ),
         ]
@@ -6047,7 +6563,7 @@ function serverRoles(body, { st, redraw }) {
         )
       )
     );
-  const grantNote = h('p', { class: 'muted small' }, 'Only roles without permissions of their own can be handed out this way, and never to an administrator.');
+  const grantNote = h('p', { class: 'muted small' }, 'Only roles without permissions can be handed out here.');
 
   let editor;
   if (st.role === 'default') {
@@ -6056,7 +6572,7 @@ function serverRoles(body, { st, redraw }) {
       'div',
       { class: 'roles-edit' },
       h('h3', {}, 'Default permissions'),
-      h('p', { class: 'muted small' }, 'What everyone on the server can do. A role’s own settings win over these, and a channel’s over both.' + (admin || open ? '' : ' Only administrators can change them.')),
+      h('p', { class: 'muted small' }, 'What everyone can do unless a role or channel says otherwise.' + (admin || open ? '' : ' Only administrators can change them.')),
       ...PERM_INFO.map(([key, label, desc]) =>
         h(
           'label',
@@ -6116,7 +6632,7 @@ function serverRoles(body, { st, redraw }) {
         : h('p', { class: 'muted small' }, 'You can’t edit this role.'),
       h('p', { class: 'muted small' }, holders.length ? `Held by ${holders.join(', ')}.` : 'Nobody has this role yet. Give it to people from the Members page.'),
       h('h3', {}, 'Permissions'),
-      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. A person with several roles gets the setting from the highest one that has one. A role with permissions can only be held by people whose profile has a key.' + (admin && !open ? '' : ' Only administrators can change these.')),
+      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. With several roles, the highest one wins.' + (admin && !open ? '' : ' Only administrators can change these.')),
       ...PERM_INFO.map(([key, label, desc]) =>
         key === 'admin'
           ? h('label', { class: 'check-row perm-row' + (!admin || open ? ' disabled' : '') }, h('input', { type: 'checkbox', checked: !!r.perms?.admin, disabled: !admin || open, onchange: (e) => setPerms('admin', e.target.checked ? true : undefined) }), h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)))
@@ -6128,7 +6644,7 @@ function serverRoles(body, { st, redraw }) {
     );
   }
   body.append(
-    ...[open ? h('p', { class: 'banner-note' }, 'Permissions are off on this server: everyone can do everything, as before. They start applying once someone holds a role with Administrator, which is set up in the admin dashboard. Until then roles are labels, and this page is read-only.') : null,
+    ...[open ? h('p', { class: 'banner-note' }, 'Permissions are off: everyone can do everything. They apply once someone is made Administrator in the admin dashboard.') : null,
     h('div', { class: 'roles-page' }, list, editor)].filter(Boolean)
   );
 }
@@ -6141,7 +6657,6 @@ function serverMembers(body) {
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   body.append(
     h('h3', {}, 'Members'),
-    h('p', { class: 'muted small' }, hasPerms() ? 'Everyone who has joined. Roles you can hand out show a Roles button.' : 'Everyone who has joined.'),
     h(
       'div',
       { class: 'emoji-list' },
@@ -6169,7 +6684,7 @@ function serverEmojis(body) {
   const fileIn = h('input', { type: 'file', accept: 'image/*' });
   body.append(
     ...[h('h3', {}, 'Custom emojis'),
-    h('p', { class: 'muted small' }, 'Everyone on this server can use them as :name:, from the emoji picker, or in channel names.' + (ok ? ' Any image works (it’s resized); GIFs must be under 256KB.' : ' Adding and removing them needs the Manage emojis permission.')),
+    h('p', { class: 'muted small' }, 'Use them as :name: or from the emoji picker.' + (ok ? ' GIFs must be under 256KB.' : ' Adding them needs the Manage emojis permission.')),
     ok
       ? h(
           'div',
@@ -6326,7 +6841,7 @@ function serverInvites(body, { st, redraw }) {
 
   body.append(
     h('h3', {}, 'Invites'),
-    h('p', { class: 'muted small' }, 'An invite is a token someone enters once to join this server. After that the server knows them by their profile’s key, so they never need it again. Only people with the Create invites permission see this page. Administrators can copy any working invite again, everyone else the ones they made.'),
+    h('p', { class: 'muted small' }, 'A token someone enters once to join this server.'),
     h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
     h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
     h('h3', {}, 'New invite'),

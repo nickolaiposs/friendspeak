@@ -180,7 +180,8 @@ export class DirectMessages {
     socket.on('connect_error', (err) => /banned|password|member/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
     // Servers with mailboxes (D32) ask who we are: prove it with the profile's key
-    socket.on('challenge', async ({ nonce } = {}) => {
+    socket.on('challenge', async ({ nonce, server } = {}) => {
+      if (typeof server === 'string') s.serverId = server; // what message links call this server (D54)
       const identity = this.identity;
       if (typeof nonce !== 'string' || !identity) return;
       const res = await socket
@@ -195,6 +196,23 @@ export class DirectMessages {
     socket.on('mail', (items) => this.receiveMail(s, items));
     // A message on this server mentions us (the server only sends it to the people concerned)
     socket.on('mention', (p) => p && typeof p === 'object' && this.on.mention?.(address, p));
+  }
+
+  // The bookmarked server that message links name `serverId`, if it has told us its id
+  addressOf(serverId) {
+    for (const s of this.servers.values()) if (!s.guest && s.serverId === serverId) return s.address;
+    return null;
+  }
+
+  // A linked message's preview from a bookmarked server we aren't looking at; null when it won't say
+  async peek(address, channelId, messageId) {
+    const s = this.servers.get(address);
+    if (!s || s.guest || !s.socket.connected) return null;
+    const res = await s.socket
+      .timeout(8e3)
+      .emitWithAck('msg:peek', { channelId, messageId })
+      .catch(() => null);
+    return res?.message && typeof res.message === 'object' ? res.message : null;
   }
 
   // A guest isn't told who is on the server, only about the people it asks for

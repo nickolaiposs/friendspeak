@@ -12,7 +12,7 @@ This is the guide for engineers and AI agents changing this repo. Read it before
 
 friendspeak is a self-hosted Discord/TeamSpeak-style app for small friend groups. It has text channels, WebRTC voice, emojis, GIFs, a soundboard, and an optional virtual penguin world based on the open-source Yukon client and server (game assets not included). **There are no accounts anywhere.** Identity is a profile stored in the desktop app. The app runs as:
 
-1. **A server** (`server.js`): Express + Socket.IO, plus the Yukon game worlds, all on **one port**. It serves no chat UI (D26), only the game client that the app shows in an iframe and the admin dashboard at `/admin` (D34).
+1. **A server** (`server.js`): Express + Socket.IO, plus the Yukon game worlds, all on **one port**. It serves no chat UI (D26), only the game client that the app shows in an iframe and the admin dashboard (D34), at a random path it prints at start (D52; `/admin` forwards to it from localhost).
 2. **The client** (`public/`): vanilla JS ES modules with no build step. It ships only inside the desktop app.
 3. **A desktop app** (`desktop/`): Electron. It loads the client from a private `friendspeak://` origin. It is a client only and never hosts (D23).
 
@@ -39,10 +39,10 @@ There is **no automated test suite**. See "Verifying changes" below.
 ```
 server.js              friendspeak server; exports startServer(opts) (used by the CLI and Docker)
 updater.js             server self-update: GitHub Releases check, cron maintenance window, Watchtower trigger (D29)
-admin.js               admin dashboard backend: local rule, admin keys, sessions, rate limit, audit log, JSON API + event stream (D34)
+admin.js               admin dashboard backend: local rule, admin keys, the random path and TOTP 2-step sign-in (D52), sessions, rate limit, audit log, JSON API + event stream (D34)
 logbuffer.js           the server's console output (D49): a ring buffer for the dashboard's live view, JSON lines in data/logs for history, secrets scrubbed
 crashlog.js            crash reports in data/crashes (D49): uncaught errors, failed starts, unclean exits
-admin-ui/              the admin dashboard, served at /admin (plain ES modules, no build step); one module per view in js/views/
+admin-ui/              the admin dashboard (plain ES modules, no build step); one module per view in js/views/; js/qr.js is the QR encoder for the 2-step setup
 public/                the client UI, bundled into the desktop app (no bundler; files load as-is)
   js/main.js           UI, app state (object S), socket handlers, settings, game view
   js/voice.js          WebRTC mesh (VoiceClient)
@@ -78,11 +78,12 @@ scripts/build-game.js  builds both vendored projects
 scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
 scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.patch (our changes to upstream), Cargo.lock
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29)
+.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29)
 data/                  (gitignored) server state when run via `npm start` (state.json, mail.json, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
 Dockerfile, docker-compose.yaml, docker/   production server image and stack (D21)
+deploy/                the stack for a domain (D53): docker-compose.yaml (friendspeak behind Caddy, real HTTPS), Caddyfile, .env.example, install.sh. A server variable Docker hosts need goes in both compose files and both .env.example files
 ```
 
 ## Rules of the road
@@ -105,7 +106,7 @@ Dockerfile, docker-compose.yaml, docker/   production server image and stack (D2
 3. Document the event in `docs/ARCHITECTURE.md` → Protocol.
 
 ### Add a setting
-Add a default to `DEFAULT_SETTINGS` in `public/js/store.js`, then UI in the matching `settings*` function in `main.js`. Server-side options go in `startServer(opts)` plus the CLI env mapping at the bottom of `server.js` (and `docker-compose.yaml` / `.env.example` if Docker users need it).
+Add a default to `DEFAULT_SETTINGS` in `public/js/store.js`, then UI in the matching `settings*` function in `main.js`. Server-side options go in `startServer(opts)` plus the CLI env mapping at the bottom of `server.js` (and `docker-compose.yaml` / `.env.example`, and the same two files in `deploy/`, if Docker users need it).
 
 ### Add a dashboard view or admin route
 1. `admin.js` → add the route on `api` below the session check (everything after the `// Everything below needs a local request or a session` middleware is already gated). Validate input (`cleanName()`, `str()`, `clampInt()`), call `audit(req.admin.actor, peerOf(req), 'thing.did', detail)` for every state change, and `notify(topic)` so open dashboards refetch. If the app can do the same thing over the socket (ban, remove, server settings, roles), put the logic in the shared `actions` object in `server.js`, which returns `{ ok }` or `{ error }`, and call it from both. Don't duplicate it in `admin.js`. State-changing routes get the CSRF checks for free: they must be `POST`/`PUT`/`PATCH`/`DELETE` with a JSON body.
@@ -125,8 +126,9 @@ There are no unit tests. Verification so far has been scripted with **puppeteer-
 - **Server protocol:** a Node script with `socket.io-client` that runs `hello` → exercises events → asserts broadcasts.
 - **UI / voice:** two Electron instances (separate `FRIENDSPEAK_USER_DATA`) with `--use-fake-ui-for-media-stream --use-fake-device-for-media-stream`. Join the same voice channel and assert `.voice-user.speaking` appears for the remote peer. The fake mic beeps periodically, so poll. To feed a recording instead, add `--use-file-for-fake-audio-capture=<wav> --disable-features=AudioServiceSandbox` (without the second flag the sandboxed audio service can't read the file and the mic is silent). Mic processing can also be rendered offline: an `OfflineAudioContext` at 48 kHz with the same worklet (`fs-denoise` with `processorOptions: { wasm, model, on: true, limit }`; messages posted to an offline context's worklet arrive after it has rendered; `fs-gate` takes `processorOptions: { threshold }`). Echo cancellation can't be measured with fake devices: the fake mic doesn't hear the speakers.
 - **Game rooms:** run the server with `GAME_SPAWN=<roomId>`, open the game from the UI, then watch for `pageerror` events and HTTP ≥400 responses inside the iframe. Screenshot the canvas.
-- **Admin dashboard:** a Node script using `fetch` against a running server (sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie; state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
+- **Admin dashboard:** a Node script using `fetch` against a running server. Run it with `ADMIN_PATH=off ADMIN_MFA=off` to get `/admin` and key-only sign-in (D52); otherwise read the path from the `Admin dashboard:` line of the output, and `login` answers `{ mfa: 'setup', secret }` until it is sent `{ key, code }` with the TOTP code for that secret (HMAC-SHA1 of the 30 s step, 6 digits; a code works once, the next step's is accepted too). Sign in with the key printed on first boot or `ADMIN_KEY`, then send the `fs_admin` cookie (state-changing calls need `Content-Type: application/json` and an `Origin` equal to the host). Use `node:http` when a test needs a custom `Host` header, since `fetch` won't set one, and puppeteer-core for the pages. Run with `ADMIN_LOCAL=off` to exercise sign-in on localhost.
 - **Media sidecar (D45):** two layers. (1) The sidecar alone: a Node script that spawns `native/target/release/friendspeak-media`, sends `start` with `source: { type: 'test' }` (a moving pattern; `audio: true` adds a tone) and `viewer`, and relays `signal` events to a page in the system Chrome (puppeteer-core) that answers on a plain `RTCPeerConnection`; assert on the page's `inbound-rtp` stats (frames decoded, size, `audioLevel` with an unmuted element) and on the sidecar's `stats` events. `type: 'camera'` uses the real camera. (2) In the app: run the Electron instances with `FRIENDSPEAK_FAKE_CAPTURE=1` so every native source is the test pattern; get the `VoiceClient` by wrapping `VoiceClient.prototype.join` from `import('friendspeak://app/js/voice.js')` (modules are singletons), call `setNativeMedia` on one and `watch` on the other, and check `mediaOf`, `videoStats` and `peers.get(sid).nin`. Set `peer.noStream.screen = true` on the viewer to act as an older app. Real screen capture needs the Screen Recording permission, which macOS refuses to a process started from a terminal. Windows code can be type-checked from a Mac in a container (`rust` image, `mingw-w64`, `nasm`, target `x86_64-pc-windows-gnu`); it can only be run on Windows.
+- **The domain stack (D53):** `COMPOSE_PROJECT_NAME=<scratch name> FRIENDSPEAK_IMAGE=friendspeak:latest ./deploy/install.sh --domain localhost --dir <tmp> --yes` with a locally built image. For `localhost` Caddy signs with its own CA, so test with certificate checks off: `/api/info` and a socket.io websocket on `https://localhost` and `https://localhost:3000`, and the dashboard's sign-in. It takes ports 80, 443 and 3000. The project name keeps it away from a real `friendspeak` stack and its data volume; remove it with `docker compose down -v`.
 - **Desktop:** `FRIENDSPEAK_USER_DATA=<tmp> npx electron . --remote-debugging-port=9333 …` then `puppeteer.connect`. Cross-origin iframes attach late, so use `page.waitForFrame`. `FRIENDSPEAK_TEST_NO_DIALOGS=1` skips the crash dialogs and reloads a crashed window at once (crash a page with CDP `Page.crash`).
 - **Logs and crash reports (D49):** run the server as a child process on a scratch `DATA_DIR` and read `logs/server-*.log` and `crashes/*.json`; `kill -9` then a restart gives an `unclean-exit` report. `startServer({ crashReports: true })` in a script that throws gives an `uncaughtException` one.
 
@@ -150,7 +152,7 @@ Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 
 
 ## Gotchas (learned the hard way)
 
-- **The server has no chat UI.** `http://localhost:3000` only shows a plain-text notice. Run the client with `npm run desktop` (D26). The one web page is the admin dashboard at `/admin` (D34); it needs no key from localhost unless `ADMIN_LOCAL=off`.
+- **The server has no chat UI.** `http://localhost:3000` only shows a plain-text notice. Run the client with `npm run desktop` (D26). The one web page is the admin dashboard (D34). Its path is random (D52), but `/admin` forwards to it from localhost, where it needs no key unless `ADMIN_LOCAL=off`.
 - **`localStorage` is per-origin.** The desktop app uses a fixed custom origin (`friendspeak://app`) so profiles don't vanish when ports change (D10).
 - `replaceChildren(null)` inserts the text "null". Filter falsy children first (`h()` already does).
 - **Yukon loads some files from the site root** (`/assets/media/clothing/...`), not relative to `/game/`. `game/index.js` mounts the asset dirs at both `/game/assets` and `/assets`.
