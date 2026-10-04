@@ -1,8 +1,8 @@
 // Audio graph:
 //
-//   mic ──> micMono ──> denoise ──> micGain ──> limiter ──┬──> gate(mute/PTT/mic test) ──┬──> outDest (MediaStream sent to peers)
-//                                                         ├──> micAnalyser (Settings)    └──> selfAnalyser (speaking indicator)
-//                                                         └──> loop (mic test) ──> master
+//   mic ──> micMono ──> denoise ──> micPre ──> noise gate ──> micGain ──> limiter ──┬──> gate(mute/PTT/mic test) ──┬──> outDest (MediaStream sent to peers)
+//                                                                                   ├──> micAnalyser (Settings)    └──> selfAnalyser (speaking indicator)
+//                                                                                   └──> loop (mic test) ──> master
 //   soundboard clips ──> sbBus ──────────────────────┬──> outDest
 //                                                    ├──> selfAnalyser
 //                                                    └──> monitor ──> master (hear it yourself)
@@ -15,10 +15,10 @@
 // Voices play through the graph instead of <audio> elements because an
 // element's volume stops at 100%, and a gain node can boost a quiet friend.
 //
-// The mic gets the browser's automatic gain and our noise suppression
-// (DeepFilterNet in a worklet, denoise-worklet.js), each a setting, and no echo
-// cancellation or gate (D38, D44, D47). It is made mono first: many mics
-// capture stereo with the voice on one side only.
+// The mic gets the browser's echo cancellation and automatic gain, our noise
+// suppression (DeepFilterNet in a worklet, denoise-worklet.js) and our noise
+// gate (gate-worklet.js), each a setting (D44, D47, D48). It is made mono
+// first: many mics capture stereo with the voice on one side only.
 import { settings } from './store.js';
 
 export const MAX_USER_VOLUME = 3;
@@ -45,6 +45,9 @@ const DENOISE = {
 };
 // settings.noiseSuppressionLimit: how far noise is turned down, in dB. The slider's top means no limit.
 export const DENOISE_LIMIT = { min: 6, max: 40, step: 2, none: 100 };
+const GATE_WORKLET = new URL('./gate-worklet.js', import.meta.url);
+// settings.micGate: the level the noise gate opens at, in dB (D48). The slider's bottom means no gate.
+export const GATE = { min: -80, max: -10 };
 
 class AudioEngine {
   constructor() {
@@ -60,6 +63,8 @@ class AudioEngine {
     this.micTest = false; // Settings' mic test is running (setMicTest)
     // Noise suppression: 'off' | 'on' | 'failed' (can't run here: error says why, and the mic is sent as it is)
     this.denoise = { state: 'off', error: '', node: null, loaded: null };
+    // Noise gate: its worklet, and its latest report, { level, open } (dB, before the gate)
+    this.micGate = { node: null, loaded: null, live: null };
     this.monitorOn = false;
   }
 
@@ -84,6 +89,7 @@ class AudioEngine {
     this.micMono = new GainNode(ctx, { channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'discrete' });
     this.micSplit.connect(this.micMono, 0);
     this.micSplit.connect(this.micMono, 1);
+    this.micPre = ctx.createGain(); // the mic after noise suppression, before the noise gate
     this.micGain = ctx.createGain();
     this.micGain.gain.value = s.micVolume;
     const micOut = this.limiter(this.micGain);
@@ -105,7 +111,7 @@ class AudioEngine {
     this.micAnalyser = ctx.createAnalyser();
     this.micAnalyser.fftSize = 512;
 
-    this.micMono.connect(this.micGain);
+    this.micMono.connect(this.micPre).connect(this.micGain);
     micOut.connect(this.gate);
     micOut.connect(this.micAnalyser);
     micOut.connect(this.loop);
@@ -130,7 +136,7 @@ class AudioEngine {
   }
 
   // Starts the noise suppression worklet with its wasm and model (22 MB, from
-  // the app's own files) and puts it between micMono and micGain, where it
+  // the app's own files) and puts it between micMono and micPre, where it
   // stays for good. Resolves to whether it runs.
   async loadDenoise() {
     const d = this.denoise;
@@ -152,8 +158,8 @@ class AudioEngine {
       if (error) throw new Error(error);
       node.port.onmessage = (e) => e.data.error && this.denoiseFailed(e.data.error); // a frame failed: it is a wire again
       node.onprocessorerror = () => this.denoiseFailed('it stopped');
-      this.micMono.disconnect(this.micGain);
-      this.micMono.connect(node).connect(this.micGain);
+      this.micMono.disconnect(this.micPre);
+      this.micMono.connect(node).connect(this.micPre);
       d.node = node;
       return true;
     } catch (e) {
@@ -176,6 +182,35 @@ class AudioEngine {
     d.state = s.noiseSuppression ? 'on' : 'off';
   }
 
+  // Puts the noise gate's worklet between micPre and micGain, where it stays
+  // for good. Resolves to whether it runs.
+  async loadGate() {
+    const ctx = this.ctx;
+    try {
+      await ctx.audioWorklet.addModule(GATE_WORKLET);
+      const node = new AudioWorkletNode(ctx, 'fs-gate', { channelCount: 1, channelCountMode: 'explicit', outputChannelCount: [1] });
+      node.port.onmessage = (e) => (this.micGate.live = e.data);
+      this.micPre.disconnect(this.micGain);
+      this.micPre.connect(node).connect(this.micGain);
+      this.micGate.node = node;
+      return true;
+    } catch (e) {
+      console.warn('noise gate:', e); // the mic is sent ungated
+      return false;
+    }
+  }
+
+  // Makes the noise gate match settings.micGate. Works live: a message to the
+  // worklet. Never throws.
+  async applyGate() {
+    this.ensure();
+    const g = this.micGate;
+    g.loaded ||= this.loadGate();
+    if (!(await g.loaded)) return;
+    const threshold = settings.get().micGate;
+    g.node.port.postMessage({ threshold: threshold > GATE.min ? threshold : null });
+  }
+
   // node ──> limiter ──> trim; returns the trim to connect onward
   limiter(node) {
     const trim = new GainNode(this.ctx, { gain: LIMITER_TRIM });
@@ -195,8 +230,8 @@ class AudioEngine {
     const s = settings.get();
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('microphone access needs https or localhost');
     // Noise suppression is ours (applyDenoise), never the browser's
-    const want = { echoCancellation: false, autoGainControl: !!s.autoGain, noiseSuppression: false };
-    const denoise = this.applyDenoise();
+    const want = { echoCancellation: this.wantEcho(), autoGainControl: !!s.autoGain, noiseSuppression: false };
+    const denoise = Promise.all([this.applyDenoise(), this.applyGate()]);
     // Chromium ignores an `ideal` deviceId for mics (measured: Electron 44 gave
     // the default every time), so the chosen one is exact, and the default
     // stands in while it's unplugged.
@@ -218,6 +253,13 @@ class AudioEngine {
     this.micSource.connect(this.micSplit);
     // Unplugged mid-call: start again, which falls back to the default device
     track.addEventListener('ended', () => run === this.micRun && this.startMic().catch((e) => console.warn('mic: restart', e)));
+    if (want.echoCancellation !== this.wantEcho()) await this.startMic(); // a mic test began or ended while it started
+  }
+
+  // Echo cancellation is its setting, except in a mic test: the test plays your
+  // own voice, which the canceller would take for a friend's and turn your mic down.
+  wantEcho() {
+    return !!settings.get().echoCancellation && !this.micTest;
   }
 
   stopMic() {
@@ -260,14 +302,16 @@ class AudioEngine {
   // Mic test (Settings): you hear your own mic and nothing else. Friends'
   // voices and your soundboard go quiet here, and the mic is kept from friends
   // as if muted. Screen share audio plays in <video> elements, which main.js
-  // mutes for the test.
-  setMicTest(on) {
+  // mutes for the test. A running mic restarts if the test changes whether it
+  // is echo cancelled (wantEcho); resolves when it has.
+  async setMicTest(on) {
     this.ensure();
     this.micTest = on;
     this.loop.gain.value = on ? 1 : 0;
     this.setVoiceVolume(settings.get().voiceVolume);
     this.setMonitor(this.monitorOn);
     this.updateGate();
+    if (this.micStream && this.micInfo.want.echoCancellation !== this.wantEcho()) await this.startMic();
   }
   setMuted(m) {
     this.muted = m;
