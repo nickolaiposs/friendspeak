@@ -1,3 +1,4 @@
+import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
 import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
@@ -1393,7 +1394,17 @@ function showServer(c) {
   checkAppAgainstServer();
 }
 
+const hostOf = (address) => {
+  try {
+    return new URL(address).host;
+  } catch {
+    return 'unknown';
+  }
+};
+
 function openSocket(entry, rejoinVoice = null) {
+  const host = hostOf(entry.address); // the only thing about a server that is logged
+  log.info(`connecting to ${host}`);
   const socket = io(entry.address, { transports: ['websocket', 'polling'], reconnectionDelayMax: 5000 });
   const c = (S.conn = { entry, socket, voice: null, sid: null, connected: false, server: null, users: [], voiceChannel: null, rejoinVoice });
   // Every handler keeps `c` up to date; only the server in view is drawn
@@ -1418,6 +1429,7 @@ function openSocket(entry, rejoinVoice = null) {
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
     });
     if (res.error) {
+      log.warn(`${host} refused hello: ${res.error}`);
       toast(res.error, 'error');
       if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
       if (!viewed()) return;
@@ -1428,6 +1440,7 @@ function openSocket(entry, rejoinVoice = null) {
     }
     Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
+    log.info(`connected to ${host}`);
     rememberServerLook(c);
     pruneMentions(c);
     if (viewed()) showServer(c);
@@ -1442,7 +1455,9 @@ function openSocket(entry, rejoinVoice = null) {
     }
   });
 
+  let errLogged = false;
   socket.on('connect_error', (err) => {
+    if (!errLogged) ((errLogged = true), log.warn(`connect_error ${host}: ${err.message}`)); // once: it retries every few seconds
     if (viewed() && !c.connected) renderMain(`Can't reach ${entry.address} (${err.message}). Retrying…`);
   });
 
@@ -1456,6 +1471,8 @@ function openSocket(entry, rejoinVoice = null) {
   socket.on('removed', () => (removed = true));
 
   socket.on('disconnect', (reason) => {
+    log.info(`disconnected from ${host}: ${reason}`);
+    errLogged = false;
     if (calling()) closeStage();
     const here = viewed();
     if (replaced || banned || removed || reason === 'io server disconnect') {
@@ -1705,9 +1722,11 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   if (S.call !== c) endCall(); // one call at a time: hang up the one on another server
   if (DMCALL.cur && DMCALL.cur.state !== 'ringing') DMCALL.hangup(); // one microphone: a DM call or a voice channel, not both
   audio.ensure();
+  log.info('joining voice');
   try {
     await c.voice.join(channelId);
   } catch (e) {
+    log.error('voice join failed', e);
     c.rejoinVoice = null;
     if (S.call === c && !c.voiceChannel) (endCall(), renderVoicePanel());
     renderRail();
@@ -1717,6 +1736,7 @@ async function joinVoice(channelId, silent = false, c = S.conn) {
   c.rejoinVoice = null;
   S.call = c;
   if (c.voice.micError) {
+    log.warn(`microphone unavailable: ${c.voice.micError.name}: ${c.voice.micError.message}`);
     toast(
       window.isSecureContext
         ? `No microphone (${c.voice.micError.message}). You joined listen-only — soundboard still works.`
@@ -1739,6 +1759,7 @@ function endCall(silent = false) {
   const c = S.call;
   if (!c) return;
   closeStage();
+  log.info('left voice');
   c.voice.leave(silent);
   c.voiceChannel = c.rejoinVoice = null;
   S.call = null;
@@ -3841,7 +3862,7 @@ async function captureScreen({ surface, sourceId, withAudio, quality }) {
     });
   };
   let stream;
-  const fail = (e) => (toast('Could not share screen: ' + e.message, 'error'), null);
+  const fail = (e) => (log.warn(`screen share failed: ${e.name}: ${e.message}`), toast('Could not share screen: ' + e.message, 'error'), null);
   try {
     stream = await capture(withAudio);
   } catch (e) {
@@ -3891,6 +3912,7 @@ async function startShare(opts) {
     if (!stream) return;
     liveVoice().setMedia('screen', stream, opts.quality);
   }
+  log.info('screen share started');
   settings.set({ shareTier: opts.quality.tier, shareMode: opts.quality.mode });
   audio.cue('join');
   renderVoicePanel();
@@ -3978,6 +4000,7 @@ async function openCamera() {
       return await capture(false);
     }
   } catch (e) {
+    log.warn(`camera failed: ${e.name}: ${e.message}`);
     return toast(e.name === 'NotFoundError' ? 'No camera found.' : 'Could not start camera: ' + e.message, 'error', 6000), null;
   }
 }
@@ -4922,9 +4945,20 @@ function appUpdateBanner() {
   return banner('info', text, { link: githubLink(u.url), action, onClose: () => dismiss('app:' + u.version) });
 }
 
+// A crash the user hasn't seen yet (desktop.logs.summary().unseen): opening the About tab or dismissing it marks it seen
+let unseenCrashes = 0;
+function crashBanner() {
+  if (!unseenCrashes) return null;
+  const seen = () => ((unseenCrashes = 0), desktop.logs.seen().catch(() => {}));
+  return banner('warn', 'friendspeak ran into a problem last time. You can save a report from Settings → About & updates.', {
+    action: h('button', { class: 'btn small', onclick: () => (seen(), renderBanners(), openSettings('about')) }, 'Open'),
+    onClose: seen,
+  });
+}
+
 function renderBanners() {
   clearTimeout(bannerTimer);
-  $('#banners').replaceChildren(...[maintenanceBanner(), appUpdateBanner()].filter(Boolean));
+  $('#banners').replaceChildren(...[crashBanner(), maintenanceBanner(), appUpdateBanner()].filter(Boolean));
   // Keep the countdown fresh, and show the warning when its time comes
   if (S.server?.update?.at) bannerTimer = setTimeout(renderBanners, 30e3);
 }
@@ -4938,12 +4972,16 @@ function checkAppAgainstServer() {
 async function startAppUpdates() {
   if (!desktop?.updateState) return;
   appUpdate = await desktop.updateState();
+  log.info(`app started, version ${appUpdate.current}`);
   desktop.onUpdate((u) => {
     appUpdate = u;
     renderBanners();
     aboutRefresh?.();
   });
   renderBanners();
+  // A crash the user hasn't seen: say so once; the About tab (or the notice) marks it seen
+  unseenCrashes = (await desktop.logs?.summary().catch(() => null))?.unseen || 0;
+  if (unseenCrashes) renderBanners();
 }
 
 // ---------------------------------------------------------------- settings
@@ -5565,20 +5603,129 @@ function settingsAbout(body) {
               ? `Version ${su.latest.version} installs ${windowTime(su.at)} (in ${countdown(su.at - Date.now())}). The server is offline for a minute or two.`
               : `Version ${su.latest.version} is available. The host can update it.`);
 
-    body.replaceChildren(
+    body.replaceChildren(...[
       h('h3', {}, 'friendspeak app'),
       h('div', { class: 'about-row' }, h('strong', {}, u ? `Version ${u.current}` : 'Version unknown'), action),
       h('p', { class: 'muted small' }, status),
       desktop?.openReleases && h('p', {}, h('a', { href: '#', onclick: (e) => (e.preventDefault(), desktop.openReleases()) }, 'Release notes and downloads')),
       S.connected && h('h3', {}, 'This server'),
       S.connected && h('div', { class: 'about-row' }, h('strong', {}, `${S.server.name}: version ${su?.version || 'unknown (older than 1.1)'}`)),
-      serverStatus && h('p', { class: 'muted small' }, serverStatus)
-    );
+      serverStatus && h('p', { class: 'muted small' }, serverStatus),
+      desktop?.logs && logsSection(),
+    ].filter(Boolean));
   };
   draw();
   aboutRefresh = draw;
   S.socket?.on('server:update', draw);
   return () => ((aboutRefresh = null), S.socket?.off('server:update', draw));
+}
+
+// Settings → About & updates → Logs and crash reports (issue #51). Log text is untrusted (it can quote
+// servers and web pages), so it only ever goes in through textContent.
+function logsSection() {
+  const logs = desktop.logs;
+  const status = h('p', { class: 'muted small' }, '…');
+  const when = (ts) => new Date(ts).toLocaleString();
+  const draw = async () => {
+    const s = await logs.summary().catch(() => null);
+    if (!s) return status.replaceChildren('Logs are not available.');
+    const crash = s.crashes[0];
+    status.textContent =
+      (s.errors ? `${s.errors} error${s.errors === 1 ? '' : 's'} in the last 7 days.` : 'No errors in the last 7 days.') +
+      (crash ? ` Last crash: ${when(crash.ts)}.` : '') +
+      ` (${fmtBytes(s.bytes)} on disk)`;
+  };
+  const run = (fn) => async () => {
+    try {
+      await fn();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  logs.seen().catch(() => {}); // looking at it counts
+  draw();
+  return h(
+    'div',
+    { class: 'logs-section' },
+    h('h3', {}, 'Logs and crash reports'),
+    h('p', { class: 'muted small' }, 'Logs record errors and connection events on this computer only, never your messages. Nothing is sent anywhere unless you share a report yourself.'),
+    status,
+    h(
+      'div',
+      { class: 'about-row' },
+      h('button', { class: 'btn small', onclick: () => viewLogs() }, 'View log'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        const r = await logs.save();
+        if (r.error) toast('Could not save the report: ' + r.error, 'error');
+        else if (r.saved) toast('Report saved');
+      }) }, 'Save report…'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        await navigator.clipboard.writeText(await logs.report());
+        toast('Report copied');
+      }) }, 'Copy report'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        const r = await logs.reveal();
+        if (r?.error) toast(r.error, 'error');
+      }) }, 'Open folder'),
+      h('button', { class: 'btn small ghost', onclick: run(async () => {
+        if (!(await confirmModal('Clear logs', 'Delete all logs and crash reports from this computer?', 'Clear'))) return;
+        await logs.clear();
+        toast('Logs cleared');
+        draw();
+      }) }, 'Clear')
+    )
+  );
+}
+
+// The log in a window: crash reports on top, then the lines, newest at the bottom
+function viewLogs() {
+  const logs = desktop.logs;
+  const RANK = { debug: 0, info: 1, warn: 2, error: 3 };
+  let lines = [];
+  let more = false;
+  const level = h('select', { onchange: () => draw() }, h('option', { value: '3' }, 'Errors'), h('option', { value: '2' }, 'Warnings and errors'), h('option', { value: '0' }, 'Everything'));
+  level.value = '2';
+  const find = h('input', { type: 'search', placeholder: 'Filter', oninput: () => draw() });
+  const crashBox = h('div', { class: 'log-crashes' });
+  const box = h('div', { class: 'log-lines' });
+  const olderBtn = h('button', { class: 'btn small ghost', onclick: () => load(true) }, 'Load older');
+  const draw = () => {
+    const min = Number(level.value);
+    const q = find.value.trim().toLowerCase();
+    const shown = lines.filter((l) => RANK[l.level] >= min && (!q || `${l.source} ${l.text} ${l.stack || ''}`.toLowerCase().includes(q)));
+    box.replaceChildren(
+      ...[more && h('div', { class: 'log-more' }, olderBtn)].filter(Boolean),
+      ...shown.map((l) =>
+        h(
+          'div',
+          { class: 'log-line ' + l.level },
+          h('span', { class: 'log-time' }, new Date(l.ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })),
+          h('span', { class: 'log-level' }, l.level),
+          h('span', { class: 'log-source' }, l.source),
+          h('span', { class: 'log-text' }, l.text),
+          l.stack && h('details', {}, h('summary', {}, 'stack'), h('pre', {}, l.stack))
+        )
+      ),
+      ...(shown.length ? [] : [h('p', { class: 'muted small' }, lines.length ? 'Nothing matches.' : 'The log is empty.')])
+    );
+  };
+  const load = async (older) => {
+    const r = await logs.read({ limit: 500, before: older ? lines[0]?.id : undefined }).catch(() => null);
+    if (!r) return;
+    lines = older ? [...r.lines, ...lines] : r.lines;
+    more = r.more;
+    draw();
+    if (!older) box.scrollTop = box.scrollHeight;
+  };
+  logs.summary().then((s) =>
+    crashBox.replaceChildren(
+      ...(s?.crashes.length
+        ? [h('h4', {}, 'Crash reports'), ...s.crashes.map((c) => h('div', { class: 'log-crash' }, h('span', { class: 'log-time' }, new Date(c.ts).toLocaleString()), h('span', { class: 'log-source' }, c.kind), h('span', { class: 'log-text' }, c.message)))]
+        : [])
+    )
+  );
+  load();
+  modal('Log', h('div', { class: 'log-view' }, h('div', { class: 'row' }, level, find), crashBox, box), { wide: true });
 }
 
 const VOICE_QUALITIES = { max: 'Highest (510 kbps)', high: 'High (128 kbps)', standard: 'Standard (64 kbps)', low: 'Low (32 kbps)' };

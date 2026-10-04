@@ -62,12 +62,15 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 | `port` | `PORT` | 3000 | `0` = any free port |
 | `host` | none | all interfaces | |
 | `https` | `HTTPS=1` | off | self-signed cert generated into `dataDir` |
-| `dataDir` | `DATA_DIR` | `./data` | `state.json`, `mail.json`, `admin.json`, `admin-audit.log`, `game.sqlite`, `game-secret`, certs |
+| `dataDir` | `DATA_DIR` | `./data` | `state.json`, `mail.json`, `admin.json`, `admin-audit.log`, `game.sqlite`, `game-secret`, certs, `logs/`, `crashes/` |
 | `serverName` | `SERVER_NAME` | `friendspeak` | name for a *new* server only; after that the name in `state.json` wins (renamed from Settings → Server) |
 | `password` | `PASSWORD` | none | checked in `hello` |
 | `giphyKey` | `GIPHY_API_KEY` | none | server-side GIF search |
 | `dmGuests` | `DM_GUESTS=off` (also `0`/`false`/`no`) | on | `false` = `/dm` refuses guests: only people with the password can signal or leave mail for members (D32) |
 | `maxStorage` | `MAX_STORAGE` | `2GB` | total bytes of uploaded files; accepts a number or `500MB`/`2GB`-style strings (binary units, `parseSize`) |
+| `logs.retentionDays` | `LOG_RETENTION_DAYS` | 14 | days of log history kept in `dataDir/logs`; `0` = memory only (D49) |
+| `logs.maxBytes` | `LOG_MAX_SIZE` | `50MB` | size cap of the log history (`parseSize`); oldest files go first |
+| `crashReports` | none (the CLI sets it) | off | installs the process-wide `uncaughtException` / `unhandledRejection` handlers and the unclean-exit marker (D49) |
 | `game` | `GAME=off` (also `0`/`false`/`no`) | on | `false` = don't serve or start the game at all; clients see it as unavailable, so it can't be switched on in Settings → Server |
 | `gameAssetsDir` | `GAME_ASSETS_DIR` (env, read in game/index.js) | none | extra asset folder to search |
 | none | `GAME_WORLD` | `Blizzard` | world name; path is `/world/<slug>` |
@@ -202,9 +205,25 @@ A web page at `/admin`, served by the server itself, with a JSON API and one eve
 
 **Audit log.** `audit(actor, ip, action, detail)` appends a JSON line to `DATA_DIR/admin-audit.log` and rotates it to `.1` at 5 MB. The IP is the peer address.
 
-**Log buffer.** `logbuffer.js` wraps `console.log/info/warn/error/debug` once at startup (`startServer` option `captureLogs: false` skips it). Output still goes where it did. Each call is also kept as `{ id, ts, level, source, text }` in a ring of the last 2000 lines (text cut at 4096 characters, ANSI codes removed). `id` rises by one per line, `source` is the lowercased leading `[tag]`. It is memory only.
+**Log (D49).** `logbuffer.js` wraps `console.log/info/warn/error/debug` once at startup (`startServer` option `captureLogs: false` skips it). Output still goes where it did. Each call is also kept as `{ id, ts, level, source, text }` (text cut at 4096 characters, ANSI codes removed, `source` the lowercased leading `[tag]`). `id` is `max(last + 1, Date.now() * 1000)`: unique, rising across restarts, and never below `ts * 1000`, which lets a search skip whole files.
 
-**Change hints.** `admin.notify(topic)` tells open event streams that something changed, after a 250 ms delay that merges bursts. `server.js` calls it from `save()` (`state`), `broadcastUsers()` (`users`) and the updater's `onChange` (`update`); `admin.js` itself sends `keys`.
+- **Scrubbing.** Before a line is kept anywhere, `scrub()` replaces the secrets registered with `redact()` (the server password, the GIPHY key, `ADMIN_KEY`, the GitHub and Watchtower tokens; 6+ characters), `fsa_…` admin keys, base64 data URIs, `Bearer` tokens and `password=`/`token=`/`key=`-style values with `[redacted]`. The process's real stdout is not rewritten.
+- **Memory.** A ring of the last 2000 lines feeds the event stream and its replay.
+- **Disk.** Every line except `debug` is appended as a JSON line to `DATA_DIR/logs/server-YYYY-MM-DD-NN.log` (UTC day, mode 0600; a new part `NN` past 5 MB). Writes are queued and flushed once a second; `flushSync()` runs on exit, on `close()` and in a crash. Files older than `LOG_RETENTION_DAYS` are deleted, then the oldest while the total is over `LOG_MAX_SIZE` (at start, hourly and when a file is started). `query()` reads the files newest first and stops when it has enough; with `LOG_RETENTION_DAYS=0` it answers from the ring.
+- **What is logged.** `[auth]` refused sign-ins (wrong password with the peer address, bans, key pinning) and first joins; `[server]` start, shutdown, connects and disconnects, settings changes, failed saves; `[mod]` bans, removals, roles, permissions, channels, voice kicks, force mutes, other people's messages deleted; `[files]` refused and failed uploads, other people's files deleted; `[socket]` and `[http]` handler errors; `[crash]`; and `[admin]`, `[game]`, `[update]` as before. People appear as `Name (first 8 of the id)`. `[voice]` joins and leaves and the `GAME_DEBUG` packet dump are `debug`: live only.
+
+**Crash reports (D49).** `crashlog.js` writes one JSON file per event to `DATA_DIR/crashes/<id>.json` (id `YYYYMMDD-HHMMSS-xxxx`, mode 0600, the newest 100 kept), synchronously: `{ id, ts, kind, fatal, message, stack, version, node, platform, arch, uptime, memory: { rss, heapUsed }, online, docker, lines }`, where `lines` is the last 200 log lines. With `crashReports` on (the CLI):
+
+| `kind` | When | Then |
+|---|---|---|
+| `uncaughtException` | an error nothing caught | report, save `state.json` and pending mail, flush the log, exit 1 |
+| `unhandledRejection` | a promise nobody handled | report (one per `name: message` a minute), keep running |
+| `startup` | `startServer` failed (port in use, …) | report, exit 1 |
+| `unclean-exit` | at boot, `logs/.running` (`{ pid, startedAt, version }`) is still there and that process isn't alive | report with the previous run's last stored lines, `startedAt` and `previousVersion`; `uptime`, `memory` and `online` are null |
+
+`close()` and a reported crash remove the marker, so only a kill, an out-of-memory kill or a power loss leaves it.
+
+**Change hints.** `admin.notify(topic)` tells open event streams that something changed, after a 250 ms delay that merges bursts. `server.js` calls it from `save()` (`state`), `broadcastUsers()` (`users`) and the updater's `onChange` (`update`); `admin.js` itself sends `keys`, and `crashes` when a report is written or deleted.
 
 **Routes** (all JSON; errors are `{ error }`; `401 { error, login: true }` means no session):
 
@@ -215,8 +234,13 @@ A web page at `/admin`, served by the server itself, with a JSON API and one eve
 | `GET /admin/api/session` | none | `{ authed, local, actor, tls, canLogin, fingerprint, name, version }`. `actor` is the key's name, `"local"` or null. `fingerprint` is the server certificate's, or null when the server isn't serving HTTPS |
 | `POST /admin/api/login` | none | `{ key }` → `{ ok, actor }` and the cookie. 401 wrong key, 429 locked out, 400 when `canLogin` is false |
 | `POST /admin/api/logout` | session | `{ ok }`; clears the cookie, the session and its event streams |
-| `GET /admin/api/overview` | session | `{ name, icon, version, startedAt, uptime, node, platform, memory: { rss, heapUsed }, docker, https, fingerprint, password, adminLocal, counts: { online, profiles, bans, channels }, storage: { used, max }, game, update }`. `game` is the `game` object clients get, `update` is `updater.status()` |
-| `GET /admin/api/logs?before=<id>&limit=<n>` | session | `{ lines: [{ id, ts, level, source, text }], more }`, oldest first. `limit` defaults to 500 (max 2000). Without `before` it returns the newest lines, with it the lines just older than that id. `level` is `debug`, `info`, `warn` or `error` |
+| `GET /admin/api/overview` | session | `{ name, icon, version, startedAt, uptime, node, platform, memory: { rss, heapUsed }, docker, https, fingerprint, password, adminLocal, counts: { online, profiles, bans, channels }, storage: { used, max }, game, update, crashes: { count, last }, logs }`. `logs` is the `logs/info` reply. `game` is the `game` object clients get, `update` is `updater.status()` |
+| `GET /admin/api/logs?before=<id>&limit=<n>&q=&level=&source=&from=<ms>&to=<ms>` | session | `{ lines: [{ id, ts, level, source, text }], more }`, oldest first, from the stored history: the newest `limit` (default 500, max 2000) matching lines, or with `before` those just older than that id. `q`: case-insensitive text; `level`: comma list of `debug`, `info`, `warn`, `error` (history has no `debug`); `source`: a tag, or `-` for lines without one; `from`/`to` inclusive. `more`: older matches exist |
+| `GET /admin/api/logs/info` | session | `{ persisted, bytes, files, oldest, retentionDays, maxBytes }`; `oldest` is the first stored line's time or null |
+| `GET /admin/api/logs/export?<the same filters>&limit=<n>` | session | a `text/plain` attachment `friendspeak-log-<time>.txt`: a header, then `<ISO time> <LEVEL> <text>` per line. `limit` defaults to 20000 (max 100000) |
+| `GET /admin/api/crashes` | session | `{ crashes: [{ id, ts, kind, fatal, message, version }] }`, newest first |
+| `GET /admin/api/crashes/:id` | session | the report (above). 404 `No such crash report`, also for a malformed id |
+| `DELETE /admin/api/crashes/:id`, `DELETE /admin/api/crashes` | session | `{ ok }` / `{ ok, removed }`; audited as `crash.delete` / `crash.clear` |
 | `GET /admin/api/events` | session | Server-Sent Events, below |
 | `GET /admin/api/keys` | session | `{ keys: [{ id, name, created, lastUsed, env, bootstrap, active, current }] }`. `current` is the key this session signed in with |
 | `POST /admin/api/keys` | session | `{ name }` (1 to 40 characters) → `{ ok, key, secret }`. The secret is returned this once |
@@ -239,12 +263,12 @@ A web page at `/admin`, served by the server itself, with a JSON API and one eve
 | `POST /admin/api/update/check` | session | `{ ok, update: status }` after a check now. 400 `Update checks are off (AUTO_UPDATE)` |
 | `POST /admin/api/update/now` | session | `{ ok, update: status }`. Installs in 2 minutes (`installSoon`). 400 with the updater's message: `No newer version is known`, `This server can’t install updates itself (…)`, `Watchtower isn’t answering at <url>` or `An update is already being installed` |
 | `POST /admin/api/update/cancel` | session | `{ ok, update: status }`. 400 `Nothing to cancel` |
-| `GET /admin/api/storage` | session | `{ used, max, count, largest, channels, data }`. `largest`: the 20 biggest attached files `{ id, name, size, type, channelId, channelName, byName, ts }`. `channels`: bytes and file count per text channel, biggest first (files of a deleted channel under `(deleted channel)`). `data`: sizes of `state.json`, `mail.json`, `game.sqlite` and `admin-audit.log` (0 if missing) |
+| `GET /admin/api/storage` | session | `{ used, max, count, largest, channels, data }`. `largest`: the 20 biggest attached files `{ id, name, size, type, channelId, channelName, byName, ts }`. `channels`: bytes and file count per text channel, biggest first (files of a deleted channel under `(deleted channel)`). `data`: sizes of `state.json`, `mail.json`, `game.sqlite`, `admin-audit.log`, `logs/` and `crashes/` (0 if missing) |
 | `GET /admin/api/channels` | session | `{ channels }` in server order. Text: `{ id, name, type, messages, lastMessage, files }`. Voice: `{ id, name, type, occupants: [{ sid, id, name, color, avatar, muted, deafened, sharing, camera }] }`. Read-only |
 | `GET /admin/api/game` | session | `{ available, enabled, reason, world, players, maxUsers, off }`. `players` is the number in the game world, null when it isn't running. `off` is `GAME=off` |
 | `GET /admin/api/server` | session | `{ name, icon, game: { available, enabled, reason, world } }` |
 | `PATCH /admin/api/server` | session | any of `{ name, icon, game, audioQuality }`, as the app's `server:update` (`icon`: ≤512 KB data image, https link or `""`; `game`: boolean; `audioQuality`: `low`, `standard`, `high` or `max`) → `{ ok }`. 400 `Nothing to change` or the action's error. Goes through `actions.updateServer` |
-| `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke`, `user.remove`, `ban.add`, `ban.remove`, `role.create`, `role.update`, `role.delete`, `role.assign`, `update.check`, `update.now`, `update.cancel`, `update.settings`, `server.update`. `detail` has names, not ids, with control characters replaced by spaces |
+| `GET /admin/api/audit?before=<ts>&limit=<n>` | session | `{ entries: [{ ts, actor, ip, action, detail }], more }`, newest first. `limit` defaults to 200 (max 1000). Actions: `login`, `login.failed`, `logout`, `key.create`, `key.revoke`, `user.remove`, `ban.add`, `ban.remove`, `role.create`, `role.update`, `role.delete`, `role.assign`, `update.check`, `update.now`, `update.cancel`, `update.settings`, `server.update`, `crash.delete`, `crash.clear`. `detail` has names, not ids, with control characters replaced by spaces |
 
 The user, ban and role routes call the same `actions` object in `server.js` as the chat sockets (`ban:add`, `member:remove`, `ban:remove`, `server:update`), with the actor `{ dashboard: true }`, which skips every permission check but keeps the other rules, so the broadcasts to the app are identical; `admin.js` only validates the URL, audits and answers. The `change` topics for them are `users` (connected, left, voice) and `state` (profiles, bans, roles). Timestamps are milliseconds since the epoch. "session" means a valid session or a local request (then the actor is `"local"`).
 
@@ -253,11 +277,11 @@ The user, ban and role routes call the same `actions` object in `server.js` as t
 | `event:` | `data:` | Meaning |
 |---|---|---|
 | `log` | one line, as in `logs` | a new log line |
-| `change` | `{ topic }` | something changed; refetch if the visible view shows it. Topics: `users`, `state`, `update`, `keys` |
+| `change` | `{ topic }` | something changed; refetch if the visible view shows it. Topics: `users`, `state`, `update`, `keys`, `crashes` |
 | `ping` | `{}` | every 25 s |
 | `bye` | `{ reason }` | the session ended (`expired`) or the server is closing; the stream then closes and the dashboard shows the sign-in page |
 
-**The UI** (`admin-ui/`): `index.html`, `admin.css` and plain ES modules. `js/admin.js` loads the session, shows the sign-in page (with the certificate fingerprint) or the app, keeps one event stream and routes by URL hash. `js/api.js` wraps `fetch` and the event stream, and `js/ui.js` has shared bits (`load`, `copyText`, the dialogs `showDialog` and `confirmDialog`, the role label `roleTag` and ID chip `idChip`, and the bars `meter` and `usageBar`). The nav is grouped in `js/admin.js` into **Server** (overview, users, roles, channels, storage, game, updates, settings) and **Admin** (log, keys, audit). Each view is one module in `js/views/` (`overview`, `users`, `roles`, `channels`, `storage`, `game`, `updates`, `settings`, `log`, `keys`, `audit`) exporting `{ id, title, mount(root, ctx) }`, registered in the `views` array in `js/admin.js`. `util.js` is not copied: `/admin/js/util.js` is `public/js/util.js`.
+**The UI** (`admin-ui/`): `index.html`, `admin.css` and plain ES modules. `js/admin.js` loads the session, shows the sign-in page (with the certificate fingerprint) or the app, keeps one event stream and routes by URL hash. `js/api.js` wraps `fetch` and the event stream, and `js/ui.js` has shared bits (`load`, `copyText`, the dialogs `showDialog` and `confirmDialog`, the role label `roleTag` and ID chip `idChip`, and the bars `meter` and `usageBar`). The nav is grouped in `js/admin.js` into **Server** (overview, users, roles, channels, storage, game, updates, settings) and **Admin** (log, crashes, keys, audit). Each view is one module in `js/views/` (`overview`, `users`, `roles`, `channels`, `storage`, `game`, `updates`, `settings`, `log`, `crashes`, `keys`, `audit`) exporting `{ id, title, mount(root, ctx) }`, registered in the `views` array in `js/admin.js`. `util.js` is not copied: `/admin/js/util.js` is `public/js/util.js`.
 
 ### DM signaling and mailboxes (Socket.IO namespace `/dm`, D28, D32)
 
@@ -400,12 +424,18 @@ flowchart LR
   - `screenSources` / `pickScreenSource` (screen sharing)
   - `media.caps` / `media.send` / `media.on` (the native media sidecar, D45)
   - `prefs` (hardware acceleration, D46)
+  - `logs.write` / `read` / `summary` / `seen` / `report` / `save` / `reveal` / `clear` (the app's log and crash reports, D49)
   - `updateState` / `onUpdate` / `checkForUpdates` / `downloadUpdate` / `installUpdate` / `openReleases` (app updates)
 
   The client still guards bridge calls with `desktop?.`, but it only runs in the app now (D26).
 - **Screen sharing:** Electron has no `getDisplayMedia` picker. `screenSources()` lists screens and windows (`desktopCapturer`, with thumbnails and the macOS Screen Recording permission status), and the UI shows its own picker. `pickScreenSource({ id, audio })` arms a one-shot choice that the next `setDisplayMediaRequestHandler` call consumes (it expires after 30 s, and a request without a pick is denied). System audio uses `audio: 'loopback'`: Windows supports it natively, and on macOS it is enabled with the `MacLoopbackAudioForScreenShare` feature flags. If audio capture fails, the client retries with video only. On Windows the app enables Chromium's `WebRtcAllowWgcUsingTexture` and `ZeroCopyDesktopCapture` features so captured frames stay on the GPU (D36); `FRIENDSPEAK_LEGACY_CAPTURE=1` turns them off.
 - **Media sidecar (D45):** `startMedia()` spawns `friendspeak-media` on first use (`resources/native/` in an installed app, `native/target/release/` from source, or `FRIENDSPEAK_MEDIA_BIN`; `FRIENDSPEAK_MEDIA=off` disables it), relays its events to the page (`desktop:media`) and the page's commands to it (`desktop:media-send`, checked against a list of operations). For `start` it adds what only the main process knows: the display's position and size, the app's process id (whose sound stays out of share audio) and `hw` from the hardware acceleration setting. An unexpected exit is reported as `{ ev: 'exit' }`; after three, it stays off until the app restarts. `FRIENDSPEAK_FAKE_CAPTURE=1` makes every native source a test pattern (and a tone), for automated runs.
 - **Hardware acceleration (D46):** `userData/desktop-prefs.json` holds `{ hardwareAcceleration }` (default true). Off, `app.disableHardwareAcceleration()` runs before the app is ready. `desktop:prefs` reads and writes it and returns `atStart` and `app.getGPUFeatureStatus()`.
+- **Logs and crash reports (D49):** `desktop/logs.js`, created before the app is ready. Nothing is uploaded.
+  - **Log:** JSON lines `{ ts, level, source, text, stack? }` in `userData/logs/app-YYYY-MM-DD.log`, 14 days and 10 MB at most. Sources: `main` (the main process's `console.*`, failed page loads, unresponsive windows), `ui` (from the page over `desktop:log`: `public/js/log.js` reports uncaught errors and unhandled rejections with stacks, `console.warn`/`error`, and the explicit `log.info/warn/error` events: connects and disconnects by host, refused `hello`, voice, share and camera failures), `console` (warnings and errors from other web contents: the game iframe and pop-out; for the app's own page only what the engine says itself, such as failed loads and CSP), `media` (the sidecar's stderr) and `update`. Lines from the page are limited to 300 per 10 s.
+  - **Scrubbing:** `fsa_…` keys, data URIs, `Bearer` tokens, `password=`-style values and the home folder (`~`).
+  - **Crash reports:** `userData/crashes/<id>.json`, 50 kept: `{ id, ts, kind, message, stack, reason?, exitCode?, version, electron, chrome, node, platform, arch, osVersion, lines }`. `kind`: `main` (uncaught exception: an error box once per run, the app keeps running), `main-rejection`, `renderer-gone` (the window's page died: a dialog offers Reload, or only Quit after three in a minute), `child-gone` (GPU or utility process). `crashes/seen.txt` holds when the user last looked; newer reports show a banner at the next start.
+  - **IPC** (answered only for the main frame at `friendspeak://app/`): `read({ limit, before })` → `{ lines, more }` with `before` a line's `id` (`<file>:<index>`); `summary()` → `{ errors, crashes, unseen, bytes, dir }`; `report()` → the text handed over (versions, crash reports, the last 2000 lines); `save()` asks where to write it.
 - **Global hotkeys:** soundboard combos with a modifier, an F-key or the numpad are registered with `globalShortcut`, and presses are forwarded to the renderer. There's no key-up event, so push-to-talk stays window-local.
 - **Other behaviour:** single-instance lock, `FRIENDSPEAK_USER_DATA` overrides the data folder, the autoplay policy is relaxed so global hotkeys can play sounds in the background, links open in the system browser, and `/game/` pop-outs open as child windows.
 - **Updates (D29):** `electron-updater` reads the `latest*.yml` files on the GitHub Release. It checks 10 s after launch and every 4 h, and never downloads without being asked. The renderer shows a banner and Settings → About & updates. The Windows installer and the Linux AppImage download and install in-app (or on quit). Unsigned macOS builds and the Windows portable exe can't self-update, so **Download** opens the release page. From source, updates are checked only with `FRIENDSPEAK_UPDATE_DEV=1`. While the repo is private, set `GH_TOKEN` to test; installed apps simply see no releases.

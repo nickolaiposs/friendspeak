@@ -77,6 +77,10 @@ The game art is never included in these files (see [Game assets](#game-assets-ho
 - **Updates:** the app checks [GitHub Releases](https://github.com/nickolaiposs/friendspeak/releases) at launch and every few hours, and shows a banner with a **What's new** link (also in **Settings → About & updates**). On Windows (installer) and Linux (AppImage), **Update** downloads it and **Restart now** installs it. macOS builds aren't signed with an Apple Developer ID, so they can't replace themselves: **Download** opens the release page. Neither can the Windows portable exe.
 - Profiles, sounds and trusted certificates are stored in the app's data folder. To run two copies side by side, e.g. for testing, set `FRIENDSPEAK_USER_DATA=/some/folder`.
 
+### Logs and crash reports
+
+The app keeps a log of errors and connection events, and a report for each crash, on your computer only. Nothing is sent anywhere. **Settings → About & updates → Logs and crash reports** shows them and can save or copy a report to send to whoever is helping you. The log never holds your messages, and passwords, keys and your home folder's name are removed from it. It is kept for 14 days.
+
 ## Virtual penguin world
 
 The game is built into every friendspeak server. Click the 🐧 game under *Games* in the channel list.
@@ -121,6 +125,8 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `PASSWORD`      | none          | Require a password to join                                     |
 | `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key                |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
+| `LOG_RETENTION_DAYS` | `14`     | How many days of the server's log are kept on disk (`data/logs/`) for the admin dashboard. `0` = keep the log in memory only |
+| `LOG_MAX_SIZE`  | `50MB`        | Most disk space the log history may use; the oldest days are deleted first |
 | `DM_GUESTS`     | on            | `off` = only people with the password can use this server to reach its members by direct message. By default a friend of a member (someone holding their friend code) can pass encrypted DMs through it without the password; they see nothing else |
 | `HTTPS`         | off           | `1` = serve over HTTPS with an auto-generated self-signed cert |
 | `DATA_DIR`      | `./data`      | Where channels, history, emojis, certs and the game database are stored |
@@ -152,7 +158,8 @@ The server hosts a small web dashboard at `/admin`, on the same port. It is for 
 - **Penguin game:** whether the game is available and on, the world, and how many players are in it.
 - **Updates:** the current and latest version, when the server last checked, whether the Watchtower sidecar answers, **Check now** and **Update now**, and settings for the update mode and the maintenance window (see [Automatic updates](#automatic-updates)).
 - **Server settings:** the server's name, icon and the game switch, like **Server settings** in the app.
-- **Server log:** a live tail of the server's own output (the same text `docker logs` shows), with a scrollback of the last 2000 lines, filters by level and source (`[game]`, `[update]`) and search. The log starts empty after a restart.
+- **Server log:** a live tail of the server's own output, and its history: the log is kept on disk for `LOG_RETENTION_DAYS` (14 by default), so it survives restarts. Filter by level and source (`[auth]`, `[mod]`, `[game]`, `[update]`), search the whole history, jump to a date range, and export what you see as a text file. The log records who did what (connections, refused sign-ins, moderation, failed uploads, errors), never message text, and secrets such as the server password and admin keys are removed before a line is stored.
+- **Crash reports:** one report each time the server crashes, fails to start, or stops without shutting down (killed, out of memory, power loss), with the error, the version and the last log lines before it. Copy or download a report to send with a bug report.
 - **Admin keys:** create a named key for each admin and revoke it.
 - **Audit log:** who signed in, failed sign-ins, and key changes, with time and IP.
 
@@ -274,7 +281,8 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 server.js           Express + Socket.IO server: channels, history, emojis, voice signaling
 updater.js          Release check and maintenance-window updates
 admin.js            Admin dashboard: access, sessions, JSON API and event stream
-logbuffer.js        Keeps the last console lines in memory for the dashboard
+logbuffer.js        The server's log: in memory for the live view, on disk (data/logs) for history, secrets removed
+crashlog.js         Crash reports (data/crashes)
 admin-ui/           The admin dashboard's pages (plain ES modules, served at /admin)
 public/index.html   App shell
 public/css/         Styles
@@ -291,6 +299,8 @@ public/js/gogh.js   The 50 bundled color schemes
 public/js/util.js   Helpers: markdown, avatars, formatting
 desktop/main.js     Electron main process: secure app origin, certificate pinning, global hotkeys
 desktop/preload.js  window.friendspeakDesktop bridge
+desktop/logs.js     The app's own log and crash reports, kept on this computer
+public/js/log.js    Sends the page's errors and a few events to that log
 game/index.js       Serves the game, starts the Yukon worlds, creates penguins for profiles
 game/client/        Vendored Yukon client (wizguin/yukon @ 2f47b90, MIT) + friendspeak patches
 game/server/        Vendored Yukon server (wizguin/yukon-server @ fead5f7, MIT) + friendspeak patches
