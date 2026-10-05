@@ -40,6 +40,10 @@ const S = {
   get sid() {
     return this.conn?.sid || null;
   },
+  // The secret that goes with our uploads; null on a server from before it had one
+  get uploadKey() {
+    return this.conn?.uploadKey || null;
+  },
   get connected() {
     return !!this.conn?.connected;
   },
@@ -1474,6 +1478,7 @@ function openSocket(entry, rejoinVoice = null) {
       invite: entry.password || '',
       password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
+      uploadKey: true,
     });
     if (res.error) {
       log.warn(`${host} refused hello: ${res.error}`);
@@ -1492,7 +1497,7 @@ function openSocket(entry, rejoinVoice = null) {
       DM.setServers(servers.all());
     }
     DM.retry(entry.address); // its DM socket was refused if it got there before we had joined
-    Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
+    Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
     rememberServerLook(c);
@@ -3310,12 +3315,14 @@ function renderAttachTray() {
   );
 }
 
-// Raw-body POST with progress. The socket id proves we passed `hello` (and the password).
+// Raw-body POST with progress. The socket id says who we are, and the upload key from `hello` proves it.
+// (The key's header only goes to a server that gave us one: an older server's CORS doesn't allow it.)
 function uploadFile(a, channelId) {
   return new Promise((resolve, reject) => {
     const xhr = (a.xhr = new XMLHttpRequest());
     xhr.open('POST', `${S.entry.address}/api/files?channelId=${encodeURIComponent(channelId)}`);
     xhr.setRequestHeader('x-friendspeak-sid', S.sid);
+    if (S.uploadKey) xhr.setRequestHeader('x-friendspeak-upload', S.uploadKey);
     xhr.setRequestHeader('x-file-name', encodeURIComponent(a.file.name));
     xhr.setRequestHeader('content-type', a.file.type || 'application/octet-stream');
     xhr.upload.onprogress = (e) => {

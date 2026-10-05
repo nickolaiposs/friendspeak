@@ -154,6 +154,14 @@ async function startServer(opts = {}) {
   const MAILBOX_IDLE = 90 * 864e5; // an empty mailbox whose owner never came back
 
   fs.mkdirSync(FILES_DIR, { recursive: true });
+  // What holds messages, invites, keys and addresses is for the server's own user only. Files
+  // from before this were made with the default mode: tighten them (best effort: some volumes can't).
+  const ownerOnly = (file) => {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {}
+  };
+  for (const name of ['state.json', 'mail.json', 'key.pem', 'game.sqlite', 'game-secret']) ownerOnly(path.join(DATA_DIR, name));
 
   // Self-update from GitHub Releases (updater.js, D29). Clients learn about a
   // scheduled update from `server:update` and show a maintenance warning.
@@ -362,7 +370,7 @@ async function startServer(opts = {}) {
   function writeState() {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const tmp = STATE_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
     fs.renameSync(tmp, STATE_FILE);
   }
   function save() {
@@ -496,7 +504,8 @@ async function startServer(opts = {}) {
   const touchable = (actor, targetPid) => isDash(actor) || !isAdminPid(targetPid) || isAdminPid(actor.profileId);
   const ADMIN_TARGET = { error: 'Only an administrator can do that to an administrator' };
 
-  function cleanProfile(p = {}) {
+  function cleanProfile(p) {
+    if (!isObj(p)) p = {};
     const pid = str(p.id, 64) || id();
     return {
       id: pid,
@@ -698,17 +707,23 @@ async function startServer(opts = {}) {
   const cors = (res) =>
     res.set({
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'content-type, x-friendspeak-sid, x-file-name',
+      'Access-Control-Allow-Headers': 'content-type, x-friendspeak-sid, x-friendspeak-upload, x-file-name',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     });
   app.options('/api/files', (_req, res) => cors(res).sendStatus(204));
 
   // Upload one file: raw body, name in x-file-name (URI-encoded), uploader
-  // identified by x-friendspeak-sid (a socket that passed `hello`).
+  // identified by x-friendspeak-sid (a socket that passed `hello`) and, when
+  // that socket asked for one, the upload key from its hello in x-friendspeak-upload.
   app.post('/api/files', (req, res) => {
     cors(res);
     const u = users.get(String(req.get('x-friendspeak-sid') || ''));
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
+    if (u.uploadKey) {
+      const given = Buffer.from(String(req.get('x-friendspeak-upload') || ''));
+      const want = Buffer.from(u.uploadKey);
+      if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return res.status(401).json({ error: 'Not connected to this server' });
+    }
     const ch = channel(String(req.query.channelId || ''));
     if (!ch || ch.type !== 'text') {
       console.warn(`[files] upload by ${whoIs(u.profile)} refused: no such text channel`);
@@ -811,9 +826,10 @@ async function startServer(opts = {}) {
         notBeforeDate: now,
         notAfterDate: new Date(now.getTime() + 10 * 365 * 864e5),
       });
-      fs.writeFileSync(keyFile, pems.private);
+      fs.writeFileSync(keyFile, pems.private, { mode: 0o600 });
       fs.writeFileSync(certFile, pems.cert);
     }
+    ownerOnly(keyFile);
     const cert = fs.readFileSync(certFile);
     fingerprint = new crypto.X509Certificate(cert).fingerprint256;
     return https.createServer({ key: fs.readFileSync(keyFile), cert }, app);
@@ -836,7 +852,7 @@ async function startServer(opts = {}) {
     clearTimeout(mailTimer);
     mailTimer = null;
     const tmp = MAIL_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(mail)));
+    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(mail)), { mode: 0o600 });
     fs.renameSync(tmp, MAIL_FILE);
   }
   const saveMail = () =>
@@ -946,6 +962,50 @@ async function startServer(opts = {}) {
       maxHttpBufferSize: 4e6, // hello/profile:update carry the avatar and background images
       destroyUpgrade: false, // the game worlds share this http server on other paths
     });
+
+    // Every socket, on both namespaces, before its handlers are added:
+    //  - a handler that throws (a payload that isn't the object it expects) is logged and
+    //    dropped. Uncaught, it would take the whole server down.
+    //  - events are rate limited per socket: a budget that refills over time, with the heavy
+    //    events costing more. What goes over is dropped, and answered if it wanted an answer.
+    const EVENT_BUDGET = 400;
+    const EVENT_REFILL = 40; // per second
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20 };
+    let lastHandlerError = 0;
+    function guard(socket, next) {
+      const add = socket.on.bind(socket);
+      socket.on = (event, fn) => {
+        const safe = (...args) => {
+          try {
+            return fn(...args);
+          } catch (err) {
+            // Not the payload, and not more than once a second: anyone can send these
+            if (Date.now() - lastHandlerError > 1000) console.error(`[socket] ${String(event).slice(0, 32)} from ${clientIp(socket)} failed: ${err && err.message}`);
+            lastHandlerError = Date.now();
+          }
+        };
+        safe.listener = fn; // so off(event, fn) still finds it
+        return add(event, safe);
+      };
+      let budget = EVENT_BUDGET;
+      let at = Date.now();
+      socket.use((packet, proceed) => {
+        const now = Date.now();
+        budget = Math.min(EVENT_BUDGET, budget + ((now - at) / 1000) * EVENT_REFILL);
+        at = now;
+        const cost = (Object.hasOwn(EVENT_COST, packet[0]) && EVENT_COST[packet[0]]) || 1;
+        if (budget < cost) {
+          const ack = packet[packet.length - 1];
+          if (typeof ack === 'function') ack({ error: 'Too many requests, slow down' });
+          return; // dropped
+        }
+        budget -= cost;
+        proceed();
+      });
+      next();
+    }
+    io.use(guard);
+    io.of('/dm').use(guard);
 
     const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: state.permissionsOn });
     // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
@@ -1533,15 +1593,17 @@ async function startServer(opts = {}) {
         socket.on(event, (payload, ack) => {
           if (!authed()) return typeof ack === 'function' && ack({ error: 'not authenticated' });
           try {
-            fn(payload || {}, typeof ack === 'function' ? ack : () => {});
+            fn(isObj(payload) ? payload : {}, typeof ack === 'function' ? ack : () => {});
           } catch (err) {
             console.error(`[socket] ${event}:`, err);
           }
         });
 
       // `invite`: the token of someone joining. Apps from before invites send what was typed as `password`.
-      socket.on('hello', ({ profile, invite, password, proof } = {}, ack) => {
+      // `uploadKey: true`: the app wants a key for its uploads (below). Apps from before that send none.
+      socket.on('hello', (payload, ack) => {
         if (typeof ack !== 'function') return;
+        const { profile, invite, password, proof, uploadKey: wantsKey } = isObj(payload) ? payload : {};
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) {
           console.warn(`[auth] banned ${whoIs(p)} refused`);
@@ -1595,12 +1657,15 @@ async function startServer(opts = {}) {
           console.log(`[auth] ${whoIs(p)} joined with invite ${joinedWith.id.slice(0, 8)}`);
         } else if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
         socket.data.profileId = p.id;
-        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
+        // The socket id says who uploads, but every member is sent everyone's socket id. An app that asks
+        // gets a secret to send along; without it, its uploads would be anyone's to make in its name.
+        const uploadKey = wantsKey === true ? crypto.randomBytes(16).toString('hex') : null;
+        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey });
         state.profiles[p.id] = storedProfile(p);
         save();
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
-        ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g });
+        ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g, uploadKey: uploadKey || undefined });
         socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
         broadcastUsers();
         if (joinedWith) invitesChanged();
@@ -2203,7 +2268,8 @@ if (require.main === module) {
     crashReports: true,
     dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
-    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
+    // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
+    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
       repo: env.UPDATE_REPO || 'nickolaiposs/friendspeak',

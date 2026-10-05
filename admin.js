@@ -221,7 +221,10 @@ function createAdmin(ctx) {
 
   // ---------- request classification ----------
 
-  const hasProxyHeaders = (req) => ['x-forwarded-for', 'forwarded', 'x-real-ip'].some((h) => req.headers[h] !== undefined);
+  // What a reverse proxy adds, or how it speaks: a browser on this machine sends none of these
+  // and speaks HTTP/1.1 (nginx speaks 1.0 to what it proxies unless told otherwise).
+  const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-server', 'forwarded', 'x-real-ip', 'via', 'x-original-forwarded-for', 'x-client-ip', 'true-client-ip', 'cf-connecting-ip', 'cf-ray', 'fly-client-ip', 'x-envoy-external-address'];
+  const hasProxyHeaders = (req) => req.httpVersion === '1.0' || PROXY_HEADERS.some((h) => req.headers[h] !== undefined);
   const hostIsLocal = (req) => ['localhost', '127.0.0.1', '[::1]'].includes(hostnameOf(req.headers.host));
   const isTls = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
   function classify(req) {
