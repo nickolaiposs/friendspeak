@@ -311,8 +311,12 @@ function ratio(cur, prev, num, den, scale = 1) {
 }
 
 export class VoiceClient {
-  constructor(socket, { onPeersChange, onMediaChange } = {}) {
+  // isPeer(sid): whether the server lists that socket in our voice channel. A call is only taken from
+  // someone it does: the server passes signals on, and without this a socket nobody can see in the
+  // channel could offer us a connection and be sent our voice.
+  constructor(socket, { onPeersChange, onMediaChange, isPeer } = {}) {
     this.socket = socket;
+    this.isPeer = isPeer || (() => true);
     this.channelId = null;
     // sid -> { pc, audioEl, analyser, setGain, dispose, chain, state, polite,
     //          out: { kind -> transceivers sending our media to them },
@@ -481,11 +485,11 @@ export class VoiceClient {
     this.onPeersChange();
   }
 
-  handleSignal({ from, data }) {
-    if (!this.channelId) return;
+  handleSignal({ from, data } = {}) {
+    if (!this.channelId || !data || typeof data !== 'object') return;
     let peer = this.peers.get(from);
     if (!peer) {
-      if (data.sdp?.type !== 'offer') return;
+      if (data.sdp?.type !== 'offer' || !this.isPeer(from)) return;
       peer = this.createPeer(from);
       audio.cue('peerJoin');
       this.onPeersChange();
