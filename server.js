@@ -395,9 +395,16 @@ async function startServer(opts = {}) {
   const channel = (cid) => state.channels.find((c) => c.id === cid);
   const isDataImage = (v, max) =>
     typeof v === 'string' && /^data:image\/(png|jpe?g|gif|webp);base64,/.test(v) && v.length <= max * 1.4;
-  // An uploaded image (data URL) or a linked one (https only, e.g. a GIPHY GIF)
-  const isImageRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
+  // A GIF on GIPHY, where the app's picker gets them. Not any https address: its host would learn the
+  // address of everyone the image is shown to. isImage() in public/js/util.js has the same rule.
+  const isGiphy = (v) => typeof v === 'string' && v.length <= 1000 && /^https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$/.test(v);
+  // An uploaded image (data URL) or a GIF picked from GIPHY: what a member's profile may point at
+  const isImageRef = (v, max) => isDataImage(v, max) || isGiphy(v);
+  // The server's own icon may be any https image: the host chooses it (Settings → Server, the dashboard)
+  const isIconRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
+  // A message's text: no NUL (the app's renderer uses it as a marker), trimmed, capped
+  const cleanText = (v) => str(v, MAX_MESSAGE_LEN).replace(/\u0000/g, '').trim();
   const isKey = (v, len) => typeof v === 'string' && v.length === len && /^[A-Za-z0-9_-]+$/.test(v);
   // A profile's public keys for direct messages (D32). The server only passes
   // the card on; clients check its signature and pin it themselves.
@@ -513,7 +520,7 @@ async function startServer(opts = {}) {
       card: cleanCard(p.card, pid),
       name: str(p.name, 32).trim() || 'anon',
       color: isHexColor(p.color) ? p.color : '#8b6cf6',
-      avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : str(p.avatar, 16), // image or emoji
+      avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : /^(https?:|data:)/i.test(str(p.avatar, 16)) ? '' : str(p.avatar, 16), // image or emoji; an address that isn't allowed is dropped, not cut short
       banner: isImageRef(p.banner, MAX_BANNER_BYTES) || isHexColor(p.banner) ? p.banner : '', // profile background: image or color
       status: str(p.status, 64),
     };
@@ -1326,7 +1333,7 @@ async function startServer(opts = {}) {
           state.name = name;
         }
         if (icon !== undefined) {
-          if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
+          if (icon && !isIconRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
           state.icon = icon || '';
         }
         if (quality !== undefined) {
@@ -1715,11 +1722,8 @@ async function startServer(opts = {}) {
         const list = thread(channelId);
         if (!list) return ack({ error: 'no such channel' });
         if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
-        text = str(text, MAX_MESSAGE_LEN).trim();
-        const g =
-          gif && typeof gif.url === 'string' && /^https:\/\//.test(gif.url)
-            ? { url: gif.url.slice(0, 500), w: +gif.w || 200, h: +gif.h || 200, title: str(gif.title, 200) }
-            : null;
+        text = cleanText(text);
+        const g = gif && isGiphy(gif.url) && gif.url.length <= 500 ? { url: gif.url, w: +gif.w || 200, h: +gif.h || 200, title: str(gif.title, 200) } : null;
         const u = users.get(socket.id);
         // Only your own fresh uploads to this channel can be attached
         const attached = (Array.isArray(files) ? files.slice(0, MAX_FILES_PER_MESSAGE) : [])
@@ -1768,7 +1772,7 @@ async function startServer(opts = {}) {
       on('msg:edit', ({ channelId, messageId, text }, ack) => {
         const m = thread(channelId)?.find((x) => x.id === messageId);
         const u = users.get(socket.id);
-        text = str(text, MAX_MESSAGE_LEN).trim();
+        text = cleanText(text);
         if (!m || m.author !== u.profile.id || !text) return;
         if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
         m.text = text;
