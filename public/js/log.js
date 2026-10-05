@@ -6,6 +6,15 @@
 const sink = window.friendspeakDesktop?.logs;
 const MAX_ARG = 600;
 
+// An error's message, fit for the log: its first line, without network addresses. WebRTC errors quote
+// the line of the other side's session description they tripped on, and those lines carry addresses.
+const errText = (m) =>
+  String(m ?? '')
+    .split('\n')[0]
+    .slice(0, 300)
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '[address]')
+    .replace(/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/gi, '[address]');
+
 function write(level, text, stack) {
   try {
     sink?.write({ level, text: String(text).slice(0, 4096), stack: stack ? String(stack).slice(0, 8000) : undefined });
@@ -15,7 +24,7 @@ function write(level, text, stack) {
 // One console argument as text: errors by name and message, objects as a short JSON, never a big dump
 function fmt(a) {
   try {
-    if (a instanceof Error || (typeof DOMException !== 'undefined' && a instanceof DOMException)) return `${a.name}: ${a.message}`;
+    if (a instanceof Error || (typeof DOMException !== 'undefined' && a instanceof DOMException)) return `${a.name}: ${errText(a.message)}`;
     if (a === null || ['string', 'number', 'boolean', 'undefined', 'bigint'].includes(typeof a)) return String(a);
     if (typeof a === 'function') return `[function ${a.name || ''}]`;
     if (typeof a === 'symbol') return a.toString();
@@ -56,14 +65,14 @@ if (sink && !window.__fsLog) {
         const t = e.target;
         return write('warn', `Failed to load <${t.tagName.toLowerCase()}> from ${origin(t.currentSrc || t.src || t.href || '')}`);
       }
-      write('error', `${e.message || 'Error'} (${where(e.filename, e.lineno, e.colno)})`, e.error?.stack);
+      write('error', `${errText(e.message) || 'Error'} (${where(e.filename, e.lineno, e.colno)})`, e.error?.stack);
     },
     true
   );
 
   window.addEventListener('unhandledrejection', (e) => {
     const r = e.reason;
-    write('error', `Unhandled rejection: ${r instanceof Error || (typeof DOMException !== 'undefined' && r instanceof DOMException) ? `${r.name}: ${r.message}` : fmt(r)}`, r?.stack);
+    write('error', `Unhandled rejection: ${r instanceof Error || (typeof DOMException !== 'undefined' && r instanceof DOMException) ? `${r.name}: ${errText(r.message)}` : fmt(r)}`, r?.stack);
   });
 
   for (const [method, level] of [['warn', 'warn'], ['error', 'error']]) {
@@ -78,5 +87,5 @@ if (sink && !window.__fsLog) {
 export const log = {
   info: (text) => write('info', text),
   warn: (text) => write('warn', text),
-  error: (text, err) => write('error', err ? `${text}: ${err.name || 'Error'}: ${err.message}` : text, err?.stack),
+  error: (text, err) => write('error', err ? `${text}: ${err.name || 'Error'}: ${errText(err.message)}` : text, err?.stack),
 };

@@ -37,7 +37,8 @@ fn main() {
                             return;
                         }
                     }
-                    Err(e) => log!("bad command: {e}: {line}"),
+                    // Not the line itself: it can hold a viewer's session description, addresses included
+                    Err(e) => log!("bad command ({} bytes): {:.200}", line.len(), e.to_string()),
                 }
             }
             // The app is gone (or closed our stdin): nothing left to stream to
