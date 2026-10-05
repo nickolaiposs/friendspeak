@@ -76,7 +76,10 @@ Without a mic, users join **listen-only** instead of failing.
 **Decision:**
 - The UI is served from `friendspeak://app/`, a privileged custom scheme (`standard`, `secure`, fetch/CORS).
 - ~~The main process can run `startServer()` itself.~~ Removed; see D23.
-- The renderer only gets a small preload bridge (`contextIsolation`, `sandbox: true`).
+- The renderer only gets a small preload bridge (`contextIsolation`, `sandbox: true`). Every bridge call is answered only for the app's own page (`friendspeak://app`, the main frame of the app window).
+- The page has a Content-Security-Policy (the `CSP` list in `desktop/main.js`, sent with `index.html`): scripts only from the app itself, plus WebAssembly for noise suppression and camera backgrounds. Messages are drawn from escaped text; this is the second line if something gets past that. Images, media, embeds and connections stay open, because servers and links can be anywhere.
+- Other sites run inside the app (the game from the server, in an iframe or its pop-out window, and link embeds). They get fullscreen and copying to the clipboard. The microphone, camera, screen capture and notifications are for the app's own page only.
+- A new window opens only for the game's pop-out, which the page opens by name (`friendspeak-game`). Any other link, including one to `/game/` on some server, goes to the system browser. The pop-out can't leave the server it was opened for.
 
 **Why a custom scheme:** a secure context means the mic always works. A *fixed* origin means `localStorage`/IndexedDB survive port changes; `http://localhost:<port>` would lose profiles whenever the port changed. And the scheme isn't subject to the https mixed-content rules, so connecting to `http://IP` servers and iframing their `/game/` works (verified against a LAN IP).
 **Consequences:**
