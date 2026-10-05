@@ -683,7 +683,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The log now holds names, id prefixes and, for refused passwords, addresses, for 14 days. It sits behind the same gate as the dashboard, which already shows addresses; the files are mode 0600.
 - A server keeps running after an unhandled rejection, where Node alone would have exited. Its state may be off in whatever that promise was doing; the report says so.
 - Failed saves of `state.json` and the mailboxes are logged (once a minute) and no longer take the process down from a timer.
-- The scrubber only covers what is kept. The process's own stdout (`docker logs`) is unchanged, so the rule above is what protects it.
+- The console (`docker logs`) is scrubbed like what is kept, except for the dashboard's path, which is printed there on purpose (D52). What the server writes to stdout directly (the first-start invite and admin key) is not scrubbed.
 - A short server password (under 6 characters) isn't registered with the scrubber: replacing it everywhere would mangle ordinary text. Nothing logs it.
 - Minidumps of native crashes aren't collected: without symbols they tell the user nothing, and the reason and exit code are in the report.
 - Up to 50 MB more in the data volume, and 10 MB in the app's data folder.
