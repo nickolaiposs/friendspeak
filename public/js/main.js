@@ -3383,7 +3383,9 @@ function embedEl(e) {
       src,
       style,
       loading: 'lazy',
-      allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
+      // An embed is someone else's page: scripts and its own cookies, no top navigation, no clipboard
+      sandbox: 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation',
+      allow: 'autoplay; encrypted-media; fullscreen; picture-in-picture',
       allowfullscreen: true,
       referrerpolicy: 'strict-origin-when-cross-origin',
     });
@@ -5341,8 +5343,10 @@ function popOutGame() {
 // working while it has focus.
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || d.source !== 'friendspeak-game' || e.origin !== S.game.origin) return;
-  if (d.event === 'keydown') handleKeyDown(d, d.typing);
+  // Only the game frame we opened. A key going down counts only while that frame has the keyboard:
+  // the page in it is the server's, and could otherwise hold push-to-talk down for us at any time.
+  if (!d || d.source !== 'friendspeak-game' || e.origin !== S.game.origin || !S.game.frame || e.source !== S.game.frame.contentWindow) return;
+  if (d.event === 'keydown' && document.activeElement === S.game.frame) handleKeyDown(d, d.typing);
   else if (d.event === 'keyup') handleKeyUp(d);
 });
 
