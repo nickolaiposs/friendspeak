@@ -144,7 +144,7 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `MAINTENANCE_WARN` | `24h`      | How long before the window users see the warning (`90m`, `2d`, …) |
 | `GITHUB_TOKEN`  | none          | Lets the server read releases while the GitHub repo is private |
 | `ADMIN_KEY`     | generated     | Admin key for the [admin dashboard](#admin-dashboard) (16+ characters). If unset, a key is generated and printed once on first start |
-| `ADMIN_LOCAL`   | on (off in Docker) | `off` = even a request from the server's own machine needs a key |
+| `ADMIN_LOCAL`   | on (off in Docker, and when `PUBLIC_URL` is set) | `off` = even a request from the server's own machine needs a key |
 | `ADMIN_MFA`     | on            | `off` = an admin key alone signs in, with no code from an authenticator app |
 | `ADMIN_PATH`    | generated     | The dashboard's path. If unset, a random one (`/admin-…`) is made on the first start and printed at every start. `off` = the plain `/admin`; or a path of your own, such as `/backoffice` |
 | `ADMIN`         | on            | `off` = no admin dashboard at all |
@@ -210,7 +210,7 @@ your.domain {
 ```
 
 - The proxy must pass the original `Host` header, or the app can't sign in ("Could not verify your profile key") and the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
-- Leave `ADMIN_LOCAL` off here (it is off in the image). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`.
+- Leave `ADMIN_LOCAL` off here (it is off in the image, and `PUBLIC_URL` turns it off). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`. Without Docker, set `ADMIN_LOCAL=off` yourself if the proxy runs on the same machine: one that rewrites `Host` and adds no forwarding header would otherwise look like your own browser.
 - For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit the dashboard's path at the proxy if you want per-visitor limits.
 - Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of the dashboard's path; set `ADMIN_PATH` to one you can write in a rule), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000` and the dashboard's path.
 
