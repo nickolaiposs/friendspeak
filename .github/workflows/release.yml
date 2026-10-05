@@ -18,9 +18,10 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-permissions:
-  contents: write # create and publish the release
-  packages: write # push to ghcr.io
+# Nothing by default: each job asks for what it needs. Actions are pinned to a commit (the tag is in
+# the comment), and checkout doesn't leave the token behind for the build steps that follow it:
+# what this workflow publishes is installed by every app and pulled by every auto-updating server.
+permissions: {}
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
@@ -28,12 +29,16 @@ env:
 
 jobs:
   prepare:
+    permissions:
+      contents: write # create the draft release
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
       - id: version
@@ -54,6 +59,8 @@ jobs:
           gh release create "v$V" --draft --target "$GITHUB_SHA" --title "friendspeak $V" --notes-file notes.md
 
   desktop:
+    permissions:
+      contents: write # upload the installers to the draft release
     needs: prepare
     strategy:
       fail-fast: true
@@ -69,8 +76,10 @@ jobs:
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -91,18 +100,23 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
   docker:
+    permissions:
+      contents: read
+      packages: write # push to ghcr.io
     needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -112,13 +126,16 @@ jobs:
           cache-to: type=gha,mode=max
 
   publish:
+    permissions:
+      contents: write # publish the release
+      packages: write # tag the image as latest
     needs: [prepare, desktop, docker]
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
