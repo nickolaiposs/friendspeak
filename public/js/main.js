@@ -904,6 +904,50 @@ function promptModal(title, label, value = '') {
   });
 }
 
+// Asks for the passphrase of a profile file; resolves to it, or null
+function askPassphrase() {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = h('input', { type: 'password', autocomplete: 'off', onkeydown: (e) => e.key === 'Enter' && ok() });
+    const ok = () => {
+      done = true;
+      close();
+      resolve(input.value);
+    };
+    const close = modal('Profile passphrase', h('label', { class: 'field' }, h('span', {}, 'This profile file is protected. Enter its passphrase.'), input), {
+      actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, 'Open')],
+      onClose: () => !done && resolve(null),
+    });
+  });
+}
+
+// Export a profile: its file holds the keys to that identity, so it is offered a passphrase
+function exportDialog(p) {
+  const pass = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'passphrase' });
+  const again = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'again', onkeydown: (e) => e.key === 'Enter' && save() });
+  const save = async () => {
+    if (pass.value !== again.value) return toast('The two passphrases differ', 'error');
+    try {
+      await exportProfile(p, pass.value);
+      close();
+    } catch (e) {
+      toast('Could not export the profile: ' + e.message, 'error');
+    }
+  };
+  const close = modal(
+    `Export ${p.name}`,
+    h(
+      'div',
+      {},
+      h('p', { class: 'muted' }, 'The file holds this profile’s keys. Whoever can read them can read and write your direct messages as you, so protect the file with a passphrase. You will need it to import the profile on another device.'),
+      h('label', { class: 'field' }, h('span', {}, 'Passphrase'), pass),
+      h('label', { class: 'field' }, h('span', {}, 'Repeat it'), again),
+      h('p', { class: 'muted small' }, 'Left empty, the keys are saved unprotected. Only do that if the file never leaves your hands.')
+    ),
+    { actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: save }, 'Export')] }
+  );
+}
+
 function confirmModal(title, text, okLabel = 'Delete') {
   return new Promise((resolve) => {
     let done = false;
@@ -1191,7 +1235,7 @@ function welcome() {
     hidden: true,
     onchange: async () => {
       try {
-        warnIfKeyless(await importProfile(importInput.files[0]));
+        warnIfKeyless(await importProfile(importInput.files[0], askPassphrase));
         close();
         boot();
       } catch (e) {
@@ -1457,6 +1501,7 @@ function openSocket(entry, rejoinVoice = null) {
   const viewed = () => S.conn === c;
   const calling = () => S.call === c;
   c.voice = new VoiceClient(socket, {
+    isPeer: (sid) => !!c.voice.channelId && c.users.some((u) => u.sid === sid && u.voice === c.voice.channelId),
     onPeersChange: renderChannels,
     onMediaChange: () => {
       renderChannels();
@@ -2759,12 +2804,24 @@ function isGrouped(m, prev) {
   return prev && prev.author === m.author && m.ts - prev.ts < 5 * 60e3 && !m.replyTo && new Date(m.ts).getDate() === new Date(prev.ts).getDate();
 }
 
+// formatText(), but a text it can't draw is shown plain: one message must never take the whole list down
+function safeFormat(text, opts) {
+  try {
+    return formatText(text, opts);
+  } catch (e) {
+    log.error('a message could not be formatted', e); // the error, never the text
+    const p = document.createElement('p');
+    p.textContent = text;
+    return { html: p.outerHTML, jumbo: false, embeds: [], links: [] };
+  }
+}
+
 function messageEl(m, prev) {
   const grouped = isGrouped(m, prev);
   const author = profileOf(m.author, m.name);
   const mine = m.author === me().id;
   const inServer = !m.thread && !inDmView() && !!S.server; // DMs keep the plain @name matching
-  const { html, jumbo, embeds, links } = formatText(m.text || '', {
+  const { html, jumbo, embeds, links } = safeFormat(m.text || '', {
     emojis: S.server?.emojis || [],
     myName: me().name,
     linkLabel: messageLinkLabel,
@@ -2813,7 +2870,7 @@ function messageEl(m, prev) {
         m.files?.length ? h('div', { class: 'attachments' }, m.files.map(m.thread ? (f) => dmAttachmentEl(m, f) : attachmentEl)) : null,
         links.length ? h('div', { class: 'embeds' }, links.map(messagePreviewEl)) : null,
         embeds.length ? h('div', { class: 'embeds' }, embeds.map(embedEl)) : null,
-        m.gif
+        m.gif && isImage(m.gif.url)
           ? h(
               'div',
               { class: 'msg-gif' },
@@ -3375,9 +3432,22 @@ function dmAttachmentEl(m, f) {
 }
 
 function embedEl(e) {
-  if (e.kind === 'image') return h('div', { class: 'embed' }, h('img', { src: e.url, loading: 'lazy', alt: '', onclick: () => lightbox(e.url) }));
-  if (e.kind === 'video') return h('div', { class: 'embed' }, h('video', { src: e.url, controls: true, preload: 'metadata' }));
-  if (e.kind === 'audio') return h('div', { class: 'embed' }, h('audio', { src: e.url, controls: true, preload: 'metadata' }));
+  // A picture, video or sound file that a link points at, on any site: loading it tells that site our
+  // address and that we are reading this chat, so it waits for a click unless the setting says to load it.
+  if (['image', 'video', 'audio'].includes(e.kind)) {
+    const media = () =>
+      e.kind === 'image'
+        ? h('img', { src: e.url, loading: 'lazy', alt: '', referrerpolicy: 'no-referrer', onclick: () => lightbox(e.url) })
+        : h(e.kind, { src: e.url, controls: true, preload: 'metadata' });
+    if (settings.get().loadLinkMedia) return h('div', { class: 'embed' }, media());
+    let host = '';
+    try {
+      host = new URL(e.url).host;
+    } catch {}
+    const box = h('div', { class: 'embed' });
+    box.append(h('button', { class: 'btn small ghost embed-load', title: 'Loading it shows your address to that site. Settings → Integrations can load these without asking.', onclick: () => box.replaceChildren(media()) }, `Show ${e.kind === 'audio' ? 'audio' : e.kind} from ${host}`));
+    return box;
+  }
   const frame = (src, style) =>
     h('iframe', {
       src,
@@ -5548,7 +5618,7 @@ function settingsProfile(body) {
     hidden: true,
     onchange: async () => {
       try {
-        const np = await importProfile(importInput.files[0]);
+        const np = await importProfile(importInput.files[0], askPassphrase);
         toast(`Imported ${np.name}`);
         warnIfKeyless(np);
         switchProfile(np.id);
@@ -5585,7 +5655,7 @@ function settingsProfile(body) {
           avatarEl(x, 32),
           h('span', { class: 'grow' }, x.name, x.id === p.id ? h('span', { class: 'badge' }, 'active') : null),
           x.id !== p.id ? h('button', { class: 'btn small ghost', onclick: () => (switchProfile(x.id), settingsProfile(body.replaceChildren() || body)) }, 'Use') : null,
-          h('button', { class: 'btn small ghost', onclick: () => exportProfile(x) }, 'Export'),
+          h('button', { class: 'btn small ghost', onclick: () => exportDialog(x) }, 'Export'),
           profiles.all().length > 1
             ? h(
                 'button',
@@ -6092,7 +6162,15 @@ function settingsIntegrations(body) {
       { class: 'muted small' },
       'GIF search uses GIPHY. Create a free API key at developers.giphy.com and paste it here. It is stored only on this device. If you leave it empty, the server host’s key (GIPHY_API_KEY) is used if they set one.'
     ),
-    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) }))
+    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
+    h('h3', {}, 'Links'),
+    h(
+      'label',
+      { class: 'check-row' },
+      h('input', { type: 'checkbox', checked: st.loadLinkMedia, onchange: (e) => settings.set({ loadLinkMedia: e.target.checked }) }),
+      h('span', {}, 'Load pictures, video and audio from links without asking'),
+      h('span', { class: 'muted small' }, 'The site a link points to sees your address when its file loads. Off, each one waits for a click.')
+    )
   );
 }
 

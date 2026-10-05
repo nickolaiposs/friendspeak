@@ -170,7 +170,9 @@ export function formatText(text, { emojis = [], myName = '', mentionables = null
   // Swap each known mention for a marker (\u0002n\u0002) before anything else, so its
   // position still holds; the marker becomes the mention at the end
   const marks = [];
-  let raw = String(text).replace(/\u0002/g, '\ufffd'); // same length, so positions hold
+  // \u0000 and \u0002 are the markers used below: in someone's text they would be taken for one
+  // (a lone \u00000\u0000 line broke the whole message list). Swapped for a same-length character, so positions hold.
+  let raw = String(text).replace(/[\u0000\u0002]/g, '\ufffd');
   const known = [...(Array.isArray(mentions) ? mentions : []), ...(Array.isArray(channelMarks) ? channelMarks.map((m) => m && { ...m, kind: 'channel' }) : [])];
   let end = Infinity;
   for (const m of known.filter((m) => m && Number.isInteger(m.at) && Number.isInteger(m.len) && m.len > 0).sort((a, b) => b.at - a.at)) {
@@ -324,7 +326,10 @@ export function fmtTime(ts) {
 export const shortTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
 // Is this an uploaded (data URL) or linked (https) image, rather than an emoji or color?
-export const isImage = (v) => typeof v === 'string' && /^(data:image\/|https:\/\/)/.test(v);
+// An image a profile, a server or a GIF message may point at: one that travels with it (a data URL),
+// or a GIF on GIPHY, which is where the picker gets them. Not any https address: whoever runs it would
+// learn the address of everyone who is shown the picture, and when. server.js has the same rule.
+export const isImage = (v) => typeof v === 'string' && /^(data:image\/|https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$)/.test(v);
 
 // Turn any image file the browser can decode into a data URL that fits in
 // maxBytes: downscaled to `max` px on the long side and re-encoded. Animated
@@ -374,7 +379,8 @@ export function avatarEl(profile, size = 40) {
   if (isImage(p.avatar)) {
     return h('div', { class: 'avatar', style }, h('img', { src: p.avatar, alt: '', referrerpolicy: 'no-referrer' }));
   }
-  const label = p.avatar || (p.name || '?').slice(0, 1).toUpperCase();
+  // An emoji or a couple of letters. Anything longer is an image address this app doesn't load (see isImage): the initial instead
+  const label = (p.avatar && p.avatar.length <= 16 && !/^(https?:|data:)/i.test(p.avatar) ? p.avatar : '') || (p.name || '?').slice(0, 1).toUpperCase();
   return h('div', { class: 'avatar', style: { ...style, background: p.color || '#8b6cf6' } }, label);
 }
 

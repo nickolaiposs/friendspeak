@@ -894,7 +894,7 @@ export class DirectMessages {
         author: peerId,
         name: c.name,
         text: str(op.m.text, MAX_TEXT),
-        gif: g && typeof g.url === 'string' && /^https:\/\//.test(g.url) ? { url: g.url.slice(0, 500), w: +g.w || 200, h: +g.h || 200, title: str(g.title, 200) } : null,
+        gif: g && isImage(g.url) && g.url.length <= 500 && !g.url.startsWith('data:') ? { url: g.url, w: +g.w || 200, h: +g.h || 200, title: str(g.title, 200) } : null,
         replyTo: str(op.m.replyTo, 64) || null,
         reactions: {},
         ts: Math.min(Number(op.m.ts) || Date.now(), Date.now()),
@@ -938,7 +938,7 @@ export class DirectMessages {
   }
 
   applyHello(peerId, p) {
-    const avatar = typeof p.avatar === 'string' && (isImage(p.avatar) ? /^(data:image\/(png|jpe?g|gif|webp);base64,|https:\/\/)/.test(p.avatar) : p.avatar.length <= 16) ? p.avatar : undefined;
+    const avatar = typeof p.avatar === 'string' && (isImage(p.avatar) ? !p.avatar.startsWith('data:') || /^data:image\/(png|jpe?g|gif|webp);base64,/.test(p.avatar) : p.avatar.length <= 16) ? p.avatar : undefined;
     const known = this.contacts.get(peerId);
     const c = this.addContact({
       id: peerId,
