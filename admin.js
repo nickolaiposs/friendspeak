@@ -144,7 +144,7 @@ function createAdmin(ctx) {
     }
     return storedPath;
   })();
-  if (BASE !== PLAIN_PATH) logs.redact?.(BASE); // the stored log never holds it
+  if (BASE !== PLAIN_PATH) logs.redact?.(BASE, { storedOnly: true }); // the stored log never holds it; the console prints it at start
 
   let envKey = null;
   if (options.key) {

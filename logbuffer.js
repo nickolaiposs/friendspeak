@@ -4,7 +4,8 @@
 // thousand lines stay in memory (live view); everything but `debug` is also
 // appended to JSON-lines files in `dir`, kept for a number of days and a size
 // cap, so history survives restarts and crashes. Every line is scrubbed of
-// secrets before it goes anywhere.
+// secrets before it goes anywhere: the buffer, the files, and the console
+// itself (which is what `docker logs` keeps).
 const fs = require('fs');
 const path = require('path');
 const util = require('util');
@@ -25,6 +26,8 @@ const PATTERNS = [
   [/\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}\b/gi, 'invite ' + REDACTED], // an invite token (D51)
   [/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ' + REDACTED],
   [/\b(password|passwd|token|secret|apikey|api_key|key)=[^&\s"']+/gi, `$1=${REDACTED}`],
+  // The same names as an object prints them (`token: 'abc'`) or as JSON (`"token":"abc"`): errors and objects are logged whole
+  [/\b(password|passwd|token|secret|apikey|api_key|key)(["']?\s*:\s*)(["'])[^"'\n]*\3/gi, `$1$2$3${REDACTED}$3`],
 ];
 
 let installed = null;
@@ -40,13 +43,17 @@ function install({ max = 2000, dir, retentionDays = 14, maxBytes = 50 * 1024 ** 
 
   // ---------- scrubbing ----------
 
-  const secrets = new Set();
-  function redact(value) {
-    if (typeof value === 'string' && value.length >= 6) secrets.add(value);
+  const secrets = new Set(); // never shown anywhere
+  const storedSecrets = new Set(); // shown on the console (the host has to read them there), kept out of what is stored
+  // `storedOnly`: the value still prints on the console, e.g. the dashboard's path at start (D52)
+  function redact(value, { storedOnly = false } = {}) {
+    if (typeof value === 'string' && value.length >= 6) (storedOnly ? storedSecrets : secrets).add(value);
   }
-  function scrub(text) {
+  // `stored`: for the buffer, the files and crash reports (the default); false: for the console
+  function scrub(text, stored = true) {
     text = String(text);
     for (const s of secrets) if (text.includes(s)) text = text.split(s).join(REDACTED);
+    if (stored) for (const s of storedSecrets) if (text.includes(s)) text = text.split(s).join(REDACTED);
     for (const [re, to] of PATTERNS) text = text.replace(re, to);
     return text;
   }
@@ -205,7 +212,15 @@ function install({ max = 2000, dir, retentionDays = 14, maxBytes = 50 * 1024 ** 
     const original = console[method].bind(console);
     console[method] = (...args) => {
       record(level, args);
-      original(...args);
+      // The console gets the line scrubbed too. Only when something was taken out: untouched lines keep their own formatting
+      let text = null;
+      try {
+        const plain = util.format(...args);
+        const clean = scrub(plain, false);
+        if (clean !== plain) text = clean;
+      } catch {}
+      if (text === null) original(...args);
+      else original(text);
     };
   }
 
