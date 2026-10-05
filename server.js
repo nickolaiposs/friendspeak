@@ -144,12 +144,12 @@ async function startServer(opts = {}) {
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
   // Mailboxes for direct messages (D32): sealed blobs the server can't read
-  const DM_GUESTS = opts.dmGuests !== false;
   const MAIL_FILE = path.join(DATA_DIR, 'mail.json');
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
   const MAX_MAILBOX_ITEMS = 500;
   const MAX_MAILBOX_BYTES = 8 * 1024 * 1024;
   const MAX_MAILBOXES = 5000;
+  const MAX_DM_KEYS = 20000; // keys remembered as answering the /dm challenge the new way
   const MAIL_TTL = 30 * 864e5; // mail nobody collected
   const MAILBOX_IDLE = 90 * 864e5; // an empty mailbox whose owner never came back
 
@@ -197,6 +197,7 @@ async function startServer(opts = {}) {
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
       inviteOnly: true, // joining takes an invite (D51); from Settings → Server. `invites` is added below, so a first start can be told apart
+      dmV2: [], // keys that have answered the /dm challenge bound to the host: the older answer is refused for them from then on (D55); never sent to clients
       pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
     };
   }
@@ -875,9 +876,26 @@ async function startServer(opts = {}) {
   const mailSweepTimer = setInterval(sweepMail, 60 * 60e3);
   mailSweepTimer.unref();
 
-  // The address (mailbox name) of whoever signed `nonce` with the Ed25519 key `s`, or null
-  const mailAddress = (s, sig, nonce) =>
-    verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce) ? crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url') : null;
+  // The address (mailbox name) of whoever answered the /dm challenge with the Ed25519 key `s`, or null.
+  // v2 signs the nonce and the host the app dialed, as `hello` does, so an answer made for one server is
+  // no use at another. v1 (apps from before that) signs the nonce alone: any server such an app talks to
+  // could pass on another server's challenge and be let in there as that person. So a key that has
+  // answered v2 here is never again accepted with v1 (`dmV2`, kept in state.json).
+  const dmV2 = new Set((Array.isArray(state.dmV2) ? state.dmV2 : []).filter((s) => isKey(s, 43)).slice(-MAX_DM_KEYS));
+  state.dmV2 = [...dmV2];
+  function mailAddress(s, sig, nonce, v, host) {
+    if (!isKey(s, 43)) return null;
+    if (v === 2) {
+      if (!verifySig(s, sig, 'friendspeak-dm-auth-v2|' + nonce + '|' + host)) return null;
+      if (!dmV2.has(s)) {
+        dmV2.add(s);
+        if (dmV2.size > MAX_DM_KEYS) dmV2.delete(dmV2.values().next().value);
+        state.dmV2 = [...dmV2];
+        save();
+      }
+    } else if (dmV2.has(s) || !verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce)) return null;
+    return crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url');
+  }
 
   // ---------- realtime ----------
 
@@ -1093,31 +1111,26 @@ async function startServer(opts = {}) {
     // relays WebRTC handshakes, and keeps sealed mail for people who are away.
     // It never sees a message.
     //
-    // Members are the profiles that joined (with an invite, when the server asks
-    // for one, D51). Guests are everyone else, sent here by a friend's friend
-    // code. They can reach the people whose profile id or mailbox address
-    // they already know, and nothing else: no member list, no mailbox.
+    // Only members: the profiles that joined (with an invite, when the server asks for one,
+    // D51). Nobody else gets a socket here. (There used to be guests, sent by a friend code;
+    // D55 took them out.)
     const dm = io.of('/dm');
     const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
-    const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
-      const { profileId, guest } = socket.handshake.auth || {};
+      const { profileId } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
       // On an invite-only server a member is a profile that joined and has a key pinned,
-      // which it proves in `identify` below; nothing a socket says here makes it one
-      const outsider = state.inviteOnly && !(pid && Object.hasOwn(state.profiles, pid) && pinOf(pid));
-      // A guest can't use the profile id of someone on this server. ("password": apps from before invites stop retrying on it.)
-      if (outsider && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Not a member of this server (no valid invite or password)'));
+      // which it proves in `identify` below; nothing a socket says here makes it one.
+      // ("password": apps from before invites stop retrying on it.)
+      if (state.inviteOnly && !(pid && Object.hasOwn(state.profiles, pid) && pinOf(pid))) return next(new Error('Not a member of this server (no valid invite or password)'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
-      socket.data.guest = outsider;
-      socket.data.mustProve = state.inviteOnly && !outsider;
+      socket.data.mustProve = state.inviteOnly;
       next();
     });
     dm.on('connection', (socket) => {
       const pid = socket.data.profileId;
-      const guest = socket.data.guest;
       // A profile id with a key pinned here (D42) is only someone once they sign
       // the challenge below with that key. Until then the socket can use
       // mailboxes, but it isn't present, can't signal and replaces no one.
@@ -1126,41 +1139,28 @@ async function startServer(opts = {}) {
         // Newest wins, like chat sessions: a reconnect replaces the stale socket
         for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
         socket.join('p:' + pid);
-        if (!guest) {
-          socket.join('members');
-          socket.emit('online', dmOnline());
-        }
-        socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+        socket.join('members');
+        socket.emit('online', dmOnline());
+        socket.to('members').emit('presence', { id: pid, online: true });
       };
       if (!pinOf(pid)) arrive();
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
         if (socket.data.verified && to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
       });
-      // Guests name the people they want presence for
-      socket.on('watch', (ids, ack) => {
-        if (typeof ack !== 'function') return;
-        if (!socket.data.verified) return ack({ online: [] });
-        const list = [...new Set((Array.isArray(ids) ? ids : []).slice(0, 200).map((v) => str(v, 64)).filter(Boolean))];
-        for (const room of socket.rooms) if (room.startsWith('w:')) socket.leave(room);
-        for (const v of list) socket.join('w:' + v);
-        const online = dmOnline();
-        ack({ online: list.filter((v) => online.includes(v)) });
-      });
-
-      // Mailboxes: prove who you are by signing this nonce
+      // Mailboxes: prove who you are by signing this nonce and the host you dialed (`v: 2`; see mailAddress)
       const nonce = crypto.randomBytes(16).toString('base64url');
-      socket.emit('challenge', { nonce, server: state.id });
-      socket.on('identify', ({ s, sig } = {}, ack) => {
+      socket.emit('challenge', { nonce, server: state.id, v: 2 });
+      socket.on('identify', ({ s, sig, v } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
+        const addr = mailAddress(str(s, 64), str(sig, 128), nonce, v, hostOf(socket));
         if (!addr) return ack({ error: 'Bad signature' });
         if (!socket.data.verified && s === pinOf(pid)) arrive();
         if (socket.data.addr) socket.leave('a:' + socket.data.addr);
         socket.data.addr = addr;
         socket.join('a:' + addr);
         // A claimed member of an invite-only server has a mailbox once the pinned key has signed
-        const member = !guest && (!socket.data.mustProve || socket.data.verified);
+        const member = !socket.data.mustProve || socket.data.verified;
         let box = member ? mail.get(addr) : null;
         if (member && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
         if (box) {
@@ -1172,12 +1172,13 @@ async function startServer(opts = {}) {
       });
       socket.on('mail:put', ({ to, blob } = {}, ack) => {
         if (typeof ack !== 'function') return;
+        if (!socket.data.verified) return ack({ error: 'Not signed in' }); // a profile id alone leaves no mail
         if (!isKey(to, 43) || typeof blob !== 'string' || !blob || blob.length > MAX_MAIL_BLOB) return ack({ error: 'Bad mail' });
         const now = Date.now();
         if (now - (socket.data.mailFrom || 0) > 60e3) Object.assign(socket.data, { mailFrom: now, mailCount: 0 });
         if (++socket.data.mailCount > 240) return ack({ error: 'Too much mail, slow down' });
         const box = mail.get(to);
-        // No mailbox here (a guest, or someone who never came by): pass it on if they're connected
+        // No mailbox here (someone who never came by, or the mailboxes are full): pass it on if they're connected
         if (!box) {
           if (!dm.adapter.rooms.get('a:' + to)?.size) return ack({ error: 'No mailbox' });
           dm.to('a:' + to).emit('mail', [{ id: null, blob }]);
@@ -1193,13 +1194,13 @@ async function startServer(opts = {}) {
       // A message link in a DM (D54): its preview, for a member who can read the channel
       socket.on('msg:peek', ({ channelId, messageId } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        if (!socket.data.verified || guest || !Object.hasOwn(state.profiles, pid)) return ack({ error: 'unavailable' });
+        if (!socket.data.verified || !Object.hasOwn(state.profiles, pid)) return ack({ error: 'unavailable' });
         ack(peekMessage(pid, channelId, messageId));
       });
       // Collected: the owner has it now
       socket.on('mail:ack', ({ ids } = {}) => {
         const box = mail.get(socket.data.addr);
-        if (guest || !box || !Array.isArray(ids)) return;
+        if (!box || !Array.isArray(ids)) return;
         const gone = new Set(ids);
         const kept = box.items.filter((it) => !gone.has(it.id));
         if (kept.length !== box.items.length) (box.items = kept), saveMail();
@@ -1208,7 +1209,7 @@ async function startServer(opts = {}) {
         // Shutting down disconnects everyone: that's not them leaving, and
         // their direct connections don't need this server (D39)
         if (closing || !socket.data.verified) return;
-        if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
+        if (!dmOnline().includes(pid)) dm.to('members').emit('presence', { id: pid, online: false });
       });
     });
 
@@ -2266,7 +2267,6 @@ if (require.main === module) {
     maxStorage: env.MAX_STORAGE,
     logs: { retentionDays: /^\s*\d+\s*$/.test(env.LOG_RETENTION_DAYS || '') ? Number(env.LOG_RETENTION_DAYS) : 14, maxBytes: parseSize(env.LOG_MAX_SIZE, 50 * 1024 ** 2) },
     crashReports: true,
-    dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
     // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
     admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
