@@ -665,6 +665,7 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .attachment:hover .attach-del { display: grid; }
 .attachment.file .attach-del { top: -10px; right: -10px; }
 .embed video { display: block; max-width: min(520px, 100%); max-height: 350px; border-radius: 6px; margin-top: 4px; }
+.embed-load { margin-top: 4px; }
 .embed.rich { background: var(--bg-1); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 8px 12px 12px; width: min(460px, 100%); }
 .embed.rich iframe { display: block; width: 100%; border: 0; border-radius: 6px; background: var(--bg-0); }
 .embed-provider { font-size: calc(12px * var(--font-scale)); color: var(--muted); margin-bottom: 6px; }
