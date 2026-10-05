@@ -1,8 +1,8 @@
 // Direct messages, peer to peer and end-to-end encrypted (D28, D32).
 //
 // Servers are only meeting points and mailboxes. The client keeps a socket on
-// the /dm namespace of every bookmarked server, and (as a guest, without the
-// password) of the servers its contacts said they can be reached on. Such a
+// the /dm namespace of every bookmarked server, and nowhere else: two people
+// reach each other through a server they both use (D55). Such a
 // server reports who is reachable, relays the WebRTC handshake, and holds
 // sealed messages for people who are away. It can't read or forge them:
 // everything is sealed with a key only the two people have (identity.js).
@@ -15,9 +15,9 @@
 //   { t: 'id', card }          plain, first thing on every connection
 //   { t: 'x', d }              a sealed op (below)
 //   binary                     a sealed chunk of an image: u32 transfer, u32 index, bytes
-//   plain ops                  only with apps from before D32, which have no keys
+// Nothing else is read: an op that isn't sealed is dropped (apps from before D32 sent those).
 // Ops:
-//   { t: 'hello', p: { name, color, avatar?, status, relays } }   on open and on profile change
+//   { t: 'hello', p: { name, color, avatar?, status } }   on open and on profile change
 //   { t: 'msg', op, m: { id, text, gif, replyTo, ts, files? } }
 //   { t: 'edit', op, id, text, edited }  { t: 'del', op, id }  { t: 'react', op, id, emoji, on }
 //   { t: 'ack', op }   { t: 'typing' }
@@ -26,18 +26,16 @@
 //   { t: 'want', id }  { t: 'file', id, x, size, n }  { t: 'gone', id }   image transfer
 // Every op with an `op` id is queued until acked, so it survives restarts.
 // Applying one twice is harmless: the last few hundred ids are remembered.
-// A mailbox blob is JSON { v: 1, card, d }: the sender's card and one sealed
-// op, which also carries `r`, the sender's relays.
+// A mailbox blob is JSON { v: 1, card, d }: the sender's card and one sealed op.
 import { log } from './log.js';
 import { dmStore } from './store.js';
 import { uid, isImage } from './util.js';
 import { ICE } from './voice.js';
-import { identityFor, verifyCard, addressOf, pairKey, seal, unseal, sealJson, unsealJson, cleanRelays, friendCode, parseFriendCode } from './identity.js';
+import { identityFor, verifyCard, addressOf, pairKey, seal, unseal, sealJson, unsealJson, friendCode, parseFriendCode } from './identity.js';
 
 const MAX_TEXT = 4000;
 const MAX_HELLO = 150 * 1024; // data channel messages above ~256KB aren't reliable; drop the avatar instead
 const MAX_BLOB = 160 * 1024; // what a mailbox accepts (MAX_MAIL_BLOB in server.js)
-const MAX_GUEST_RELAYS = 8;
 const OPEN_AFTER = 12e3; // a connection that hasn't opened by now is dropped, so the next attempt starts fresh
 const MAIL_AFTER = 8e3; // online but no connection yet (strict NATs): use the mailbox after this long
 const PROBE_WAIT = 4e3; // a connection that doesn't answer a ping by now is dropped
@@ -59,10 +57,10 @@ export class DirectMessages {
     this.me = null;
     this.identity = null; // { card, address, dhKey, login() }
     this.bookmarks = []; // the saved servers
-    this.contacts = new Map(); // peerId -> { key, owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, relays, seen, wants, conflict? }
+    this.contacts = new Map(); // peerId -> { key, owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, seen, wants, gone, conflict? }
     this.threads = new Map(); // peerId -> Promise<messages[]>, oldest first
-    this.servers = new Map(); // address -> { socket, password, guest, online: Set<profileId>, mail }
-    this.peers = new Map(); // peerId -> { pc, dc, via, polite, chain, ignoreOffer, open, ready, key, legacy, sent, asked, tx, xfers, nextX }
+    this.servers = new Map(); // address -> { socket, password, online: Set<profileId>, mail }
+    this.peers = new Map(); // peerId -> { pc, dc, via, polite, chain, ignoreOffer, open, ready, key, sent, asked, tx, xfers, nextX }
     this.rx = new Map(); // peerId -> promise chain, so received ops apply in order
     this.keys = new Map(); // peerId -> { s, key }: the shared key, per pinned card
     this.mailing = new Set(); // peerIds with a mailbox delivery in flight
@@ -78,8 +76,8 @@ export class DirectMessages {
     const [identity, contacts] = await Promise.all([identityFor(profile), dmStore.contacts(profile.id).catch(() => [])]);
     if (this.me !== me) return; // switched again meanwhile
     this.identity = identity;
-    // Contacts saved before D32 lack the newer fields
-    this.contacts = new Map(contacts.map((c) => [c.id, Object.assign(c, { relays: c.relays || [], seen: c.seen || [], wants: c.wants || [] })]));
+    // Contacts saved by older versions lack the newer fields
+    this.contacts = new Map(contacts.map((c) => [c.id, Object.assign(c, { seen: c.seen || [], wants: c.wants || [], gone: c.gone || [] })]));
     this.syncServers();
     this.on.change();
   }
@@ -106,48 +104,38 @@ export class DirectMessages {
     this.syncServers();
   }
 
-  // Where friends can find me: sent in hello, mail and friend codes
-  relays() {
-    return cleanRelays(this.bookmarks.map((s) => s.address));
-  }
-
-  // Bookmarked servers with their password, plus contacts' relays as a guest
+  // A socket on /dm of every bookmarked server, with the invite it was saved with
   syncServers() {
     if (!this.me || !this.identity) return;
-    const want = new Map(this.bookmarks.map((s) => [s.address, { password: s.password || '', guest: false }]));
-    let guests = 0;
-    for (const c of this.contacts.values())
-      for (const r of c.relays) if (!want.has(r) && guests < MAX_GUEST_RELAYS) (want.set(r, { password: '', guest: true }), guests++);
+    const want = new Map(this.bookmarks.map((s) => [s.address, { password: s.password || '' }]));
     for (const [addr, s] of this.servers) {
       const w = want.get(addr);
-      if (w && w.password === s.password && w.guest === s.guest) continue;
+      if (w && w.password === s.password) continue;
       s.socket.disconnect();
       this.servers.delete(addr);
     }
     for (const [addr, w] of want) if (!this.servers.has(addr)) this.connectServer(addr, w);
-    for (const s of this.servers.values()) if (s.guest && s.socket.connected) this.watch(s);
     this.on.presence();
   }
 
   // A bookmarked server turned us away before we had joined it (D51) and we gave up on it: knock again
   retry(address) {
     const s = this.servers.get(address);
-    if (!s || s.guest || s.socket.active) return;
+    if (!s || s.socket.active) return;
     this.servers.delete(address);
     this.syncServers();
   }
 
-  connectServer(address, { password, guest }) {
+  connectServer(address, { password }) {
     // forceNew: its own connection, so it never shares reconnect settings with the chat socket
     const socket = io(address + '/dm', {
-      auth: { profileId: this.me.id, password, guest: guest || undefined },
+      auth: { profileId: this.me.id, password },
       forceNew: true,
       transports: ['websocket', 'polling'],
-      reconnectionDelayMax: guest ? 120e3 : 30e3,
+      reconnectionDelayMax: 30e3,
     });
-    const s = { address, socket, password, guest, online: new Set(), mail: false };
+    const s = { address, socket, password, online: new Set(), mail: false };
     this.servers.set(address, s);
-    socket.on('connect', () => guest && this.watch(s));
     socket.on('online', (ids) => {
       s.online = new Set(ids);
       this.on.presence();
@@ -176,17 +164,21 @@ export class DirectMessages {
       }
       this.on.presence();
     });
-    // Banned, not a member (or a wrong password, before invites), or a server that takes no guests: don't keep knocking
+    // Banned, or not a member (or a wrong password, before invites): don't keep knocking
     socket.on('connect_error', (err) => /banned|password|member/i.test(err.message) && socket.disconnect());
     socket.on('signal', ({ from, data }) => this.handleSignal(from, data, socket));
     // Servers with mailboxes (D32) ask who we are: prove it with the profile's key
-    socket.on('challenge', async ({ nonce, server } = {}) => {
+    socket.on('challenge', async ({ nonce, server, v } = {}) => {
       if (typeof server === 'string') s.serverId = server; // what message links call this server (D54)
       const identity = this.identity;
       if (typeof nonce !== 'string' || !identity) return;
+      // `v: 2`: the answer also names the host we dialed, so this server can't use it anywhere else (D55).
+      // A server from before that only understands the nonce alone.
+      const bound = v === 2;
+      const sig = await identity.login(nonce, bound ? new URL(address).host : null);
       const res = await socket
         .timeout(10e3)
-        .emitWithAck('identify', { s: identity.card.s, sig: await identity.login(nonce) })
+        .emitWithAck('identify', { s: identity.card.s, sig, v: bound ? 2 : undefined })
         .catch(() => null);
       if (!res?.ok || this.servers.get(address) !== s || !socket.connected) return;
       s.mail = true;
@@ -200,32 +192,19 @@ export class DirectMessages {
 
   // The bookmarked server that message links name `serverId`, if it has told us its id
   addressOf(serverId) {
-    for (const s of this.servers.values()) if (!s.guest && s.serverId === serverId) return s.address;
+    for (const s of this.servers.values()) if (s.serverId === serverId) return s.address;
     return null;
   }
 
   // A linked message's preview from a bookmarked server we aren't looking at; null when it won't say
   async peek(address, channelId, messageId) {
     const s = this.servers.get(address);
-    if (!s || s.guest || !s.socket.connected) return null;
+    if (!s || !s.socket.connected) return null;
     const res = await s.socket
       .timeout(8e3)
       .emitWithAck('msg:peek', { channelId, messageId })
       .catch(() => null);
     return res?.message && typeof res.message === 'object' ? res.message : null;
-  }
-
-  // A guest isn't told who is on the server, only about the people it asks for
-  async watch(s) {
-    const ids = [...this.contacts.values()].filter((c) => c.relays.includes(s.address)).map((c) => c.id);
-    const res = await s.socket
-      .timeout(10e3)
-      .emitWithAck('watch', ids)
-      .catch(() => null);
-    if (!Array.isArray(res?.online) || this.servers.get(s.address) !== s) return;
-    s.online = new Set(res.online);
-    this.on.presence();
-    this.flushAll();
   }
 
   // Reachable: connected directly, or through at least one server we share
@@ -269,9 +248,8 @@ export class DirectMessages {
       chain: Promise.resolve(),
       ignoreOffer: false,
       open: false,
-      ready: false, // we know how to talk to them: sealed (key) or the old plain way (legacy)
+      ready: false, // we have their key: everything on this connection is sealed with it
       key: null,
-      legacy: false,
       sent: new Set(), // op ids
       asked: new Set(), // file ids
       tx: Promise.resolve(), // sealing is async: this keeps what we send in order
@@ -363,6 +341,10 @@ export class DirectMessages {
     }
     if (!peer) {
       if (data.sdp?.type !== 'offer') return;
+      // Answering tells them our addresses: only for someone we already talk to, or who this
+      // server lists as one of its members online
+      const here = [...this.servers.values()].find((s) => s.socket === socket);
+      if (!this.contacts.has(from) && !here?.online.has(from)) return;
       peer = this.createPeer(from, socket);
     }
     peer.via = socket; // answer the way they reached us
@@ -438,7 +420,6 @@ export class DirectMessages {
       this.saveContact(c);
     }
     peer.key = await this.keyFor(c);
-    peer.legacy = false;
     this.setReady(peerId, peer);
   }
 
@@ -470,15 +451,14 @@ export class DirectMessages {
 
   send(peerId, obj) {
     const peer = this.peers.get(peerId);
-    if (!peer?.ready || peer.dc.readyState !== 'open') return false;
-    if (peer.key) this.link(peer, async () => peer.dc.send(JSON.stringify({ t: 'x', d: await sealJson(peer.key, this.aad(peerId), obj) })));
-    else this.link(peer, () => peer.dc.send(JSON.stringify(obj)));
+    if (!peer?.ready || !peer.key || peer.dc.readyState !== 'open') return false;
+    this.link(peer, async () => peer.dc.send(JSON.stringify({ t: 'x', d: await sealJson(peer.key, this.aad(peerId), obj) })));
     return true;
   }
 
   sendHello(peerId) {
     const { name, color, avatar, status } = this.me;
-    const p = { name, color, avatar, status, relays: this.relays() };
+    const p = { name, color, avatar, status, relays: [] }; // relays: empties the list apps from before D55 keep of where to find us
     if (JSON.stringify(p).length > MAX_HELLO) delete p.avatar;
     this.send(peerId, { t: 'hello', p });
   }
@@ -535,7 +515,7 @@ export class DirectMessages {
 
   // true if some server took it for them
   async mail(c, op) {
-    const blob = JSON.stringify({ v: 1, card: this.identity.card, d: await sealJson(await this.keyFor(c), this.aad(c.id), { ...op, r: this.relays() }) });
+    const blob = JSON.stringify({ v: 1, card: this.identity.card, d: await sealJson(await this.keyFor(c), this.aad(c.id), op) });
     if (blob.length > MAX_BLOB) return 'big';
     const to = await addressOf(c.card.s);
     const res = await Promise.all(
@@ -566,7 +546,7 @@ export class DirectMessages {
   addContact(p) {
     let c = this.contacts.get(p.id);
     if (!c) {
-      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#8b6cf6', avatar: '', status: '', last: 0, unread: 0, outbox: [], relays: [], seen: [], wants: [] };
+      c = { key: this.contactKey(p.id), owner: this.me.id, id: p.id, name: 'unknown', color: '#8b6cf6', avatar: '', status: '', last: 0, unread: 0, outbox: [], seen: [], wants: [], gone: [] };
       this.contacts.set(p.id, c);
     }
     Object.assign(c, { name: p.name || c.name, color: p.color || c.color, avatar: p.avatar ?? c.avatar, status: p.status ?? c.status });
@@ -585,17 +565,9 @@ export class DirectMessages {
     this.flush(c.id);
   }
 
-  setRelays(c, list) {
-    const relays = cleanRelays(list);
-    if (relays.join() === c.relays.join()) return;
-    c.relays = relays;
-    this.saveContact(c);
-    this.syncServers();
-  }
-
-  // My friend code: my card and where to find me
+  // My friend code: my card, so a friend's app knows my key before we first talk
   myCode() {
-    return friendCode(this.identity, this.me, this.relays());
+    return friendCode(this.identity, this.me);
   }
 
   // Add someone from their friend code; resolves to { id } or { error }
@@ -609,8 +581,7 @@ export class DirectMessages {
     const c = this.addContact({ id: card.id, name: known ? undefined : code.name });
     c.card = card;
     this.saveContact(c);
-    this.setRelays(c, [...code.relays, ...c.relays]);
-    this.syncServers(); // a guest relay we're already on needs to watch them too
+    this.flush(card.id);
     return { id: card.id };
   }
 
@@ -628,7 +599,6 @@ export class DirectMessages {
     if (peer) this.drop(peerId, peer.pc);
     for (const [key, url] of this.urls) if (key.startsWith(c.key + '|')) (this.urls.delete(key), url.then((u) => u && URL.revokeObjectURL(u)));
     await dmStore.removeThread(c.key);
-    this.syncServers();
     this.on.change();
   }
 
@@ -811,14 +781,8 @@ export class DirectMessages {
       if (inner && typeof inner === 'object') await this.apply(peerId, inner, peer);
       return;
     }
-    // Not sealed: only from someone who has never shown a key (an app from
-    // before D32). Once a key is pinned, plain ops are ignored.
-    if (peer.key || this.contacts.get(peerId)?.card) return;
-    if (!peer.legacy) {
-      peer.legacy = true;
-      this.setReady(peerId, peer);
-    }
-    if (['hello', 'typing', 'ack', 'msg', 'edit', 'del', 'react'].includes(op.t)) await this.apply(peerId, op, peer);
+    // Anything not sealed is dropped. (Apps from before D32 had no keys and sent plain ops; reading
+    // those meant whoever a server presented under a profile id was taken at their word.)
   }
 
   // Mail a server held for us (or passed on live): [{ id, blob }]
@@ -847,7 +811,6 @@ export class DirectMessages {
       c.card = card;
       this.saveContact(c);
     }
-    if (op.r) this.setRelays(c, op.r);
     await this.enqueueRx(card.id, () => this.apply(card.id, op, null));
   }
 
@@ -885,7 +848,9 @@ export class DirectMessages {
     const list = await this.history(peerId);
     const id = str(op.id ?? op.m?.id, 64);
     const m = list.find((x) => x.id === id);
-    if (op.t === 'msg' && !m && id && op.m) {
+    // A server holds sealed mail and could hand an old one over again much later, after its op id has
+    // been forgotten: a message its sender deleted stays deleted, and an edit never goes back in time.
+    if (op.t === 'msg' && !m && id && op.m && !c.gone.includes(id)) {
       const g = op.m.gif;
       const msg = {
         key: c.key + '|' + id,
@@ -912,9 +877,10 @@ export class DirectMessages {
         await dmStore.putMessage(msg);
         this.on.message(peerId, msg);
       }
-    } else if (op.t === 'edit' && m?.author === peerId) {
+    } else if (op.t === 'edit' && m?.author === peerId && !(Number(op.edited) <= m.editedAt)) {
       m.text = str(op.text, MAX_TEXT);
       m.edited = Date.now();
+      m.editedAt = Number(op.edited) || m.edited; // their clock: what a later edit has to be newer than
       await dmStore.putMessage(m);
       this.on.update(peerId, m);
     } else if (op.t === 'del' && m?.author === peerId) {
@@ -922,6 +888,8 @@ export class DirectMessages {
       await dmStore.removeMessage(m.key);
       await this.removeFiles(peerId, m);
       this.on.deleted(peerId, id);
+      c.gone.push(id);
+      if (c.gone.length > 1000) c.gone.splice(0, 200);
     } else if (op.t === 'react' && m) {
       const emoji = str(op.emoji, 64);
       if (emoji && !!op.on !== !!m.reactions[emoji]?.includes(peerId)) {
@@ -931,7 +899,7 @@ export class DirectMessages {
       }
     }
     c.seen.push(op.op);
-    if (c.seen.length > 400) c.seen.splice(0, 100);
+    if (c.seen.length > 2000) c.seen.splice(0, 500);
     this.saveContact(c);
     this.ack(peerId, op.op);
     this.flush(peerId); // fetch its images now, or connect to
@@ -940,14 +908,13 @@ export class DirectMessages {
   applyHello(peerId, p) {
     const avatar = typeof p.avatar === 'string' && (isImage(p.avatar) ? /^(data:image\/(png|jpe?g|gif|webp);base64,|https:\/\/)/.test(p.avatar) : p.avatar.length <= 16) ? p.avatar : undefined;
     const known = this.contacts.get(peerId);
-    const c = this.addContact({
+    this.addContact({
       id: peerId,
       name: str(p.name, 32).trim() || known?.name || 'unknown',
       color: /^#[0-9a-f]{6}$/i.test(p.color) ? p.color : undefined,
       avatar,
       status: str(p.status, 64),
     });
-    if (Array.isArray(p.relays)) this.setRelays(c, p.relays);
   }
 
   // ---------- images ----------

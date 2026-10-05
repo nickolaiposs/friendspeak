@@ -45,7 +45,6 @@ services:
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-14}
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
       # off = only members can pass direct messages through this server
-      DM_GUESTS: ${DM_GUESTS:-on}
       HTTPS: ${HTTPS:-1}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
       # and printed once in the container log on first start (docker logs friendspeak).

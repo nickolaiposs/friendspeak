@@ -458,7 +458,7 @@ function leaveDmView() {
   renderAll();
 }
 
-// Friend codes: how to message someone you share no server with (D32)
+// Friend codes: someone's key, handed over directly, so it is known before the first message (D32, D55)
 function friendDialog() {
   if (!DM.identity) return toast('Still starting up, try again in a moment');
   const code = DM.myCode();
@@ -476,11 +476,11 @@ function friendDialog() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below.'),
+      h('p', { class: 'muted' }, 'A friend code adds someone to your direct messages with their key, so you know it’s really them from the first message. You reach each other through a server you both use. Send yours to a friend, and paste theirs below.'),
       h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
       h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
       h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
-      DM.relays().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers, so a friend can only reach you through one of theirs, and only while you’re both online.')
+      servers.all().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers yet. Direct messages travel through a server you and your friend both use.')
     ),
     { actions: [(c) => h('button', { class: 'btn', onclick: () => add(c) }, 'Add friend')] }
   );
@@ -2890,7 +2890,7 @@ function renderMessages(keepScroll = false) {
           `This is the beginning of your direct messages with ${p.name}. They are encrypted so that only your two devices can read them, and stored only there. Servers you both use help you find each other and hold messages, still encrypted, while one of you is away. ` +
             (DM.contacts.get(ch.with)?.card
               ? `This device remembers ${p.name}’s key, so someone else using their profile is refused.`
-              : `${p.name}’s key isn’t known yet. Until they connect with a current friendspeak, anyone who copied their profile could pretend to be them, and images can’t be sent.`)
+              : `${p.name}’s key isn’t known yet. What you write is sent once they connect with a current friendspeak.`)
         )
       )
     );
