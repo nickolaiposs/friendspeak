@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   focus: () => ipcRenderer.invoke('desktop:focus'),
   setBadge: (n) => ipcRenderer.invoke('desktop:badge', n),
 
+  // The video grid in a window of its own (opened by the page, by name): keep it above other windows, or not
+  streamOnTop: (name, on) => ipcRenderer.invoke('desktop:stream-top', String(name), !!on),
+
   // Save a chat file (a normal link would open in the system browser)
   download: (url) => ipcRenderer.invoke('desktop:download', url),
 
