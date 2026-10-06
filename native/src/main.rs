@@ -5,6 +5,8 @@
 // The app starts it as a child process and talks to it in JSON lines on
 // stdin/stdout (proto.rs); it relays the WebRTC signaling to the viewers.
 mod audio;
+#[cfg(target_os = "windows")]
+mod d3d;
 mod encode;
 mod engine;
 mod frame;
