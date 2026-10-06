@@ -29,7 +29,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
 **Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D32), and servers followed (D42): a server now pins the key that first says hello as a profile id. Still no accounts.
 
-## D4: JSON file for server state · Active
+## D4: JSON file for server state · Active · One file became several (D56)
 **Decision:** `data/state.json`, rewritten with a debounced (500 ms) atomic write. History is capped at 500 messages per channel.
 **Consequences:** trivial to inspect, back up and reset, with no DB dependency. It rewrites the whole file on each change, which is fine for friend-group traffic. Custom emojis are stored inline as data URLs (≤256 KB each), so the file grows with them.
 **Alternatives:** SQLite. It's already present for the game and would be the move if history needs to be unbounded or searchable.
@@ -817,3 +817,23 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** keeping guests but ignoring relay lists from people who aren't contacts yet (the login relay still works for any server a person has bookmarked, and the unsolicited offer stays); refusing the nonce-only answer outright (locks every app from before this out of DMs on the day a server updates); a `v: 2` flag kept per profile id rather than per key (a mailbox is filed under the key, and on a server without invites there is no pinned id to hang it on); a ratchet for forward secrecy (a different problem: D32's consequence stands).
 
+## D56: The server state is saved in pieces, off the event loop · Active
+**Context:** D4's `state.json` held everything: every channel's messages, every profile with its avatar and background as data URLs, the emojis, and the rest. Every message, edit, reaction, connect and disconnect rewrote all of it with `JSON.stringify` and `writeFileSync` on the event loop. With 24 members with pictures, 20 emojis and 8 full channels the file is 27 MB, and one save holds the event loop for about 140 ms, during which voice signaling and every other socket wait. The DM mailboxes (`mail.json`) had the same shape.
+
+**Decision:**
+- **Pieces.** `state.json` keeps the small, rarely changed part (name, channels, roles, invites, bans, pins, file list). Each profile, each text channel's messages, the emojis and each mailbox is a JSON file of its own (`profiles/`, `messages/`, `emojis.json`, `mail/`). The in-memory `state` object is unchanged, so nothing that reads it changed.
+- **Marked by hand.** `save()`, `saveProfile(id)`, `saveMessages(channelId)`, `saveEmojis()` and `saveMail(address)` each mark one piece. A message rewrites one channel's file; someone going offline rewrites one profile's.
+- **Written off the event loop** (`persist.js`): `fs.promises`, to a `.tmp` file that is renamed, 500 ms after the first change. The stall is the `JSON.stringify` of one piece. The synchronous write is kept for `close()` and the crash handler, and for the migration.
+- **File names** are the id for the hex ids the server makes, and a hash of it for anything else: profile ids are client-made, so they can't be trusted as file names, and two that differ only in case would share a file on macOS and Windows.
+- **Migration at start, with a copy.** A `state.json` without `format: 2` is copied to `state.pre-split.json`, split, and rewritten last. `mail.json` likewise. An old `state.json` put back later is treated as a restore and replaces the pieces.
+- **While there:** channels and files are found through a `Map`, and the bytes in use are a running total, where each was a scan of the list per call.
+
+**Consequences:**
+- The same scenario (a message every 100 ms on the 27 MB server above): the longest stall went from 139 ms to 3 ms.
+- Backups need the folders too, as they already needed `files/`. The data dir is still plain JSON that can be read, edited and deleted by hand; a file that can't be read is skipped with a warning, where a damaged `state.json` used to mean starting empty.
+- The pieces are not written together. After a crash or power loss, one piece can be up to half a second ahead of another: a message whose attachment is not yet in the file list, say. Each file by itself is always whole.
+- **Going back to an older version** needs `state.pre-split.json` put back as `state.json`. An older server started on split data sees no members and no history, and members then need an invite again. Auto-update never goes back, so this takes a deliberate image rollback.
+- A place that changes a profile, a message or the emojis and calls only `save()` loses that change at the next restart. It is the price of not tracking changes automatically.
+- A profile's file still holds its pictures, so a disconnect rewrites up to a megabyte, though no longer on the event loop. Taking the pictures out of the profiles is issue #104.
+
+**Alternatives:** `node:sqlite` for messages (already used by the game, so D13 holds): each write would be small, but synchronous, the module is not marked stable in Node 22, and history stays capped at 500 per channel, so one file per channel is small enough. An append-only log per channel: edits, reactions and deletes need compaction, for a file that is rewritten in a few milliseconds anyway. One write of the whole state in a worker thread: the copy to the worker still stalls the loop. Tracking changes with a `Proxy`, so no call can be forgotten: every read of `state` would pay for it.

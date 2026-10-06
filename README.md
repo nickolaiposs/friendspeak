@@ -335,7 +335,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 
 **TLS.** With `HTTPS=1`, desktop-app users are asked once to trust the server's certificate fingerprint (printed in the container log). Alternatively, put the container behind a reverse proxy with a real certificate (Nginx Proxy Manager, Traefik, Caddy, …), set `HTTPS=0`, **enable WebSocket support** on the proxy, and stop publishing the port publicly. With a domain, [Deploy on a domain](#deploy-on-a-domain-docker--caddy) is that, ready made.
 
-**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, history, emojis, file list), `files/` (uploaded files), `mail.json` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes, the dashboard's path and the 2-step secrets) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
+**Data.** Everything lives in the `friendspeak-data` volume: `state.json` (channels, roles, invites, file list), `profiles/`, `messages/` and `emojis.json` (members, history, emojis), `files/` (uploaded files), `mail/` (DM mailboxes), `game.sqlite` (penguins), `game-secret`, the TLS key/cert, and for the [admin dashboard](#admin-dashboard) `admin.json` (the admin keys, as hashes, the dashboard's path and the 2-step secrets) and `admin-audit.log`. Back it up. If it's recreated, the certificate changes and desktop users see a "certificate changed" warning.
 
 ### Automatic updates
 

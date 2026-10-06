@@ -29,7 +29,7 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Syntax check
         run: |
-          for f in server.js updater.js admin.js logbuffer.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
+          for f in server.js updater.js admin.js logbuffer.js persist.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
           for f in public/js/*.js admin-ui/js/*.js admin-ui/js/views/*.js; do node --check --input-type=module < "$f" || { echo "in $f"; exit 1; }; done
       - name: Deploy stack
         run: |
