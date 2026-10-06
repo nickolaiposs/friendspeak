@@ -28,6 +28,10 @@ impl Soft {
             .sps_pps_strategy(SpsPpsStrategy::ConstantId)
             .complexity(Complexity::Low)
             .skip_frames(true)
+            // Its scene change detection answers a busy picture with a keyframe of its own: measured on a
+            // scrolling screen at 720p, one of 100 kB about every second, each holding the picture for 190 ms.
+            // Keyframes are for viewers who ask.
+            .scene_change_detect(false)
             .intra_frame_period(IntraFramePeriod::from_num_frames(0)) // keyframes on request only (PLI)
             .num_threads(threads);
         let enc = Oh::with_api_config(OpenH264API::from_source(), config).map_err(|e| e.to_string())?;
