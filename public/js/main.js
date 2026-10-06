@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, mediaResolver, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -1515,6 +1515,14 @@ function openSocket(entry, rejoinVoice = null) {
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
   c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
+  // Pictures come as references to this server (D57). They are made into addresses here, on the
+  // payload itself: onAny listeners run before the handlers below.
+  const media = mediaResolver(entry.address);
+  socket.onAny((event, payload) => {
+    if (event === 'users') media.users(payload);
+    else if (event === 'profile') media.profile(payload);
+    else if (event === 'emoji:added') media.emoji(payload?.emoji);
+  });
 
   socket.on('connect', async () => {
     const identity = await identityFor(me()).catch(() => null);
@@ -1524,6 +1532,7 @@ function openSocket(entry, rejoinVoice = null) {
       password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
       uploadKey: true,
+      proto: 2, // pictures by reference, `profile:seen`, `emoji:added` and `emoji:removed` (D57)
     });
     if (res.error) {
       log.warn(`${host} refused hello: ${res.error}`);
@@ -1542,6 +1551,8 @@ function openSocket(entry, rejoinVoice = null) {
       DM.setServers(servers.all());
     }
     DM.retry(entry.address); // its DM socket was refused if it got there before we had joined
+    media.server(res.server);
+    media.users(res.users);
     Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
@@ -1717,13 +1728,26 @@ function openSocket(entry, rejoinVoice = null) {
     if (S.channelId && !inDmView()) renderMessages(true); // #channel links follow renames
   });
 
-  socket.on('emojis', (emojis) => {
+  const onEmojis = (emojis) => {
     c.server.emojis = emojis;
     if (!viewed()) return;
     updatePickerEmojis();
     renderChannels();
     refreshChatTitle();
     if (S.channelId) renderMessages(true);
+  };
+  socket.on('emojis', onEmojis);
+  // The one that changed, from servers that send that instead of the whole set (D57)
+  socket.on('emoji:added', ({ emoji } = {}) => {
+    if (c.server && emoji && typeof emoji.name === 'string') onEmojis([...c.server.emojis.filter((e) => e.name !== emoji.name), emoji]);
+  });
+  socket.on('emoji:removed', ({ name } = {}) => {
+    if (c.server) onEmojis(c.server.emojis.filter((e) => e.name !== name));
+  });
+  // Someone went offline: their last-seen time, which a profile card shows (D57)
+  socket.on('profile:seen', ({ id, seen } = {}) => {
+    const p = c.server?.profiles?.[id];
+    if (p && Number.isFinite(seen)) p.seen = seen;
   });
 
   socket.on('msg:new', ({ channelId, message }) => {

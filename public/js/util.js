@@ -325,11 +325,39 @@ export function fmtTime(ts) {
 
 export const shortTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
+const SERVER_MEDIA = /^(https?:\/\/[^/\s"'<>]+)\/media\/[0-9a-f]{64}$/;
+const mediaOrigins = new Set(); // of the servers mediaResolver() was asked for
 // Is this an uploaded (data URL) or linked (https) image, rather than an emoji or color?
 // An image a profile, a server or a GIF message may point at: one that travels with it (a data URL),
 // or a GIF on GIPHY, which is where the picker gets them. Not any https address: whoever runs it would
 // learn the address of everyone who is shown the picture, and when. server.js has the same rule.
-export const isImage = (v) => typeof v === 'string' && /^(data:image\/|https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$)/.test(v);
+// Or one a server we are connected to serves itself (D57): that server knows our address already.
+export const isImage = (v) => typeof v === 'string' && (/^(data:image\/|https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$)/.test(v) || mediaOrigins.has(SERVER_MEDIA.exec(v)?.[1]));
+// Pictures a server sends by reference ('/media/<hash>', D57) made into addresses on that server,
+// in place: { profile(p), emoji(e), users(list), server(helloAck.server) }. Asking for one is what
+// makes isImage() accept that server's pictures.
+export function mediaResolver(address) {
+  const origin = new URL(address).origin;
+  mediaOrigins.add(origin);
+  const abs = (v) => (typeof v === 'string' && /^\/media\/[0-9a-f]{64}$/.test(v) ? origin + v : v);
+  const profile = (p) => {
+    if (!p || typeof p !== 'object') return;
+    if (p.avatar) p.avatar = abs(p.avatar);
+    if (p.banner) p.banner = abs(p.banner);
+  };
+  const emoji = (e) => {
+    if (e && typeof e === 'object') e.url = abs(e.url);
+  };
+  return {
+    profile,
+    emoji,
+    users: (list) => Array.isArray(list) && list.forEach(profile),
+    server: (sv) => {
+      if (sv?.profiles && typeof sv.profiles === 'object') Object.values(sv.profiles).forEach(profile);
+      if (Array.isArray(sv?.emojis)) sv.emojis.forEach(emoji);
+    },
+  };
+}
 
 // Turn any image file the browser can decode into a data URL that fits in
 // maxBytes: downscaled to `max` px on the long side and re-encoded. Animated
