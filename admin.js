@@ -845,7 +845,7 @@ function createAdmin(ctx) {
 
   const DELETED = '(deleted channel)';
   const DATA_FILES = ['state.json', 'emojis.json', 'game.sqlite', 'admin-audit.log'];
-  const DATA_DIRS = ['profiles', 'messages', 'mail', 'logs', 'crashes']; // the pieces of the saved state (D56), and the logs
+  const DATA_DIRS = ['profiles', 'messages', 'mail', 'logs', 'crashes']; // the pieces of the saved state (D57), and the logs
   const OLD_FILES = ['state.pre-split.json', 'mail.pre-split.json']; // copies from before the split: listed while they exist
   api.get('/storage', async (_req, res) => {
     const st = ctx.state();

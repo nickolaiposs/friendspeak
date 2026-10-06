@@ -29,7 +29,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
 **Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D32), and servers followed (D42): a server now pins the key that first says hello as a profile id. Still no accounts.
 
-## D4: JSON file for server state · Active · One file became several (D56)
+## D4: JSON file for server state · Active · One file became several (D57)
 **Decision:** `data/state.json`, rewritten with a debounced (500 ms) atomic write. History is capped at 500 messages per channel.
 **Consequences:** trivial to inspect, back up and reset, with no DB dependency. It rewrites the whole file on each change, which is fine for friend-group traffic. Custom emojis are stored inline as data URLs (≤256 KB each), so the file grows with them.
 **Alternatives:** SQLite. It's already present for the game and would be the move if history needs to be unbounded or searchable.
@@ -817,7 +817,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** keeping guests but ignoring relay lists from people who aren't contacts yet (the login relay still works for any server a person has bookmarked, and the unsolicited offer stays); refusing the nonce-only answer outright (locks every app from before this out of DMs on the day a server updates); a `v: 2` flag kept per profile id rather than per key (a mailbox is filed under the key, and on a server without invites there is no pinned id to hang it on); a ratchet for forward secrecy (a different problem: D32's consequence stands).
 
-## D56: The server state is saved in pieces, off the event loop · Active
+## D57: The server state is saved in pieces, off the event loop · Active
 **Context:** D4's `state.json` held everything: every channel's messages, every profile with its avatar and background as data URLs, the emojis, and the rest. Every message, edit, reaction, connect and disconnect rewrote all of it with `JSON.stringify` and `writeFileSync` on the event loop. With 24 members with pictures, 20 emojis and 8 full channels the file is 27 MB, and one save holds the event loop for about 140 ms, during which voice signaling and every other socket wait. The DM mailboxes (`mail.json`) had the same shape.
 
 **Decision:**

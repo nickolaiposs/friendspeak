@@ -111,7 +111,7 @@ async function startServer(opts = {}) {
       } catch {}
     }
   }
-  // What is saved, in pieces that are written on their own (D56): state.json has everything but
+  // What is saved, in pieces that are written on their own (D57): state.json has everything but
   // the profiles, the messages and the emojis
   const STATE_FILE = path.join(DATA_DIR, 'state.json');
   const STATE_FORMAT = 2; // 2: the pieces have files of their own
@@ -151,7 +151,7 @@ async function startServer(opts = {}) {
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
   // Mailboxes for direct messages (D32): sealed blobs the server can't read
-  const MAIL_FILE = path.join(DATA_DIR, 'mail.json'); // from before D56: all mailboxes in one file
+  const MAIL_FILE = path.join(DATA_DIR, 'mail.json'); // from before D57: all mailboxes in one file
   const MAIL_DIR = path.join(DATA_DIR, 'mail'); // one file per mailbox
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
   const MAX_MAILBOX_ITEMS = 500;
@@ -238,7 +238,7 @@ async function startServer(opts = {}) {
 
   let state;
   let pinsMissing = false; // a state.json from before D42: pin the keys its profiles already have
-  let unsplit = false; // a state.json from before D56, with everything in it: split below, once save() exists
+  let unsplit = false; // a state.json from before D57, with everything in it: split below, once save() exists
   try {
     state = readJson(STATE_FILE);
     pinsMissing = !state.pins;
@@ -418,7 +418,7 @@ async function startServer(opts = {}) {
     lastSaveError = Date.now();
     console.error(`[server] could not save ${what}: ${err.message}`);
   }
-  // Saving (D56): each of these marks one piece as changed, and persist.js writes it half a second
+  // Saving (D57): each of these marks one piece as changed, and persist.js writes it half a second
   // later, off the event loop. Call the one for what you changed: save() alone no longer covers
   // a profile, a channel's messages or the emojis.
   const disk = createPersist({ delay: 500, onError: saveFailed });
@@ -965,7 +965,7 @@ async function startServer(opts = {}) {
   // mailbox is filed under the hash of its owner's public key, and only
   // someone who proves they hold that key gets its contents.
   // address -> { seen, items: [{ id, blob, ts }] }
-  // Each mailbox is a piece of its own on disk (D56): mail/<name>.json
+  // Each mailbox is a piece of its own on disk (D57): mail/<name>.json
   const mail = new Map();
   let closing = false; // close() was called: sockets are going away with the server
   const isBox = (box) => isObj(box) && Array.isArray(box.items);
