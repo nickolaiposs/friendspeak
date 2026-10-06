@@ -102,6 +102,10 @@ function chatById(id) {
   return ch?.type === 'text' ? ch : null;
 }
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
+// What of a `users` entry a member row shows, and a row in the channel list (voice, game)
+const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing'];
+const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
+const sameUsers = (a, b, fields) => a.length === b.length && a.every((u, i) => fields.every((f) => u[f] === b[i][f]));
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
 
 // ---------------------------------------------------------------- permissions
@@ -856,7 +860,7 @@ setInterval(() => {
   if (!v || !dmCallUi.el?.isConnected) return;
   const levels = v.levels();
   if (audio.selfAnalyser) levels.set(me().id, Level(audio.selfAnalyser));
-  for (const el of $$('.tile[data-who]', dmCallUi.el)) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
+  for (const el of dmCallUi.el.getElementsByClassName('tile')) if (el.dataset.who) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
 }, 90);
 
 // ---------------------------------------------------------------- toasts, modals, popovers
@@ -1632,15 +1636,24 @@ function openSocket(entry, rejoinVoice = null) {
     syncForced(c);
     if (calling()) syncStage();
     if (!viewed()) return calling() && renderVoicePanel(); // its video button follows who is sharing
-    renderChannels();
-    renderMembers();
+    // Only what changed is drawn again: a mute toggle isn't in the member list, and someone
+    // who is in no voice channel and no game isn't in the channel list
+    const listed = (us) => us.filter((u) => u.voice || u.playing);
+    if (!sameUsers(listed(prev), listed(users), VOICE_ROW)) renderChannels();
+    if (!sameUsers(prev, users, MEMBER_ROW)) renderMembers();
   });
 
   socket.on('profile', (p) => {
     if (!c.server) return;
+    const was = c.server.profiles[p.id];
     c.server.profiles[p.id] = p;
     if (!viewed()) return;
-    if (S.channelId) renderMessages(true);
+    const same = (k) => was[k] === p[k];
+    // Someone came or went: only their last-seen time moved, and nothing on screen shows that
+    if (was && ['name', 'color', 'avatar', 'banner', 'status'].every(same)) return;
+    // A name is in other people's messages too (mentions, replies, #tags of shared names): all of them.
+    // A color or a picture is only on the person's own.
+    if (S.channelId) was && same('name') ? redrawMessages((m) => m.author === p.id) : renderMessages(true);
     renderMembers();
   });
 
@@ -1802,8 +1815,13 @@ function openSocket(entry, rejoinVoice = null) {
     linkPreviews.delete(`${c.server.id}/${channelId}/${messageId}`);
     if (!viewed()) return;
     const list = S.messages.get(channelId);
-    if (list) S.messages.set(channelId, list.filter((m) => m.id !== messageId));
-    if (channelId === S.channelId) renderMessages(true);
+    const i = list ? list.findIndex((m) => m.id === messageId) : -1;
+    if (i < 0) return;
+    list.splice(i, 1);
+    if (channelId !== S.channelId) return;
+    messageNode(messageId)?.remove();
+    // The one after it may no longer follow a message by the same person, and replies to it lose their quote
+    redrawMessages((m, at) => at === i || m.replyTo === messageId);
   });
 
   socket.on('files:new', ({ storage }) => {
@@ -1935,12 +1953,17 @@ function syncVoiceState() {
   renderDmCall();
 }
 
-// Speaking indicators, polled from analysers.
+// Speaking indicators, polled from analysers. The two lists are live collections: the browser
+// keeps them until the page changes, where a selector would search the whole page on every tick.
+const voiceUserEls = document.getElementsByClassName('voice-user');
+const tileEls = document.getElementsByClassName('tile');
 setInterval(() => {
   if (!S.voiceChannel) return;
   const levels = S.voice.levels();
   if (audio.selfAnalyser) levels.set(S.call.sid, Level(audio.selfAnalyser));
-  for (const el of $$('.voice-user, .tile[data-sid]')) el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
+  const mark = (el) => el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
+  for (const el of voiceUserEls) mark(el);
+  for (const el of tileEls) if (el.dataset.sid) mark(el);
 }, 90);
 
 // ---------------------------------------------------------------- sidebar
@@ -2566,8 +2589,12 @@ function renderMembers() {
   const inVoice = S.users.filter((u) => u.voice).sort(byName);
   const rest = S.users.filter((u) => !u.voice).sort(byName);
   // Everyone who has been here before and isn't now (banned people are listed in Server settings)
+  // Worked out once, not per row
+  const online = new Set(S.users.map((u) => u.id));
+  const banned = new Set((S.server.bans || []).map((b) => b.profileId));
+  const dup = sharedNames();
   const offline = Object.entries(S.server.profiles || {})
-    .filter(([pid]) => !isOnline(pid) && !isBanned(pid))
+    .filter(([pid]) => !online.has(pid) && !banned.has(pid))
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
     .sort(byName);
   const hideOffline = settings.get().hideOffline;
@@ -2590,7 +2617,7 @@ function renderMembers() {
       h(
         'div',
         { class: 'member-names' },
-        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
+        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name, dup) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
         h(
           'div',
           { class: 'member-status' },
@@ -3000,6 +3027,14 @@ function renderMessages(keepScroll = false) {
 
 const atBottomOrNew = (box) => box.scrollHeight - box.scrollTop - box.clientHeight < 400;
 
+const messageNode = (id) => $('#messages')?.querySelector(`.msg[data-id="${CSS.escape(String(id))}"]`);
+// Draw again, in place, the messages in view that match(m, index): the rest of the list is left alone
+function redrawMessages(match) {
+  const list = S.messages.get(S.channelId);
+  if (!list || !$('#messages')) return;
+  list.forEach((m, i) => match(m, i) && messageNode(m.id)?.replaceWith(messageEl(m, list[i - 1])));
+}
+
 function appendMessage(m, force) {
   const box = $('#messages');
   if (!box) return;
@@ -3034,9 +3069,21 @@ async function onMessagesScroll(e) {
   if (cid !== S.channelId) return;
   const older = res.messages || [];
   S.hasMore.set(cid, older.length >= 50);
-  S.messages.set(cid, [...older, ...list]);
+  const all = [...older, ...list];
+  S.messages.set(cid, all);
   const fromBottom = box.scrollHeight - box.scrollTop;
-  renderMessages(true);
+  const first = messageNode(list[0].id);
+  // The start of the channel has its intro to draw, so that goes the long way
+  if (!S.hasMore.get(cid) || !first) renderMessages(true);
+  else {
+    // Put the older ones above what is there. Of those, only the first (it may now follow a message
+    // by the same person) and replies to one of the older ones (their quote is known now) change.
+    const frag = document.createDocumentFragment();
+    older.forEach((m, i) => frag.append(messageEl(m, older[i - 1])));
+    box.insertBefore(frag, first);
+    const ids = new Set(older.map((m) => m.id));
+    redrawMessages((m, i) => i === older.length || (i > older.length && ids.has(m.replyTo)));
+  }
   box.scrollTop = box.scrollHeight - fromBottom;
 }
 
