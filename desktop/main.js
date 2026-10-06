@@ -19,6 +19,8 @@ const { createLogs, originOf } = require('./logs');
 const APP = 'friendspeak://app'; // the origin of the app's own page
 const isApp = (url) => typeof url === 'string' && (url === APP || url.startsWith(APP + '/'));
 const GAME_WINDOW = 'friendspeak-game'; // the name the page gives the game's pop-out window (popOutGame in main.js)
+const STREAM_WINDOW = 'friendspeak-stream-'; // and the start of the name of the video grid's window (popOutStage in main.js)
+const STREAM_PAGE = APP + '/popout.html';
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const MODULES = path.join(ROOT, 'node_modules');
@@ -173,6 +175,7 @@ function acceptPinnedCertificates() {
 // ---------------------------------------------------------------- window
 
 let win = null;
+const streamWindows = new Map(); // window name -> BrowserWindow, for the video grid in a window of its own
 
 // Everything the bridge in preload.js can ask for is for the app's own page, in the main frame of its own
 // window. The game's window and iframes don't get the bridge today; this holds if that ever changes.
@@ -214,12 +217,25 @@ function createWindow() {
         },
       };
     }
+    // The video grid in a window of its own: a page of the app's with no script, which the app's page fills
+    if (frameName.startsWith(STREAM_WINDOW) && url === STREAM_PAGE) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: { width: 1100, height: 680, minWidth: 480, minHeight: 300, title: 'friendspeak', autoHideMenuBar: true, backgroundColor: '#000000' },
+      };
+    }
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
 
   // The game's window stays on the server it was opened for, and what it opens goes to the real browser
-  win.webContents.on('did-create-window', (child, { url }) => {
+  win.webContents.on('did-create-window', (child, { url, frameName }) => {
+    if (frameName.startsWith(STREAM_WINDOW)) {
+      // No menu: its reload and zoom items are for a page that can draw itself
+      child.removeMenu();
+      streamWindows.set(frameName, child);
+      child.on('closed', () => streamWindows.delete(frameName));
+    }
     const origin = originOf(url);
     child.webContents.setWindowOpenHandler(({ url: to }) => {
       if (/^https?:\/\//.test(to)) shell.openExternal(to);
@@ -266,7 +282,11 @@ function createWindow() {
   });
 
   win.loadURL('friendspeak://app/index.html');
-  win.on('closed', () => (win = null));
+  win.on('closed', () => {
+    win = null;
+    // The video grid's window is drawn by the app's page: without it there is nothing to show
+    for (const w of streamWindows.values()) if (!w.isDestroyed()) w.destroy();
+  });
 }
 
 // What the app's page may load and run. Messages are drawn from escaped text (formatText in
@@ -641,6 +661,12 @@ handle('desktop:download', (_e, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) win?.webContents.downloadURL(url);
 });
 // Notification clicks bring the window back
+// The video grid's window can stay above other windows (its "Keep on top" button)
+handle('desktop:stream-top', (_e, name, on) => {
+  const w = streamWindows.get(name);
+  if (w && !w.isDestroyed()) w.setAlwaysOnTop(!!on, 'floating');
+});
+
 handle('desktop:focus', () => {
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
