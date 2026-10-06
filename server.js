@@ -15,6 +15,7 @@ const { startGame } = require('./game');
 const { createUpdater } = require('./updater');
 const logbuffer = require('./logbuffer');
 const { createCrashLog } = require('./crashlog');
+const { createPersist } = require('./persist');
 const { createAdmin } = require('./admin');
 
 const VERSION = require('./package.json').version;
@@ -110,7 +111,14 @@ async function startServer(opts = {}) {
       } catch {}
     }
   }
+  // What is saved, in pieces that are written on their own (D57): state.json has everything but
+  // the profiles, the messages and the emojis
   const STATE_FILE = path.join(DATA_DIR, 'state.json');
+  const STATE_FORMAT = 2; // 2: the pieces have files of their own
+  const PROFILES_DIR = path.join(DATA_DIR, 'profiles'); // one file per profile
+  const MESSAGES_DIR = path.join(DATA_DIR, 'messages'); // one file per text channel
+  const EMOJIS_FILE = path.join(DATA_DIR, 'emojis.json');
+  const SEEN_FILE = path.join(DATA_DIR, 'seen.json'); // when each profile was last online: changes far more often than the profiles do (D58)
   const MAX_HISTORY = 500;
   const MAX_SEARCH_RESULTS = 50;
   const MAX_MESSAGE_LEN = 4000;
@@ -144,16 +152,26 @@ async function startServer(opts = {}) {
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
   // Mailboxes for direct messages (D32): sealed blobs the server can't read
-  const DM_GUESTS = opts.dmGuests !== false;
-  const MAIL_FILE = path.join(DATA_DIR, 'mail.json');
+  const MAIL_FILE = path.join(DATA_DIR, 'mail.json'); // from before D57: all mailboxes in one file
+  const MAIL_DIR = path.join(DATA_DIR, 'mail'); // one file per mailbox
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
   const MAX_MAILBOX_ITEMS = 500;
   const MAX_MAILBOX_BYTES = 8 * 1024 * 1024;
   const MAX_MAILBOXES = 5000;
+  const MAX_DM_KEYS = 20000; // keys remembered as answering the /dm challenge the new way
   const MAIL_TTL = 30 * 864e5; // mail nobody collected
   const MAILBOX_IDLE = 90 * 864e5; // an empty mailbox whose owner never came back
 
   fs.mkdirSync(FILES_DIR, { recursive: true });
+  for (const dir of [PROFILES_DIR, MESSAGES_DIR, MAIL_DIR]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // What holds messages, invites, keys and addresses is for the server's own user only. Files
+  // from before this were made with the default mode: tighten them (best effort: some volumes can't).
+  const ownerOnly = (file) => {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {}
+  };
+  for (const name of ['state.json', 'emojis.json', 'seen.json', 'mail.json', 'state.pre-split.json', 'mail.pre-split.json', 'key.pem', 'game.sqlite', 'game-secret']) ownerOnly(path.join(DATA_DIR, name));
 
   // Self-update from GitHub Releases (updater.js, D29). Clients learn about a
   // scheduled update from `server:update` and show a maintenance warning.
@@ -189,20 +207,67 @@ async function startServer(opts = {}) {
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
       inviteOnly: true, // joining takes an invite (D51); from Settings → Server. `invites` is added below, so a first start can be told apart
+      dmV2: [], // keys that have answered the /dm challenge bound to the host: the older answer is refused for them from then on (D55); never sent to clients
       pins: {}, // profileId -> the Ed25519 public key that must sign its hello (D42); kept when a member is removed; never sent to clients
     };
   }
 
+  // A piece's file name: the id when it is plain lowercase hex (what this server makes), else a
+  // hash of it. Profile ids come from clients, and two that differ only in case must not share a file.
+  const pieceName = (key) => (/^[0-9a-f]{8,64}$/.test(key) ? key : 'x' + crypto.createHash('sha256').update(String(key)).digest('hex').slice(0, 40)) + '.json';
+  const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
+  // The pieces in a folder, as [id, value]: each file is { id, [field]: value }. One that can't be
+  // read is skipped with a warning; a .tmp file is what a write that was cut short left behind.
+  function readPieces(dir, field) {
+    const out = [];
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (!name.endsWith('.json')) {
+        if (name.endsWith('.tmp')) fs.rmSync(full, { force: true });
+        continue;
+      }
+      try {
+        const v = readJson(full);
+        if (typeof v?.id !== 'string' || pieceName(v.id) !== name) throw new Error('it is not named after its id');
+        out.push([v.id, v[field]]);
+      } catch (err) {
+        console.warn(`[server] skipped ${path.basename(dir)}/${name}: ${err.message}`);
+      }
+    }
+    return out;
+  }
+
   let state;
   let pinsMissing = false; // a state.json from before D42: pin the keys its profiles already have
+  let unsplit = false; // a state.json from before D57, with everything in it: split below, once save() exists
   try {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    state = readJson(STATE_FILE);
     pinsMissing = !state.pins;
+    unsplit = !(state.format >= STATE_FORMAT);
     state = { ...defaultState(), ...state };
     delete state.dms; // DMs used to be stored here; they're peer to peer now (D28)
   } catch {
     state = defaultState();
   }
+  if (!unsplit) {
+    state.profiles = {};
+    for (const [pid, p] of readPieces(PROFILES_DIR, 'profile')) if (p && typeof p === 'object' && !Array.isArray(p)) state.profiles[pid] = p;
+    // A file for a channel that isn't there is left alone: channel:delete removes them, and a
+    // damaged state.json must not cost the history too
+    state.messages = {};
+    for (const [cid, list] of readPieces(MESSAGES_DIR, 'messages')) if (Array.isArray(list)) state.messages[cid] = list;
+    try {
+      state.emojis = readJson(EMOJIS_FILE);
+    } catch {
+      state.emojis = [];
+    }
+    if (!Array.isArray(state.emojis)) state.emojis = [];
+    // Coming and going only writes seen.json, so it is newer than what the profile's own file says
+    try {
+      for (const [pid, seen] of Object.entries(readJson(SEEN_FILE))) if (Object.hasOwn(state.profiles, pid) && Number.isFinite(seen) && !(state.profiles[pid].seen >= seen)) state.profiles[pid].seen = seen;
+    } catch {}
+  }
+  state.format = STATE_FORMAT;
   // What message links name this server by: made once, the same at every address it has
   const newServerId = typeof state.id !== 'string' || !/^[\w-]{8,64}$/.test(state.id);
   if (newServerId) state.id = crypto.randomBytes(8).toString('hex');
@@ -351,7 +416,6 @@ async function startServer(opts = {}) {
     },
   });
 
-  let saveTimer = null;
   // A full disk or a read-only volume fails every save: say so, but not on every one
   let lastSaveError = 0;
   function saveFailed(what, err) {
@@ -359,22 +423,56 @@ async function startServer(opts = {}) {
     lastSaveError = Date.now();
     console.error(`[server] could not save ${what}: ${err.message}`);
   }
-  function writeState() {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    const tmp = STATE_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(state));
-    fs.renameSync(tmp, STATE_FILE);
-  }
+  // Saving (D57): each of these marks one piece as changed, and persist.js writes it half a second
+  // later, off the event loop. Call the one for what you changed: save() alone no longer covers
+  // a profile, a channel's messages or the emojis.
+  const disk = createPersist({ delay: 500, onError: saveFailed });
+  const profileFile = (pid) => path.join(PROFILES_DIR, pieceName(pid));
+  const messagesFile = (cid) => path.join(MESSAGES_DIR, pieceName(cid));
+  const stateChanged = () => adminRef.current?.notify('state');
+  // Everything in `state` but the pieces below
   function save() {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      try {
-        writeState();
-      } catch (err) {
-        saveFailed('the server state', err);
-      }
-    }, 500);
-    adminRef.current?.notify('state');
+    disk.write(STATE_FILE, () => ({ ...state, profiles: undefined, messages: undefined, emojis: undefined }), 'the server state');
+    stateChanged();
+  }
+  // state.profiles[pid]: stored, changed or deleted
+  function saveProfile(pid) {
+    disk.write(profileFile(pid), () => (Object.hasOwn(state.profiles, pid) ? { id: pid, profile: state.profiles[pid] } : undefined), 'a profile');
+    stateChanged();
+  }
+  // state.messages[cid]: a message added, changed or deleted, or the channel gone
+  function saveMessages(cid) {
+    disk.write(messagesFile(cid), () => (Object.hasOwn(state.messages, cid) ? { id: cid, messages: state.messages[cid] } : undefined), 'the messages');
+    stateChanged();
+  }
+  function saveEmojis() {
+    disk.write(EMOJIS_FILE, () => state.emojis, 'the emojis');
+    stateChanged();
+  }
+  // Only a profile's `seen` changed (someone came or went): a small file of its own, so their pictures aren't written again
+  function saveSeen() {
+    disk.write(SEEN_FILE, () => Object.fromEntries(Object.entries(state.profiles).map(([pid, p]) => [pid, p.seen])), 'the last-seen times');
+    stateChanged();
+  }
+  // A state.json from before the split: keep a copy of it, then write every piece. state.json goes
+  // last, and only then says it is split, so a run that is cut short starts over from the same file.
+  // What the folders held before is from another state.json (one restored from a backup): it goes.
+  if (unsplit) {
+    const backup = path.join(DATA_DIR, 'state.pre-split.json');
+    fs.copyFileSync(STATE_FILE, backup);
+    ownerOnly(backup);
+    for (const dir of [PROFILES_DIR, MESSAGES_DIR]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }
+    for (const pid of Object.keys(state.profiles)) saveProfile(pid);
+    for (const cid of Object.keys(state.messages)) saveMessages(cid);
+    saveEmojis();
+    saveSeen();
+    disk.flushSync({ strict: true });
+    save();
+    disk.flushSync({ strict: true });
+    console.log(`[server] state.json split into ${Object.keys(state.profiles).length} profiles, ${Object.keys(state.messages).length} channels of messages and the emojis; the file as it was is kept as state.pre-split.json`);
   }
   save();
 
@@ -383,12 +481,26 @@ async function startServer(opts = {}) {
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
   // Who a log line is about: a name is user input, so no control characters; plus the start of the id
   const whoIs = (p) => `${String(p?.name ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 32) || 'anon'} (${String(p?.id ?? '').slice(0, 8)})`;
-  const channel = (cid) => state.channels.find((c) => c.id === cid);
+  const channelIndex = new Map(); // id -> its entry in state.channels
+  // Call after state.channels gains or loses one
+  function indexChannels() {
+    channelIndex.clear();
+    for (const c of state.channels) if (!channelIndex.has(c.id)) channelIndex.set(c.id, c);
+  }
+  indexChannels();
+  const channel = (cid) => channelIndex.get(cid);
   const isDataImage = (v, max) =>
     typeof v === 'string' && /^data:image\/(png|jpe?g|gif|webp);base64,/.test(v) && v.length <= max * 1.4;
-  // An uploaded image (data URL) or a linked one (https only, e.g. a GIPHY GIF)
-  const isImageRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
+  // A GIF on GIPHY, where the app's picker gets them. Not any https address: its host would learn the
+  // address of everyone the image is shown to. isImage() in public/js/util.js has the same rule.
+  const isGiphy = (v) => typeof v === 'string' && v.length <= 1000 && /^https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$/.test(v);
+  // An uploaded image (data URL) or a GIF picked from GIPHY: what a member's profile may point at
+  const isImageRef = (v, max) => isDataImage(v, max) || isGiphy(v);
+  // The server's own icon may be any https image: the host chooses it (Settings → Server, the dashboard)
+  const isIconRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
+  // A message's text: no NUL (the app's renderer uses it as a marker), trimmed, capped
+  const cleanText = (v) => str(v, MAX_MESSAGE_LEN).replace(/\u0000/g, '').trim();
   const isKey = (v, len) => typeof v === 'string' && v.length === len && /^[A-Za-z0-9_-]+$/.test(v);
   // A profile's public keys for direct messages (D32). The server only passes
   // the card on; clients check its signature and pin it themselves.
@@ -450,7 +562,23 @@ async function startServer(opts = {}) {
 
   // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
   // (only channels it can see). Open mode: everything but role management and invites (those are the dashboard's until someone is an admin).
+  // The answer is kept per profile until permsStale(), and every caller gets the same frozen object:
+  // the fan-out loops ask once per socket for every message (#105).
+  const permsCache = new Map(); // profileId -> permsOf(profileId)
+  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, permissionsOn, the channels and their overrides, the pins
+  const permsStale = () => permsCache.clear();
   function permsOf(pid) {
+    let g = permsCache.get(pid);
+    if (g) return g;
+    g = resolvePerms(pid);
+    Object.freeze(g.grantable);
+    for (const c of Object.values(g.channels)) Object.freeze(c);
+    Object.freeze(g.channels);
+    if (permsCache.size >= 20000) permsCache.clear(); // ids come from clients
+    permsCache.set(pid, Object.freeze(g));
+    return g;
+  }
+  function resolvePerms(pid) {
     const open = !state.permissionsOn;
     const held = open ? [] : heldRoles(pid);
     const admin = !open && (!!state.defaultPerms.admin || held.some((r) => r.perms.admin === true));
@@ -496,20 +624,55 @@ async function startServer(opts = {}) {
   const touchable = (actor, targetPid) => isDash(actor) || !isAdminPid(targetPid) || isAdminPid(actor.profileId);
   const ADMIN_TARGET = { error: 'Only an administrator can do that to an administrator' };
 
-  function cleanProfile(p = {}) {
+  function cleanProfile(p) {
+    if (!isObj(p)) p = {};
     const pid = str(p.id, 64) || id();
     return {
       id: pid,
       card: cleanCard(p.card, pid),
       name: str(p.name, 32).trim() || 'anon',
       color: isHexColor(p.color) ? p.color : '#8b6cf6',
-      avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : str(p.avatar, 16), // image or emoji
+      avatar: isImageRef(p.avatar, MAX_AVATAR_BYTES) ? p.avatar : /^(https?:|data:)/i.test(str(p.avatar, 16)) ? '' : str(p.avatar, 16), // image or emoji; an address that isn't allowed is dropped, not cut short
       banner: isImageRef(p.banner, MAX_BANNER_BYTES) || isHexColor(p.banner) ? p.banner : '', // profile background: image or color
       status: str(p.status, 64),
     };
   }
   // `seen`: when the profile was last online (the member list's "Offline" section)
   const storedProfile = (p, seen = Date.now()) => ({ name: p.name, color: p.color, avatar: p.avatar, banner: p.banner, status: p.status, card: p.card, seen });
+  // The same but for `seen`: nothing anyone else needs to be sent again
+  const sameProfile = (a, b) => a.name === b.name && a.color === b.color && a.avatar === b.avatar && a.banner === b.banner && a.status === b.status && a.card?.s === b.card?.s && a.card?.d === b.card?.d && a.card?.sig === b.card?.sig;
+
+  // ---------- pictures by reference (D58) ----------
+
+  // Avatars, profile backgrounds and emojis are data URLs in `state`. Apps that say `proto: 2` in
+  // hello are sent a reference instead, '/media/<SHA-256 of the data URL>', and fetch the picture
+  // from GET /media/<hash> once: socket events stay small however often they repeat. Apps from
+  // before that are sent the data URLs, as ever.
+  const MEDIA_IMAGE = /^data:(image\/(?:png|jpe?g|gif|webp));base64,/;
+  const mediaRefs = new Map(); // data URL -> its hash
+  const mediaByHash = new Map(); // hash -> data URL
+  // What to send in place of `v`: a reference when it is a picture this server stores, else `v` as it is (an emoji, a GIPHY address, a color)
+  function refOf(v) {
+    if (typeof v !== 'string' || !MEDIA_IMAGE.test(v)) return v;
+    let hash = mediaRefs.get(v);
+    if (!hash) {
+      hash = crypto.createHash('sha256').update(v).digest('hex');
+      mediaRefs.set(v, hash);
+      mediaByHash.set(hash, v);
+    }
+    return '/media/' + hash;
+  }
+  const leanProfile = (p) => ({ ...p, avatar: refOf(p.avatar), banner: refOf(p.banner) });
+  const leanEmoji = (e) => ({ ...e, url: refOf(e.url) });
+  // Pictures nobody has any more (a replaced avatar, a removed emoji, someone who left) stop being served
+  function sweepMedia() {
+    const live = new Set();
+    for (const p of Object.values(state.profiles)) live.add(p.avatar).add(p.banner);
+    for (const e of state.emojis) live.add(e.url);
+    for (const [v, hash] of mediaRefs) if (!live.has(v)) (mediaRefs.delete(v), mediaByHash.delete(hash));
+  }
+  const mediaSweepTimer = setInterval(sweepMedia, 10 * 60e3);
+  mediaSweepTimer.unref();
 
   // The messages of a text channel; null if there's no such channel
   function thread(cid) {
@@ -650,10 +813,22 @@ async function startServer(opts = {}) {
   // Files live in DATA_DIR/files/<id>; metadata lives in state.files. A file
   // is uploaded over HTTP first (unattached), then attached by msg:send.
   // Unattached uploads (the send never happened) are swept after an hour.
-  const fileById = (fid) => state.files.find((f) => f.id === fid);
+  const fileIndex = new Map(); // id -> its entry in state.files
+  let fileBytes = 0; // all of them together
+  // Call after state.files loses some (adding one keeps both up to date by hand)
+  function indexFiles() {
+    fileIndex.clear();
+    fileBytes = 0;
+    for (const f of state.files) {
+      fileIndex.set(f.id, f);
+      fileBytes += f.size;
+    }
+  }
+  indexFiles();
+  const fileById = (fid) => fileIndex.get(fid);
   const filePath = (fid) => path.join(FILES_DIR, fid);
   let reserved = 0; // bytes of uploads in progress
-  const usedBytes = () => state.files.reduce((n, f) => n + f.size, 0);
+  const usedBytes = () => fileBytes;
   const usage = () => ({ used: usedBytes(), max: MAX_STORAGE });
   const publicFile = ({ id: fid, name, size, type, channelId, messageId, by, byName, ts }) => ({ id: fid, name, size, type, channelId, messageId, by, byName, ts });
 
@@ -662,13 +837,13 @@ async function startServer(opts = {}) {
     const stale = state.files.filter((f) => !f.messageId && f.ts < cutoff);
     if (stale.length) {
       state.files = state.files.filter((f) => !stale.includes(f));
+      indexFiles();
       for (const f of stale) fs.rm(filePath(f.id), { force: true }, () => {});
       save();
     }
     // Leftovers on disk that no metadata points to (e.g. interrupted uploads)
-    const known = new Set(state.files.map((f) => f.id));
     for (const name of fs.readdirSync(FILES_DIR)) {
-      if (known.has(name)) continue;
+      if (fileIndex.has(name)) continue;
       const full = path.join(FILES_DIR, name);
       try {
         if (fs.statSync(full).mtimeMs < cutoff || !name.endsWith('.part')) fs.rmSync(full, { force: true });
@@ -698,17 +873,23 @@ async function startServer(opts = {}) {
   const cors = (res) =>
     res.set({
       'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'content-type, x-friendspeak-sid, x-file-name',
+      'Access-Control-Allow-Headers': 'content-type, x-friendspeak-sid, x-friendspeak-upload, x-file-name',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     });
   app.options('/api/files', (_req, res) => cors(res).sendStatus(204));
 
   // Upload one file: raw body, name in x-file-name (URI-encoded), uploader
-  // identified by x-friendspeak-sid (a socket that passed `hello`).
+  // identified by x-friendspeak-sid (a socket that passed `hello`) and, when
+  // that socket asked for one, the upload key from its hello in x-friendspeak-upload.
   app.post('/api/files', (req, res) => {
     cors(res);
     const u = users.get(String(req.get('x-friendspeak-sid') || ''));
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
+    if (u.uploadKey) {
+      const given = Buffer.from(String(req.get('x-friendspeak-upload') || ''));
+      const want = Buffer.from(u.uploadKey);
+      if (given.length !== want.length || !crypto.timingSafeEqual(given, want)) return res.status(401).json({ error: 'Not connected to this server' });
+    }
     const ch = channel(String(req.query.channelId || ''));
     if (!ch || ch.type !== 'text') {
       console.warn(`[files] upload by ${whoIs(u.profile)} refused: no such text channel`);
@@ -772,6 +953,8 @@ async function startServer(opts = {}) {
         ts: Date.now(),
       };
       state.files.push(f);
+      fileIndex.set(f.id, f);
+      fileBytes += f.size;
       save();
       res.json({ ok: true, file: publicFile(f) });
     };
@@ -798,6 +981,22 @@ async function startServer(opts = {}) {
     res.sendFile(f.id, { root: FILES_DIR }, (err) => err && !res.headersSent && res.sendStatus(404));
   });
 
+  // A picture by reference (D58). Like a file's, the address is the capability: the hash of a
+  // picture can only be worked out by someone who has it. Only png, jpeg, gif and webp get in.
+  app.get('/media/:hash', (req, res) => {
+    const v = mediaByHash.get(req.params.hash);
+    const m = v && MEDIA_IMAGE.exec(v);
+    if (!m) return res.sendStatus(404);
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, max-age=31536000, immutable', // the address names the content
+    });
+    res.type(m[1] === 'image/jpg' ? 'image/jpeg' : m[1]).send(Buffer.from(v.slice(m[0].length), 'base64'));
+  });
+
   async function createServer() {
     if (!USE_HTTPS) return http.createServer(app);
     const keyFile = path.join(DATA_DIR, 'key.pem');
@@ -811,9 +1010,10 @@ async function startServer(opts = {}) {
         notBeforeDate: now,
         notAfterDate: new Date(now.getTime() + 10 * 365 * 864e5),
       });
-      fs.writeFileSync(keyFile, pems.private);
+      fs.writeFileSync(keyFile, pems.private, { mode: 0o600 });
       fs.writeFileSync(certFile, pems.cert);
     }
+    ownerOnly(keyFile);
     const cert = fs.readFileSync(certFile);
     fingerprint = new crypto.X509Certificate(cert).fingerprint256;
     return https.createServer({ key: fs.readFileSync(keyFile), cert }, app);
@@ -826,42 +1026,60 @@ async function startServer(opts = {}) {
   // mailbox is filed under the hash of its owner's public key, and only
   // someone who proves they hold that key gets its contents.
   // address -> { seen, items: [{ id, blob, ts }] }
-  let mail = new Map();
-  try {
-    mail = new Map(Object.entries(JSON.parse(fs.readFileSync(MAIL_FILE, 'utf8'))));
-  } catch {}
-  let mailTimer = null;
+  // Each mailbox is a piece of its own on disk (D57): mail/<name>.json
+  const mail = new Map();
   let closing = false; // close() was called: sockets are going away with the server
-  function writeMail() {
-    clearTimeout(mailTimer);
-    mailTimer = null;
-    const tmp = MAIL_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(mail)));
-    fs.renameSync(tmp, MAIL_FILE);
+  const isBox = (box) => isObj(box) && Array.isArray(box.items);
+  // The mailbox of `addr`: changed, or gone
+  const saveMail = (addr) =>
+    disk.write(path.join(MAIL_DIR, pieceName(addr)), () => (mail.has(addr) ? { id: addr, box: mail.get(addr) } : undefined), 'the mailboxes');
+  let oldMail = null; // mail.json, from before the split
+  try {
+    oldMail = Object.entries(readJson(MAIL_FILE)).filter(([addr, box]) => isKey(addr, 43) && isBox(box));
+  } catch (err) {
+    if (err.code !== 'ENOENT') console.warn(`[server] mail.json could not be read and is left alone: ${err.message}`);
   }
-  const saveMail = () =>
-    (mailTimer ||= setTimeout(() => {
-      try {
-        writeMail();
-      } catch (err) {
-        saveFailed('the mailboxes', err);
-      }
-    }, 1000));
+  if (oldMail) {
+    // Split it, as state.json is above; mail.json is renamed last, so a run that is cut short starts over
+    fs.rmSync(MAIL_DIR, { recursive: true, force: true });
+    fs.mkdirSync(MAIL_DIR, { recursive: true, mode: 0o700 });
+    for (const [addr, box] of oldMail) (mail.set(addr, box), saveMail(addr));
+    disk.flushSync({ strict: true });
+    fs.renameSync(MAIL_FILE, path.join(DATA_DIR, 'mail.pre-split.json'));
+    console.log(`[server] mail.json split into ${mail.size} mailboxes; the file as it was is kept as mail.pre-split.json`);
+  } else for (const [addr, box] of readPieces(MAIL_DIR, 'box')) if (isKey(addr, 43) && isBox(box)) mail.set(addr, box);
   function sweepMail() {
     const now = Date.now();
     for (const [addr, box] of mail) {
       const kept = box.items.filter((it) => it.ts > now - MAIL_TTL);
-      if (kept.length !== box.items.length) (box.items = kept), saveMail();
-      if (!kept.length && box.seen < now - MAILBOX_IDLE) mail.delete(addr), saveMail();
+      if (kept.length !== box.items.length) (box.items = kept), saveMail(addr);
+      if (!kept.length && box.seen < now - MAILBOX_IDLE) mail.delete(addr), saveMail(addr);
     }
   }
   sweepMail();
   const mailSweepTimer = setInterval(sweepMail, 60 * 60e3);
   mailSweepTimer.unref();
 
-  // The address (mailbox name) of whoever signed `nonce` with the Ed25519 key `s`, or null
-  const mailAddress = (s, sig, nonce) =>
-    verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce) ? crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url') : null;
+  // The address (mailbox name) of whoever answered the /dm challenge with the Ed25519 key `s`, or null.
+  // v2 signs the nonce and the host the app dialed, as `hello` does, so an answer made for one server is
+  // no use at another. v1 (apps from before that) signs the nonce alone: any server such an app talks to
+  // could pass on another server's challenge and be let in there as that person. So a key that has
+  // answered v2 here is never again accepted with v1 (`dmV2`, kept in state.json).
+  const dmV2 = new Set((Array.isArray(state.dmV2) ? state.dmV2 : []).filter((s) => isKey(s, 43)).slice(-MAX_DM_KEYS));
+  state.dmV2 = [...dmV2];
+  function mailAddress(s, sig, nonce, v, host) {
+    if (!isKey(s, 43)) return null;
+    if (v === 2) {
+      if (!verifySig(s, sig, 'friendspeak-dm-auth-v2|' + nonce + '|' + host)) return null;
+      if (!dmV2.has(s)) {
+        dmV2.add(s);
+        if (dmV2.size > MAX_DM_KEYS) dmV2.delete(dmV2.values().next().value);
+        state.dmV2 = [...dmV2];
+        save();
+      }
+    } else if (dmV2.has(s) || !verifySig(s, sig, 'friendspeak-dm-auth-v1|' + nonce)) return null;
+    return crypto.createHash('sha256').update(Buffer.from(s, 'base64url')).digest('base64url');
+  }
 
   // ---------- realtime ----------
 
@@ -869,13 +1087,10 @@ async function startServer(opts = {}) {
   // (`since` and `ip` are for the admin dashboard only; userList() never sends them)
   const users = new Map();
   usersRef = users;
-  // On a crash: what close() would write, each in its own try
+  // On a crash: what close() would write
   crashState.saveNow = () => {
     try {
-      writeState();
-    } catch {}
-    try {
-      if (mailTimer) writeMail();
+      disk.flushSync();
     } catch {}
   };
   // Who an action is credited to in the log: a member, or the dashboard (with the key that signed in)
@@ -883,12 +1098,14 @@ async function startServer(opts = {}) {
 
   // Everyone online. `g`: the perms of whoever this is for; a voice channel they can't see is left out.
   // A force-muted person is muted whatever they send, unless they may lift it themselves.
-  function userList(g) {
+  // `lean`: for apps that take pictures by reference (D58).
+  function userList(g, lean) {
     return [...users.entries()].map(([sid, { profile: { banner, ...profile }, ...u }]) => {
       const forceMuted = state.forceMuted.includes(profile.id);
       return {
         sid,
         ...profile, // minus the banner: this is re-sent on every mute toggle; clients get banners from `profiles`
+        ...(lean ? { avatar: refOf(profile.avatar) } : null),
         voice: !g || !u.voice || g.channels[u.voice]?.view ? u.voice : null,
         muted: u.muted || (forceMuted && !permsOf(profile.id).forceMute),
         forceMuted,
@@ -906,15 +1123,15 @@ async function startServer(opts = {}) {
   // The channels `g` can see; they carry their permission overrides
   const channelsFor = (g) => state.channels.filter((c) => g.channels[c.id]);
 
-  function publicState(g) {
+  function publicState(g, lean) {
     return {
       id: state.id,
       name: state.name,
       icon: state.icon,
       audioQuality: audioQuality(),
       channels: channelsFor(g),
-      emojis: state.emojis,
-      profiles: state.profiles,
+      emojis: lean ? state.emojis.map(leanEmoji) : state.emojis,
+      profiles: lean ? Object.fromEntries(Object.entries(state.profiles).map(([pid, p]) => [pid, leanProfile(p)])) : state.profiles,
       bans: publicBans(),
       roles: state.roles,
       memberRoles: state.memberRoles,
@@ -947,6 +1164,50 @@ async function startServer(opts = {}) {
       destroyUpgrade: false, // the game worlds share this http server on other paths
     });
 
+    // Every socket, on both namespaces, before its handlers are added:
+    //  - a handler that throws (a payload that isn't the object it expects) is logged and
+    //    dropped. Uncaught, it would take the whole server down.
+    //  - events are rate limited per socket: a budget that refills over time, with the heavy
+    //    events costing more. What goes over is dropped, and answered if it wanted an answer.
+    const EVENT_BUDGET = 400;
+    const EVENT_REFILL = 40; // per second
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20 };
+    let lastHandlerError = 0;
+    function guard(socket, next) {
+      const add = socket.on.bind(socket);
+      socket.on = (event, fn) => {
+        const safe = (...args) => {
+          try {
+            return fn(...args);
+          } catch (err) {
+            // Not the payload, and not more than once a second: anyone can send these
+            if (Date.now() - lastHandlerError > 1000) console.error(`[socket] ${String(event).slice(0, 32)} from ${clientIp(socket)} failed: ${err && err.message}`);
+            lastHandlerError = Date.now();
+          }
+        };
+        safe.listener = fn; // so off(event, fn) still finds it
+        return add(event, safe);
+      };
+      let budget = EVENT_BUDGET;
+      let at = Date.now();
+      socket.use((packet, proceed) => {
+        const now = Date.now();
+        budget = Math.min(EVENT_BUDGET, budget + ((now - at) / 1000) * EVENT_REFILL);
+        at = now;
+        const cost = (Object.hasOwn(EVENT_COST, packet[0]) && EVENT_COST[packet[0]]) || 1;
+        if (budget < cost) {
+          const ack = packet[packet.length - 1];
+          if (typeof ack === 'function') ack({ error: 'Too many requests, slow down' });
+          return; // dropped
+        }
+        budget -= cost;
+        proceed();
+      });
+      next();
+    }
+    io.use(guard);
+    io.of('/dm').use(guard);
+
     const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: state.permissionsOn });
     // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
     const cleanRoleName = (v) => {
@@ -971,21 +1232,46 @@ async function startServer(opts = {}) {
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
-    // `users` goes out per socket: voice channels a socket can't see are left out
+    // Every socket that said hello is in one of two rooms: LEAN for apps that take pictures by
+    // reference and the small events (`proto: 2` in hello, D58), FULL for apps from before that.
+    const LEAN = 'proto:2';
+    const FULL = 'proto:1';
+    // A profile as it is now, to both kinds of app. `from`: a socket that needn't be told.
+    function emitProfile(pid, from) {
+      const p = { id: pid, ...state.profiles[pid] };
+      const out = from ? from.broadcast : io;
+      out.to(FULL).emit('profile', p);
+      out.to(LEAN).emit('profile', leanProfile(p));
+    }
+
+    // `users` leaves out the voice channels a socket can't see. Sockets that see the same of the
+    // channels people are in get the same list, built and encoded once: all of them, usually
+    // (twice while apps from before D58 are around).
     const broadcastUsers = () => {
-      for (const [sid, u] of users) io.to(sid).emit('users', userList(permsOf(u.profile.id)));
+      const occupied = [...new Set([...users.values()].map((u) => u.voice).filter(Boolean))];
+      const groups = new Map(); // the occupied channels hidden from a socket, and its kind -> { g, lean, sids }
+      for (const [sid, u] of users) {
+        const g = permsOf(u.profile.id);
+        const key = occupied.filter((cid) => !g.channels[cid]?.view).join('|') + (u.lean ? '|lean' : '');
+        if (!groups.has(key)) groups.set(key, { g, lean: u.lean, sids: [] });
+        groups.get(key).sids.push(sid);
+      }
+      for (const { g, lean, sids } of groups.values()) io.to(sids).emit('users', userList(g, lean));
       adminRef.current?.notify('users');
     };
 
     // Send an event for a channel only to the sockets that can see it
     const toViewers = (cid, event, payload, exceptSid) => {
-      for (const [sid, u] of users) if (sid !== exceptSid && canView(u.profile.id, cid)) io.to(sid).emit(event, payload);
+      const sids = [];
+      for (const [sid, u] of users) if (sid !== exceptSid && canView(u.profile.id, cid)) sids.push(sid);
+      if (sids.length) io.to(sids).emit(event, payload);
     };
 
     // Something changed who can do or see what (roles, role holders, default or channel permissions,
     // or the channels themselves): tell everyone, take people out of voice channels they lost, and
     // turn permissions on the first time someone is an administrator.
     function permsChanged({ roles = true } = {}) {
+      permsStale();
       if (!state.permissionsOn && (state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole))) state.permissionsOn = true;
       save();
       if (roles) io.emit('roles', rolesPayload());
@@ -1033,31 +1319,26 @@ async function startServer(opts = {}) {
     // relays WebRTC handshakes, and keeps sealed mail for people who are away.
     // It never sees a message.
     //
-    // Members are the profiles that joined (with an invite, when the server asks
-    // for one, D51). Guests are everyone else, sent here by a friend's friend
-    // code. They can reach the people whose profile id or mailbox address
-    // they already know, and nothing else: no member list, no mailbox.
+    // Only members: the profiles that joined (with an invite, when the server asks for one,
+    // D51). Nobody else gets a socket here. (There used to be guests, sent by a friend code;
+    // D55 took them out.)
     const dm = io.of('/dm');
     const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
-    const presenceRooms = (pid) => ['members', 'w:' + pid];
     dm.use((socket, next) => {
-      const { profileId, guest } = socket.handshake.auth || {};
+      const { profileId } = socket.handshake.auth || {};
       const pid = str(profileId, 64);
       // On an invite-only server a member is a profile that joined and has a key pinned,
-      // which it proves in `identify` below; nothing a socket says here makes it one
-      const outsider = state.inviteOnly && !(pid && Object.hasOwn(state.profiles, pid) && pinOf(pid));
-      // A guest can't use the profile id of someone on this server. ("password": apps from before invites stop retrying on it.)
-      if (outsider && !(DM_GUESTS && guest === true && pid && !Object.hasOwn(state.profiles, pid) && !pinOf(pid))) return next(new Error('Not a member of this server (no valid invite or password)'));
+      // which it proves in `identify` below; nothing a socket says here makes it one.
+      // ("password": apps from before invites stop retrying on it.)
+      if (state.inviteOnly && !(pid && Object.hasOwn(state.profiles, pid) && pinOf(pid))) return next(new Error('Not a member of this server (no valid invite or password)'));
       if (!pid) return next(new Error('No profile'));
       if (banFor(pid, clientIp(socket))) return next(new Error('banned'));
       socket.data.profileId = pid;
-      socket.data.guest = outsider;
-      socket.data.mustProve = state.inviteOnly && !outsider;
+      socket.data.mustProve = state.inviteOnly;
       next();
     });
     dm.on('connection', (socket) => {
       const pid = socket.data.profileId;
-      const guest = socket.data.guest;
       // A profile id with a key pinned here (D42) is only someone once they sign
       // the challenge below with that key. Until then the socket can use
       // mailboxes, but it isn't present, can't signal and replaces no one.
@@ -1066,58 +1347,46 @@ async function startServer(opts = {}) {
         // Newest wins, like chat sessions: a reconnect replaces the stale socket
         for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
         socket.join('p:' + pid);
-        if (!guest) {
-          socket.join('members');
-          socket.emit('online', dmOnline());
-        }
-        socket.to(presenceRooms(pid)).emit('presence', { id: pid, online: true });
+        socket.join('members');
+        socket.emit('online', dmOnline());
+        socket.to('members').emit('presence', { id: pid, online: true });
       };
       if (!pinOf(pid)) arrive();
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
         if (socket.data.verified && to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
       });
-      // Guests name the people they want presence for
-      socket.on('watch', (ids, ack) => {
-        if (typeof ack !== 'function') return;
-        if (!socket.data.verified) return ack({ online: [] });
-        const list = [...new Set((Array.isArray(ids) ? ids : []).slice(0, 200).map((v) => str(v, 64)).filter(Boolean))];
-        for (const room of socket.rooms) if (room.startsWith('w:')) socket.leave(room);
-        for (const v of list) socket.join('w:' + v);
-        const online = dmOnline();
-        ack({ online: list.filter((v) => online.includes(v)) });
-      });
-
-      // Mailboxes: prove who you are by signing this nonce
+      // Mailboxes: prove who you are by signing this nonce and the host you dialed (`v: 2`; see mailAddress)
       const nonce = crypto.randomBytes(16).toString('base64url');
-      socket.emit('challenge', { nonce, server: state.id });
-      socket.on('identify', ({ s, sig } = {}, ack) => {
+      socket.emit('challenge', { nonce, server: state.id, v: 2 });
+      socket.on('identify', ({ s, sig, v } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        const addr = mailAddress(str(s, 64), str(sig, 128), nonce);
+        const addr = mailAddress(str(s, 64), str(sig, 128), nonce, v, hostOf(socket));
         if (!addr) return ack({ error: 'Bad signature' });
         if (!socket.data.verified && s === pinOf(pid)) arrive();
         if (socket.data.addr) socket.leave('a:' + socket.data.addr);
         socket.data.addr = addr;
         socket.join('a:' + addr);
         // A claimed member of an invite-only server has a mailbox once the pinned key has signed
-        const member = !guest && (!socket.data.mustProve || socket.data.verified);
+        const member = !socket.data.mustProve || socket.data.verified;
         let box = member ? mail.get(addr) : null;
         if (member && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
         if (box) {
           box.seen = Date.now();
-          saveMail();
+          saveMail(addr);
           for (let i = 0; i < box.items.length; i += 20) socket.emit('mail', box.items.slice(i, i + 20).map(({ id, blob }) => ({ id, blob })));
         }
         ack({ ok: true, mailbox: !!box });
       });
       socket.on('mail:put', ({ to, blob } = {}, ack) => {
         if (typeof ack !== 'function') return;
+        if (!socket.data.verified) return ack({ error: 'Not signed in' }); // a profile id alone leaves no mail
         if (!isKey(to, 43) || typeof blob !== 'string' || !blob || blob.length > MAX_MAIL_BLOB) return ack({ error: 'Bad mail' });
         const now = Date.now();
         if (now - (socket.data.mailFrom || 0) > 60e3) Object.assign(socket.data, { mailFrom: now, mailCount: 0 });
         if (++socket.data.mailCount > 240) return ack({ error: 'Too much mail, slow down' });
         const box = mail.get(to);
-        // No mailbox here (a guest, or someone who never came by): pass it on if they're connected
+        // No mailbox here (someone who never came by, or the mailboxes are full): pass it on if they're connected
         if (!box) {
           if (!dm.adapter.rooms.get('a:' + to)?.size) return ack({ error: 'No mailbox' });
           dm.to('a:' + to).emit('mail', [{ id: null, blob }]);
@@ -1126,29 +1395,29 @@ async function startServer(opts = {}) {
         if (box.items.length >= MAX_MAILBOX_ITEMS || box.items.reduce((n, it) => n + it.blob.length, blob.length) > MAX_MAILBOX_BYTES) return ack({ error: 'Mailbox full' });
         const item = { id: id(), blob, ts: now };
         box.items.push(item);
-        saveMail();
+        saveMail(to);
         dm.to('a:' + to).emit('mail', [{ id: item.id, blob }]);
         ack({ ok: true });
       });
       // A message link in a DM (D54): its preview, for a member who can read the channel
       socket.on('msg:peek', ({ channelId, messageId } = {}, ack) => {
         if (typeof ack !== 'function') return;
-        if (!socket.data.verified || guest || !Object.hasOwn(state.profiles, pid)) return ack({ error: 'unavailable' });
+        if (!socket.data.verified || !Object.hasOwn(state.profiles, pid)) return ack({ error: 'unavailable' });
         ack(peekMessage(pid, channelId, messageId));
       });
       // Collected: the owner has it now
       socket.on('mail:ack', ({ ids } = {}) => {
         const box = mail.get(socket.data.addr);
-        if (guest || !box || !Array.isArray(ids)) return;
+        if (!box || !Array.isArray(ids)) return;
         const gone = new Set(ids);
         const kept = box.items.filter((it) => !gone.has(it.id));
-        if (kept.length !== box.items.length) (box.items = kept), saveMail();
+        if (kept.length !== box.items.length) (box.items = kept), saveMail(socket.data.addr);
       });
       socket.on('disconnect', () => {
         // Shutting down disconnects everyone: that's not them leaving, and
         // their direct connections don't need this server (D39)
         if (closing || !socket.data.verified) return;
-        if (!dmOnline().includes(pid)) dm.to(presenceRooms(pid)).emit('presence', { id: pid, online: false });
+        if (!dmOnline().includes(pid)) dm.to('members').emit('presence', { id: pid, online: false });
       });
     });
 
@@ -1159,6 +1428,7 @@ async function startServer(opts = {}) {
       const gone = state.files.filter((f) => ids.has(f.id));
       if (!gone.length) return;
       state.files = state.files.filter((f) => !ids.has(f.id));
+      indexFiles();
       for (const f of gone) {
         fs.rm(filePath(f.id), { force: true }, () => {});
         const list = state.messages[f.channelId] || [];
@@ -1166,6 +1436,7 @@ async function startServer(opts = {}) {
         const m = list[i];
         if (!m?.files) continue;
         m.files = m.files.filter((x) => x.id !== f.id);
+        saveMessages(f.channelId);
         if (!m.text && !m.gif && !m.files.length) {
           list.splice(i, 1);
           toViewers(f.channelId, 'msg:deleted', { channelId: f.channelId, messageId: m.id });
@@ -1192,7 +1463,9 @@ async function startServer(opts = {}) {
       const hadRoles = Object.hasOwn(state.memberRoles, profileId);
       if (hadProfile) delete state.profiles[profileId];
       if (hadRoles) delete state.memberRoles[profileId];
+      permsStale();
       save();
+      if (hadProfile) saveProfile(profileId);
       if (hadProfile) io.emit('profile:removed', { id: profileId });
       if (hadRoles) permsChanged();
     }
@@ -1265,7 +1538,7 @@ async function startServer(opts = {}) {
           state.name = name;
         }
         if (icon !== undefined) {
-          if (icon && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
+          if (icon && !isIconRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
           state.icon = icon || '';
         }
         if (quality !== undefined) {
@@ -1293,10 +1566,12 @@ async function startServer(opts = {}) {
         profileId = str(profileId, 64);
         if (!profileId || !pinOf(profileId)) return { error: 'That profile has no key here' };
         delete state.pins[profileId];
+        permsStale();
         // The old card would mislead DM contacts until the new key says hello
         if (Object.hasOwn(state.profiles, profileId)) {
           delete state.profiles[profileId].card;
-          io.emit('profile', { id: profileId, ...state.profiles[profileId] });
+          saveProfile(profileId);
+          emitProfile(profileId);
         }
         // Whoever claims the id next must not inherit roles with permissions
         if (Object.hasOwn(state.memberRoles, profileId)) {
@@ -1533,15 +1808,19 @@ async function startServer(opts = {}) {
         socket.on(event, (payload, ack) => {
           if (!authed()) return typeof ack === 'function' && ack({ error: 'not authenticated' });
           try {
-            fn(payload || {}, typeof ack === 'function' ? ack : () => {});
+            fn(isObj(payload) ? payload : {}, typeof ack === 'function' ? ack : () => {});
           } catch (err) {
             console.error(`[socket] ${event}:`, err);
           }
         });
 
       // `invite`: the token of someone joining. Apps from before invites send what was typed as `password`.
-      socket.on('hello', ({ profile, invite, password, proof } = {}, ack) => {
+      // `uploadKey: true`: the app wants a key for its uploads (below). Apps from before that send none.
+      // `proto: 2`: the app takes pictures by reference and the small events (D58). Apps from before that send none.
+      socket.on('hello', (payload, ack) => {
         if (typeof ack !== 'function') return;
+        const { profile, invite, password, proof, uploadKey: wantsKey, proto } = isObj(payload) ? payload : {};
+        const lean = Number.isInteger(proto) && proto >= 2;
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) {
           console.warn(`[auth] banned ${whoIs(p)} refused`);
@@ -1573,7 +1852,11 @@ async function startServer(opts = {}) {
         }
         if (pin && !signed) return refuse('the profile is pinned to a key and the app sent none', { error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
         if (pin && card.s !== pin) return refuse('signed with a different key than the one pinned (D42)', { error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
-        if (signed && !pin) state.pins[p.id] = card.s;
+        if (signed && !pin) {
+          state.pins[p.id] = card.s;
+          permsStale(); // roles with permissions count from here on
+          save();
+        }
         p.card = card;
         lastIp.set(p.id, clientIp(socket));
         // One live session per profile. After a network drop the old socket
@@ -1592,16 +1875,32 @@ async function startServer(opts = {}) {
         if (joinedWith) {
           joinedWith.uses++;
           joinedWith.joins = [...joinedWith.joins, { id: p.id, name: p.name, ts: Date.now() }].slice(-MAX_INVITE_JOINS);
+          save();
           console.log(`[auth] ${whoIs(p)} joined with invite ${joinedWith.id.slice(0, 8)}`);
         } else if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
         socket.data.profileId = p.id;
-        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket) });
-        state.profiles[p.id] = storedProfile(p);
-        save();
+        // The socket id says who uploads, but every member is sent everyone's socket id. An app that asks
+        // gets a secret to send along; without it, its uploads would be anyone's to make in its name.
+        const uploadKey = wantsKey === true ? crypto.randomBytes(16).toString('hex') : null;
+        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey, lean });
+        socket.leave(lean ? FULL : LEAN); // a second hello on the same socket
+        socket.join(lean ? LEAN : FULL);
+        // Back with the profile everyone already has (most connects): only `seen` moves, and nobody
+        // needs that while the person is online. The pictures already held are kept, not the copies just sent.
+        const was = Object.hasOwn(state.profiles, p.id) ? state.profiles[p.id] : null;
+        const changed = !was || !sameProfile(was, p);
+        if (changed) {
+          state.profiles[p.id] = storedProfile(p);
+          saveProfile(p.id);
+        } else {
+          Object.assign(p, { avatar: was.avatar, banner: was.banner });
+          was.seen = Date.now();
+          saveSeen();
+        }
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
-        ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g });
-        socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
+        ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined });
+        if (changed) emitProfile(p.id, socket);
         broadcastUsers();
         if (joinedWith) invitesChanged();
       });
@@ -1610,10 +1909,11 @@ async function startServer(opts = {}) {
         const u = users.get(socket.id);
         const p = cleanProfile({ ...profile, id: u.profile.id });
         p.card = u.profile.card; // checked at hello; it can't change during a session
+        if (Object.hasOwn(state.profiles, p.id) && sameProfile(state.profiles[p.id], p)) return; // saved again with nothing changed
         u.profile = p;
         state.profiles[p.id] = storedProfile(p);
-        save();
-        io.emit('profile', { id: p.id, ...storedProfile(p) });
+        saveProfile(p.id);
+        emitProfile(p.id);
         broadcastUsers();
       });
 
@@ -1649,11 +1949,8 @@ async function startServer(opts = {}) {
         const list = thread(channelId);
         if (!list) return ack({ error: 'no such channel' });
         if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
-        text = str(text, MAX_MESSAGE_LEN).trim();
-        const g =
-          gif && typeof gif.url === 'string' && /^https:\/\//.test(gif.url)
-            ? { url: gif.url.slice(0, 500), w: +gif.w || 200, h: +gif.h || 200, title: str(gif.title, 200) }
-            : null;
+        text = cleanText(text);
+        const g = gif && isGiphy(gif.url) && gif.url.length <= 500 ? { url: gif.url, w: +gif.w || 200, h: +gif.h || 200, title: str(gif.title, 200) } : null;
         const u = users.get(socket.id);
         // Only your own fresh uploads to this channel can be attached
         const attached = (Array.isArray(files) ? files.slice(0, MAX_FILES_PER_MESSAGE) : [])
@@ -1678,7 +1975,8 @@ async function startServer(opts = {}) {
         list.push(msg);
         if (list.length > MAX_HISTORY) list.splice(0, list.length - MAX_HISTORY);
         for (const f of attached) f.messageId = msg.id;
-        save();
+        saveMessages(channelId);
+        if (attached.length) save(); // the files are the message's now
         toViewers(channelId, 'msg:new', { channelId, message: msg });
         // People with this server bookmarked but not open hear about mentions over /dm (D41)
         if (mentions) {
@@ -1702,7 +2000,7 @@ async function startServer(opts = {}) {
       on('msg:edit', ({ channelId, messageId, text }, ack) => {
         const m = thread(channelId)?.find((x) => x.id === messageId);
         const u = users.get(socket.id);
-        text = str(text, MAX_MESSAGE_LEN).trim();
+        text = cleanText(text);
         if (!m || m.author !== u.profile.id || !text) return;
         if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
         m.text = text;
@@ -1713,7 +2011,7 @@ async function startServer(opts = {}) {
         const links = channelLinksOf(text, m.author);
         if (links) m.channels = links;
         else delete m.channels;
-        save();
+        saveMessages(channelId);
         toViewers(channelId, 'msg:update', { channelId, message: m });
       });
 
@@ -1726,7 +2024,7 @@ async function startServer(opts = {}) {
         if (list[i].author !== myId() && !(g.manageMessages && g.channels[channelId]?.view)) return ack(noPerm('delete other people’s messages'));
         const [m] = list.splice(i, 1);
         if (m.author !== myId()) console.log(`[mod] ${whoIs(users.get(socket.id).profile)} deleted a message by ${whoIs({ name: m.name, id: m.author })} in #${channel(channelId).name}`);
-        save();
+        saveMessages(channelId);
         toViewers(channelId, 'msg:deleted', { channelId, messageId });
         if (m.files?.length) deleteFiles(m.files.map((f) => f.id));
         ack({ ok: true });
@@ -1743,7 +2041,7 @@ async function startServer(opts = {}) {
         if (i >= 0) who.splice(i, 1);
         else who.push(pid);
         if (!who.length) delete m.reactions[emoji];
-        save();
+        saveMessages(channelId);
         toViewers(channelId, 'msg:update', { channelId, message: m });
       });
 
@@ -1808,6 +2106,7 @@ async function startServer(opts = {}) {
         if (!name) return ack({ error: 'name required' });
         const ch = { id: id(), name, type };
         state.channels.push(ch);
+        indexChannels();
         permsChanged({ roles: false });
         console.log(`[mod] ${whoIs(users.get(socket.id).profile)} created the ${type} channel "${name}"`);
         ack({ ok: true, channel: ch });
@@ -1847,7 +2146,10 @@ async function startServer(opts = {}) {
         if (state.channels.filter((c) => c.type === ch.type).length <= 1) return ack({ error: `There must be at least one ${ch.type} channel` });
         console.log(`[mod] ${whoIs(users.get(socket.id).profile)} deleted the ${ch.type} channel "${ch.name}"`);
         state.channels = state.channels.filter((c) => c.id !== cid);
+        indexChannels();
+        permsStale(); // before deleteFiles() asks who can see it
         delete state.messages[cid];
+        saveMessages(cid);
         deleteFiles(state.files.filter((f) => f.channelId === cid).map((f) => f.id));
         for (const [sid, u] of users) {
           if (u.voice === cid) {
@@ -1889,17 +2191,21 @@ async function startServer(opts = {}) {
         if (!name) return ack({ error: 'Name must be letters, numbers or _' });
         if (!isDataImage(url, MAX_EMOJI_BYTES)) return ack({ error: 'Image must be png/jpg/gif/webp under 256KB' });
         state.emojis = state.emojis.filter((e) => e.name !== name);
-        state.emojis.push({ name, url, by: users.get(socket.id).profile.name });
-        save();
-        io.emit('emojis', state.emojis);
+        const emoji = { name, url, by: users.get(socket.id).profile.name };
+        state.emojis.push(emoji);
+        saveEmojis();
+        // The one that changed, by reference; apps from before D58 get the whole set again
+        io.to(LEAN).emit('emoji:added', { emoji: leanEmoji(emoji) });
+        io.to(FULL).emit('emojis', state.emojis);
         ack({ ok: true });
       });
 
       on('emoji:remove', ({ name }, ack) => {
         if (!permsOf(myId()).manageEmojis) return ack(noPerm('remove emojis'));
         state.emojis = state.emojis.filter((e) => e.name !== name);
-        save();
-        io.emit('emojis', state.emojis);
+        saveEmojis();
+        io.to(LEAN).emit('emoji:removed', { name });
+        io.to(FULL).emit('emojis', state.emojis);
         ack({ ok: true });
       });
 
@@ -2034,8 +2340,10 @@ async function startServer(opts = {}) {
         const stored = Object.hasOwn(state.profiles, u.profile.id) && state.profiles[u.profile.id];
         if (stored) {
           stored.seen = Date.now();
-          save();
-          io.emit('profile', { id: u.profile.id, ...stored });
+          saveSeen();
+          // Only `seen` changed: apps from before D58 know no event for that, and get the whole profile
+          io.to(LEAN).emit('profile:seen', { id: u.profile.id, seen: stored.seen });
+          io.to(FULL).emit('profile', { id: u.profile.id, ...stored });
         }
         broadcastUsers();
       });
@@ -2122,32 +2430,23 @@ async function startServer(opts = {}) {
     get storage() {
       return usage();
     },
-    close: () =>
-      new Promise((resolve) => {
-        // Flush a pending debounced save so nothing is lost on shutdown
-        clearTimeout(saveTimer);
-        clearInterval(sweepTimer);
-        clearInterval(mailSweepTimer);
-        try {
-          if (mailTimer) writeMail();
-        } catch (err) {
-          saveFailed('the mailboxes', err);
-        }
-        updater.stop();
-        admin?.close();
-        unsubCrashes?.();
-        try {
-          writeState();
-        } catch (err) {
-          saveFailed('the server state', err);
-        }
-        console.log('[server] shutting down');
-        logs?.flushSync();
-        clearMarker();
-        closing = true;
-        io.close();
-        server.close(() => resolve());
-      }),
+    close: async () => {
+      clearInterval(sweepTimer);
+      clearInterval(mailSweepTimer);
+      clearInterval(mediaSweepTimer);
+      updater.stop();
+      admin?.close();
+      unsubCrashes?.();
+      console.log('[server] shutting down');
+      closing = true;
+      io.close(); // everyone goes offline here: their last-seen times are in what is written next
+      // Write what is waiting so nothing is lost, once the writes under way have landed
+      await disk.idle();
+      disk.flushSync();
+      logs?.flushSync();
+      clearMarker();
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
   };
 }
 
@@ -2201,9 +2500,9 @@ if (require.main === module) {
     maxStorage: env.MAX_STORAGE,
     logs: { retentionDays: /^\s*\d+\s*$/.test(env.LOG_RETENTION_DAYS || '') ? Number(env.LOG_RETENTION_DAYS) : 14, maxBytes: parseSize(env.LOG_MAX_SIZE, 50 * 1024 ** 2) },
     crashReports: true,
-    dmGuests: !/^(off|0|false|no)$/i.test(env.DM_GUESTS || ''),
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
-    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL || ''), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
+    // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
+    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
       repo: env.UPDATE_REPO || 'nickolaiposs/friendspeak',

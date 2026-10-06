@@ -14,8 +14,11 @@ const crypto = require('crypto');
 const tls = require('tls');
 const { spawn } = require('child_process');
 const readline = require('readline');
-const { createLogs } = require('./logs');
+const { createLogs, originOf } = require('./logs');
 
+const APP = 'friendspeak://app'; // the origin of the app's own page
+const isApp = (url) => typeof url === 'string' && (url === APP || url.startsWith(APP + '/'));
+const GAME_WINDOW = 'friendspeak-game'; // the name the page gives the game's pop-out window (popOutGame in main.js)
 const ROOT = path.join(__dirname, '..');
 const PUBLIC = path.join(ROOT, 'public');
 const MODULES = path.join(ROOT, 'node_modules');
@@ -171,6 +174,12 @@ function acceptPinnedCertificates() {
 
 let win = null;
 
+// Everything the bridge in preload.js can ask for is for the app's own page, in the main frame of its own
+// window. The game's window and iframes don't get the bridge today; this holds if that ever changes.
+const ownPage = (e) => !!e.senderFrame && !!win && e.sender === win.webContents && e.senderFrame === e.sender.mainFrame && isApp(e.senderFrame.url);
+const handle = (channel, fn) => ipcMain.handle(channel, (e, ...a) => (ownPage(e) ? fn(e, ...a) : undefined));
+const listen = (channel, fn) => ipcMain.on(channel, (e, ...a) => ownPage(e) && fn(e, ...a));
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1360,
@@ -189,9 +198,10 @@ function createWindow() {
     },
   });
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    // The game's "Pop out" button opens it in its own window
-    if (/^https?:\/\/[^/]+\/game\//.test(url)) {
+  win.webContents.setWindowOpenHandler(({ url, frameName }) => {
+    // The game's "Pop out" button opens it in its own window. Only that: the page names the
+    // window when it opens it, and a link in a message can't (those open in the real browser).
+    if (frameName === GAME_WINDOW && /^https?:\/\/[^/]+\/game\//.test(url)) {
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
@@ -206,6 +216,20 @@ function createWindow() {
     }
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // The game's window stays on the server it was opened for, and what it opens goes to the real browser
+  win.webContents.on('did-create-window', (child, { url }) => {
+    const origin = originOf(url);
+    child.webContents.setWindowOpenHandler(({ url: to }) => {
+      if (/^https?:\/\//.test(to)) shell.openExternal(to);
+      return { action: 'deny' };
+    });
+    child.webContents.on('will-navigate', (e, to) => {
+      if (originOf(to) === origin) return;
+      e.preventDefault();
+      if (/^https?:\/\//.test(to)) shell.openExternal(to);
+    });
   });
 
   // Links clicked inside chat open in the real browser
@@ -245,6 +269,25 @@ function createWindow() {
   win.on('closed', () => (win = null));
 }
 
+// What the app's page may load and run. Messages are drawn from escaped text (formatText in
+// util.js); this is the second line, for the day something gets past that: no inline or remote
+// script, so injected markup can't reach the bridge in preload.js or the keys in localStorage.
+// Servers, images, media and embeds can be anywhere, so those stay open.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'", // wasm: noise suppression and camera backgrounds
+  "style-src 'self' 'unsafe-inline'", // role colors and sizes are style attributes
+  "img-src 'self' data: blob: https: http:",
+  "media-src 'self' data: blob: mediastream: https: http:",
+  "font-src 'self' data:",
+  "connect-src 'self' data: blob: https: http: wss: ws:",
+  "frame-src https: http:", // the game, and link embeds
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join('; ');
+
 function serveApp() {
   protocol.handle('friendspeak', async (request) => {
     const { pathname } = new URL(request.url);
@@ -252,10 +295,12 @@ function serveApp() {
     for (const [prefix, target] of ROUTES) {
       if (!clean.startsWith(prefix) && clean !== prefix.replace(/\/$/, '')) continue;
       const file = target.endsWith('.js') ? target : path.join(target, clean.slice(prefix.length) || 'index.html');
-      if (!file.startsWith(target)) break; // path traversal
+      const rel = path.relative(target, file);
+      if (rel.startsWith('..') || path.isAbsolute(rel)) break; // path traversal
       try {
         const data = await fs.promises.readFile(file);
-        return new Response(data, { headers: { 'content-type': MIME[path.extname(file)] || 'application/octet-stream' } });
+        const type = MIME[path.extname(file)] || 'application/octet-stream';
+        return new Response(data, { headers: { 'content-type': type, 'x-content-type-options': 'nosniff', ...(type.startsWith('text/html') ? { 'content-security-policy': CSP } : {}) } });
       } catch {
         if (prefix !== '/') continue;
       }
@@ -273,9 +318,16 @@ function allowYouTubeEmbeds() {
   });
 }
 
+// The microphone, camera, screen and notifications are for the app's own page. The game (an
+// iframe or its own window) and link embeds are other sites: they get fullscreen and copying
+// to the clipboard, nothing else.
+const OPEN_PERMISSIONS = ['fullscreen', 'clipboard-sanitized-write'];
+
 function allowMicrophone() {
   const ses = session.defaultSession;
-  ses.setPermissionRequestHandler(async (_wc, permission, callback, details) => {
+  ses.setPermissionRequestHandler(async (wc, permission, callback, details) => {
+    if (OPEN_PERMISSIONS.includes(permission)) return callback(true);
+    if (!win || wc !== win.webContents || !isApp(details.requestingUrl)) return callback(false);
     if (permission === 'media') {
       if (process.platform === 'darwin') {
         const types = details.mediaTypes || [];
@@ -284,9 +336,9 @@ function allowMicrophone() {
       }
       return callback(true);
     }
-    callback(['clipboard-sanitized-write', 'display-capture', 'fullscreen', 'notifications', 'speaker-selection'].includes(permission));
+    callback(['display-capture', 'notifications', 'speaker-selection'].includes(permission));
   });
-  ses.setPermissionCheckHandler((_wc, permission) => ['media', 'display-capture', 'speaker-selection', 'clipboard-sanitized-write'].includes(permission));
+  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => OPEN_PERMISSIONS.includes(permission) || (isApp(requestingOrigin) && ['media', 'display-capture', 'speaker-selection', 'notifications'].includes(permission)));
 }
 
 // ---------------------------------------------------------------- screen sharing
@@ -314,8 +366,8 @@ async function screenSources() {
 }
 
 function allowScreenShare() {
-  ipcMain.handle('desktop:screen-sources', () => screenSources());
-  ipcMain.handle('desktop:screen-pick', (_e, pick) => {
+  handle('desktop:screen-sources', () => screenSources());
+  handle('desktop:screen-pick', (_e, pick) => {
     pickedSource = pick && typeof pick.id === 'string' ? { id: pick.id, audio: !!pick.audio, at: Date.now() } : null;
   });
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
@@ -570,61 +622,59 @@ function checkForUpdates() {
   updater.checkForUpdates().catch(() => {}); // reported through the 'error' event
 }
 
-ipcMain.handle('desktop:update-state', () => update);
-ipcMain.handle('desktop:update-check', () => (updater ? checkForUpdates() : setUpdate({ status: 'error', error: 'Updates are only checked in the installed app' })));
-ipcMain.handle('desktop:update-download', () => {
+handle('desktop:update-state', () => update);
+handle('desktop:update-check', () => (updater ? checkForUpdates() : setUpdate({ status: 'error', error: 'Updates are only checked in the installed app' })));
+handle('desktop:update-download', () => {
   if (update.status !== 'available') return;
   if (!CAN_INSTALL) return shell.openExternal(update.url);
   setUpdate({ status: 'downloading', progress: 0, error: null });
   updater.downloadUpdate().catch(() => {});
 });
-ipcMain.handle('desktop:update-install', () => update.status === 'ready' && updater.quitAndInstall());
-ipcMain.handle('desktop:open-releases', (_e, version) => shell.openExternal(typeof version === 'string' && /^[\d.]+$/.test(version) ? `${RELEASES}/tag/v${version}` : RELEASES));
+handle('desktop:update-install', () => update.status === 'ready' && updater.quitAndInstall());
+handle('desktop:open-releases', (_e, version) => shell.openExternal(typeof version === 'string' && /^[\d.]+$/.test(version) ? `${RELEASES}/tag/v${version}` : RELEASES));
 
 // ---------------------------------------------------------------- ipc
 
-ipcMain.handle('desktop:trust-server', (_e, address) => trustServer(String(address)));
+handle('desktop:trust-server', (_e, address) => trustServer(String(address)));
 // Chat file downloads: Electron shows a save dialog, and pinned certificates apply
-ipcMain.handle('desktop:download', (_e, url) => {
+handle('desktop:download', (_e, url) => {
   if (typeof url === 'string' && /^https?:\/\//.test(url)) win?.webContents.downloadURL(url);
 });
 // Notification clicks bring the window back
-ipcMain.handle('desktop:focus', () => {
+handle('desktop:focus', () => {
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
 });
 // Unread count on the dock/taskbar icon; Windows has no count, so flash the taskbar instead
-ipcMain.handle('desktop:badge', (_e, n) => {
+handle('desktop:badge', (_e, n) => {
   n = Math.min(9999, Math.max(0, Math.trunc(Number(n)) || 0));
   if (process.platform === 'win32') {
     if (win && !win.isDestroyed()) win.flashFrame(n > 0 && !win.isFocused());
   } else app.setBadgeCount(n);
 });
-ipcMain.handle('desktop:media-caps', () => startMedia());
-ipcMain.on('desktop:media-send', (_e, cmd) => sendMedia(cmd).catch((e) => console.warn('[media]', e.message)));
+handle('desktop:media-caps', () => startMedia());
+listen('desktop:media-send', (_e, cmd) => sendMedia(cmd).catch((e) => console.warn('[media]', e.message)));
 // Hardware acceleration: what is set (applies to the sidecar's encoders at the next share, and to the app's
 // own drawing at the next start), what this run started with, and what Chromium does with the GPU
-ipcMain.handle('desktop:prefs', async (_e, patch) => {
+handle('desktop:prefs', async (_e, patch) => {
   if (patch && typeof patch.hardwareAcceleration === 'boolean') {
     prefs = { ...prefs, hardwareAcceleration: patch.hardwareAcceleration };
     fs.writeFileSync(PREFS_FILE(), JSON.stringify(prefs, null, 2));
   }
   return { ...prefs, atStart: HW_AT_START, gpu: app.getGPUFeatureStatus() };
 });
-// Logs and crash reports: only the app's own page may ask (not the game's iframe, which shares its preload)
-const ownPage = (e) => !!e.senderFrame && e.senderFrame === e.sender.mainFrame && e.senderFrame.url.startsWith('friendspeak://app/');
-const own = (fn) => (e, ...a) => (ownPage(e) ? fn(...a) : undefined);
-ipcMain.on('desktop:log', own((msg) => logs.fromRenderer(msg)));
-ipcMain.handle('desktop:logs-read', own((o) => logs.read({ limit: o?.limit, before: o?.before })));
-ipcMain.handle('desktop:logs-summary', own(() => logs.summary()));
-ipcMain.handle('desktop:logs-seen', own(() => logs.seen()));
-ipcMain.handle('desktop:logs-report', own(() => logs.report()));
-ipcMain.handle('desktop:logs-save', own(() => logs.save(win && !win.isDestroyed() ? win : undefined)));
-ipcMain.handle('desktop:logs-reveal', own(() => logs.reveal()));
-ipcMain.handle('desktop:logs-clear', own(() => logs.clear()));
-ipcMain.handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
+// Logs and crash reports
+listen('desktop:log', (_e, msg) => logs.fromRenderer(msg));
+handle('desktop:logs-read', (_e, o) => logs.read({ limit: o?.limit, before: o?.before }));
+handle('desktop:logs-summary', () => logs.summary());
+handle('desktop:logs-seen', () => logs.seen());
+handle('desktop:logs-report', () => logs.report());
+handle('desktop:logs-save', () => logs.save(win && !win.isDestroyed() ? win : undefined));
+handle('desktop:logs-reveal', () => logs.reveal());
+handle('desktop:logs-clear', () => logs.clear());
+handle('desktop:set-hotkeys', (_e, combos) => setHotkeys(Array.isArray(combos) ? combos.filter((c) => typeof c === 'string') : []));
 
 // ---------------------------------------------------------------- lifecycle
 

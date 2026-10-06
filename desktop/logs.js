@@ -5,7 +5,8 @@
 //   <userData>/logs/app-YYYY-MM-DD.log   JSON lines { ts, level, source, text, stack? } (UTC days)
 //   <userData>/crashes/<id>.json         one report per crash; crashes/seen.txt says when the user last looked
 //
-// Every string is scrubbed (secrets, data URIs, the home folder) before it is stored.
+// Every string is scrubbed (secrets, invites, friend codes, data URIs, the home folder) before it is
+// stored, and the files are readable by this user only.
 // createLogs() only builds the object; install() hooks the console, the process
 // and the app, so the parts that don't need Electron can run on their own.
 const fs = require('fs');
@@ -47,8 +48,10 @@ function makeScrub(home) {
       .replace(/fsa_[A-Za-z0-9_-]{16,}/g, 'fsa_[redacted]')
       .replace(/(data:[\w.+\/-]*;base64,)[A-Za-z0-9+\/=_-]{32,}/gi, '$1[redacted]')
       .replace(/\bBearer\s+[A-Za-z0-9._~+\/=-]+/gi, 'Bearer [redacted]')
+      .replace(/\b[0-9A-HJKMNP-TV-Z]{4}(?:-[0-9A-HJKMNP-TV-Z]{4}){3}\b/gi, 'invite [redacted]') // an invite token (D51), as logbuffer.js on the server
+      .replace(/\bfs1\.[A-Za-z0-9_-]{16,}/g, 'fs1.[redacted]') // a friend code
       .replace(/\b(password|passwd|token|secret|api_?key|key)=[^\s&"']+/gi, '$1=[redacted]')
-      .replace(/"(password|passwd|token|secret|api_?key|key)"\s*:\s*"[^"]*"/gi, '"$1":"[redacted]"');
+      .replace(/\b(password|passwd|token|secret|api_?key|key)(["']?\s*:\s*)(["'])[^"'\n]*\3/gi, '$1$2$3[redacted]$3');
     for (const h of homes) s = s.split(h).join('~');
     return s;
   };
@@ -122,10 +125,10 @@ function createLogs({ app, dir }) {
     queue = [];
     if (!q.length) return;
     try {
-      fs.mkdirSync(logDir, { recursive: true });
+      fs.mkdirSync(logDir, { recursive: true, mode: 0o700 });
       const by = new Map();
       for (const { file, s } of q) by.set(file, (by.get(file) || '') + s);
-      for (const [file, s] of by) fs.appendFileSync(file, s);
+      for (const [file, s] of by) fs.appendFileSync(file, s, { mode: 0o600 });
     } catch {}
   }
 
@@ -138,8 +141,8 @@ function createLogs({ app, dir }) {
     const by = new Map();
     for (const { file, s } of q) by.set(file, (by.get(file) || '') + s);
     fs.promises
-      .mkdir(logDir, { recursive: true })
-      .then(() => Promise.all([...by].map(([file, s]) => fs.promises.appendFile(file, s))))
+      .mkdir(logDir, { recursive: true, mode: 0o700 })
+      .then(() => Promise.all([...by].map(([file, s]) => fs.promises.appendFile(file, s, { mode: 0o600 }))))
       .catch(() => {})
       .finally(() => {
         writing = false;
@@ -265,8 +268,8 @@ function createLogs({ app, dir }) {
 
   function seen() {
     try {
-      fs.mkdirSync(crashDir, { recursive: true });
-      fs.writeFileSync(seenFile, String(Date.now()));
+      fs.mkdirSync(crashDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(seenFile, String(Date.now()), { mode: 0o600 });
     } catch {}
   }
 
@@ -299,8 +302,8 @@ function createLogs({ app, dir }) {
         osVersion: os.release(),
         lines: read({ limit: 200 }).lines.map(({ ts, level, source, text, stack }) => ({ ts, level, source, text, stack })),
       };
-      fs.mkdirSync(crashDir, { recursive: true });
-      fs.writeFileSync(path.join(crashDir, id + '.json'), JSON.stringify(report));
+      fs.mkdirSync(crashDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(crashDir, id + '.json'), JSON.stringify(report), { mode: 0o600 });
       for (const f of crashFiles().slice(0, -MAX_CRASHES)) fs.rmSync(path.join(crashDir, f), { force: true });
       return report;
     } catch {
@@ -364,6 +367,13 @@ function createLogs({ app, dir }) {
   // ---- hooks
 
   function install() {
+    // Logs and reports from before the files were made private: tighten them (nothing to do on Windows)
+    for (const d of [logDir, crashDir]) {
+      try {
+        fs.chmodSync(d, 0o700);
+        for (const f of fs.readdirSync(d)) fs.chmodSync(path.join(d, f), 0o600);
+      } catch {}
+    }
     prune();
     day = dayOf(Date.now());
 

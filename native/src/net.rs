@@ -96,12 +96,22 @@ pub fn resolve(names: Vec<String>, tx: Sender<Msg>) {
 
 const MAGIC: u32 = 0x2112_A442;
 
+// A STUN transaction id: what a binding response has to repeat to be believed, so it must not be
+// guessable. `RandomState` is seeded by the OS's random source, once per process and then varied per
+// instance; hashing the clock with two of them gives 16 bytes nobody outside can predict, with no extra crate.
 pub fn txid() -> [u8; 12] {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let p = &n as *const u128 as usize as u128; // a little address entropy on top of the clock
-    let v = n ^ (p << 64) ^ ((std::process::id() as u128) << 32);
+    let mut bytes = [0u8; 16];
+    for half in bytes.chunks_mut(8) {
+        let mut h = RandomState::new().build_hasher();
+        h.write_u128(n);
+        h.write_u32(std::process::id());
+        half.copy_from_slice(&h.finish().to_le_bytes());
+    }
     let mut id = [0u8; 12];
-    id.copy_from_slice(&v.to_le_bytes()[..12]);
+    id.copy_from_slice(&bytes[..12]);
     id
 }
 

@@ -5,6 +5,8 @@
 // The app starts it as a child process and talks to it in JSON lines on
 // stdin/stdout (proto.rs); it relays the WebRTC signaling to the viewers.
 mod audio;
+#[cfg(target_os = "windows")]
+mod d3d;
 mod encode;
 mod engine;
 mod frame;
@@ -37,7 +39,8 @@ fn main() {
                             return;
                         }
                     }
-                    Err(e) => log!("bad command: {e}: {line}"),
+                    // Not the line itself: it can hold a viewer's session description, addresses included
+                    Err(e) => log!("bad command ({} bytes): {:.200}", line.len(), e.to_string()),
                 }
             }
             // The app is gone (or closed our stdin): nothing left to stream to

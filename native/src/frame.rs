@@ -1,16 +1,27 @@
 // Captured frames, and turning them into what the encoders eat: NV12 at the
 // size of a layer. Captures deliver whatever the OS hands out (NV12 from
-// ScreenCaptureKit, BGRA from Windows Graphics Capture and PipeWire, RGB from
-// cameras); every encoder takes NV12.
+// ScreenCaptureKit and cameras, a texture from Windows Graphics Capture, BGRA
+// from PipeWire one day); every encoder takes NV12.
+//
+// A Windows screen's frame is a texture on the GPU (d3d.rs, D56). A hardware
+// encoder on that GPU takes it without coming here. For the others the GPU
+// scales and converts it and only the NV12 picture is read back; with hardware
+// acceleration off, the frame is read back as it is and converted here.
 use std::time::Instant;
 
 use fast_image_resize as fir;
 use yuv::{BufferStoreMut, YuvBiPlanarImageMut, YuvConversionMode, YuvRange, YuvStandardMatrix};
 
+#[cfg(target_os = "windows")]
+use crate::d3d;
+
 pub enum Pixels {
     Nv12 { y: Vec<u8>, y_stride: usize, uv: Vec<u8>, uv_stride: usize },
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     Bgra { data: Vec<u8>, stride: usize },
     Rgb { data: Vec<u8> },
+    #[cfg(target_os = "windows")]
+    D3d11(d3d::Texture),
 }
 
 pub struct Frame {
@@ -62,16 +73,87 @@ pub struct Scaler {
     resizer: fir::Resizer,
     a: Vec<u8>,
     b: Vec<u8>,
+    #[cfg(target_os = "windows")]
+    gpu: bool, // let the GPU scale and convert a frame that is a texture
+    #[cfg(target_os = "windows")]
+    conv: Option<d3d::Converter>,
+    #[cfg(target_os = "windows")]
+    reader: d3d::Reader,
+}
+
+// Bilinear for speed. Streams are scaled down by small factors, where it holds up.
+fn bilinear() -> fir::ResizeOptions {
+    fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear))
 }
 
 impl Scaler {
+    // `hw`: hardware acceleration is on (D46). Off, nothing but the capture itself is left to the GPU.
+    pub fn new(hw: bool) -> Self {
+        #[cfg(target_os = "windows")]
+        return Self { gpu: hw && d3d::mode() != d3d::Mode::Cpu, ..Self::default() };
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = hw;
+            Self::default()
+        }
+    }
+
+    // BGRA rows of `stride` bytes, fw×fh, as NV12 of w×h in `out` (already sized)
+    fn bgra(&mut self, data: &[u8], stride: usize, fw: usize, fh: usize, w: usize, h: usize, out: &mut Nv12) -> Result<(), String> {
+        if fw == w && fh == h {
+            return convert(data, stride, true, out);
+        }
+        // Scale first: fewer pixels to convert
+        let src: &[u8] = if stride == fw * 4 {
+            data
+        } else {
+            pack(data, stride, fw * 4, fh, &mut self.a);
+            &self.a
+        };
+        self.b.resize(w * h * 4, 0);
+        let e = |e: &dyn std::fmt::Display| e.to_string();
+        let src = fir::images::ImageRef::new(fw as u32, fh as u32, src, fir::PixelType::U8x4).map_err(|x| e(&x))?;
+        let mut dst = fir::images::Image::from_slice_u8(w as u32, h as u32, &mut self.b, fir::PixelType::U8x4).map_err(|x| e(&x))?;
+        self.resizer.resize(&src, &mut dst, &bilinear()).map_err(|x| e(&x))?;
+        convert(&self.b, w * 4, true, out)
+    }
+
+    // A texture as NV12 of w×h in `out`: scaled and converted where it is, then read back
+    #[cfg(target_os = "windows")]
+    fn texture(&mut self, tex: &d3d::Texture, w: usize, h: usize, out: &mut Nv12) -> Result<(), String> {
+        if !self.conv.as_ref().is_some_and(|c| c.fits(tex, w, h)) {
+            self.conv = Some(d3d::Converter::new(tex, w, h)?);
+        }
+        let conv = self.conv.as_mut().unwrap();
+        let dev = conv.device().clone();
+        let nv12 = conv.convert(tex)?;
+        self.reader.nv12(&dev, nv12, w, h, &mut out.y, &mut out.uv)
+    }
+
     // `frame` as NV12 of w×h (both even) in `out`
     pub fn nv12(&mut self, frame: &Frame, w: usize, h: usize, out: &mut Nv12) -> Result<(), String> {
         out.size(w, h);
         let same = frame.w == w && frame.h == h;
-        // Bilinear for speed. Streams are scaled down by small factors, where it holds up.
-        let opts = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Bilinear));
+        let opts = bilinear();
         match &frame.px {
+            #[cfg(target_os = "windows")]
+            Pixels::D3d11(tex) => {
+                if self.gpu {
+                    match self.texture(tex, w, h, out) {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            // A GPU without a video processor (a virtual machine's, a remote session's)
+                            crate::log!("{w}x{h}: the GPU can't convert the frames ({e}); converting on the CPU");
+                            self.gpu = false;
+                            self.conv = None;
+                        }
+                    }
+                }
+                let mut reader = std::mem::take(&mut self.reader);
+                let res = reader.bgra(tex, |data, stride| self.bgra(data, stride, tex.w, tex.h, w, h, out));
+                self.reader = reader;
+                res
+            }
             Pixels::Nv12 { y, y_stride, uv, uv_stride } => {
                 let (fw, fh) = (frame.w & !1, frame.h & !1);
                 if same {
@@ -95,24 +177,7 @@ impl Scaler {
                 self.resizer.resize(&src, &mut dst, &opts).map_err(|x| e(&x))?;
                 Ok(())
             }
-            Pixels::Bgra { data, stride } => {
-                if same {
-                    return convert(data, *stride, true, out);
-                }
-                // Scale first: fewer pixels to convert
-                let src: &[u8] = if *stride == frame.w * 4 {
-                    data
-                } else {
-                    pack(data, *stride, frame.w * 4, frame.h, &mut self.a);
-                    &self.a
-                };
-                self.b.resize(w * h * 4, 0);
-                let e = |e: &dyn std::fmt::Display| e.to_string();
-                let src = fir::images::ImageRef::new(frame.w as u32, frame.h as u32, src, fir::PixelType::U8x4).map_err(|x| e(&x))?;
-                let mut dst = fir::images::Image::from_slice_u8(w as u32, h as u32, &mut self.b, fir::PixelType::U8x4).map_err(|x| e(&x))?;
-                self.resizer.resize(&src, &mut dst, &opts).map_err(|x| e(&x))?;
-                convert(&self.b, w * 4, true, out)
-            }
+            Pixels::Bgra { data, stride } => self.bgra(data, *stride, frame.w, frame.h, w, h, out),
             Pixels::Rgb { data } => {
                 if same {
                     return convert(data, frame.w * 3, false, out);

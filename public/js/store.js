@@ -122,7 +122,7 @@ const DEFAULT_SETTINGS = {
   ptt: false,
   pttKey: 'Backquote',
   noiseSuppression: true, // DeepFilterNet, in a worklet (D47)
-  noiseSuppressionLimit: 100, // dB the noise is turned down by at most; 100 is no limit (DENOISE_LIMIT in audio.js)
+  noiseSuppressionLimit: 34, // dB the noise is turned down by at most; 100 is no limit (DENOISE_LIMIT in audio.js)
   autoGain: true, // the browser's automatic gain: levels a quiet or loud mic (D44)
   echoCancellation: true, // the browser's echo canceller: keeps what the speakers play out of the mic (D48)
   micGate: -50, // dB the noise gate opens at; GATE.min (audio.js) and below is no gate (D48)
@@ -141,6 +141,7 @@ const DEFAULT_SETTINGS = {
   cues: true, // master switch for the app's sounds
   sounds: {}, // cue kind -> false when that sound is off (missing = on), see CUES in audio.js
   notify: true, // master switch for notifications (DMs, mentions, calls)
+  loadLinkMedia: false, // pictures, video and sound that a message links to load without a click (their host then sees your address)
   notifyMentions: true,
   notifyDms: true,
   notifyMutedUsers: {}, // profileId -> name: no notifications from them, anywhere. Not userMutes (voice).
@@ -289,9 +290,28 @@ export const dmStore = {
 // ---------- profile export / import ----------
 
 // The file carries the profile's private keys, so the same identity works on
-// another device. Whoever has the file can read and write DMs as that profile.
-export function exportProfile(p) {
-  const blob = new Blob([JSON.stringify({ friendspeakProfile: 1, ...p, keys: identities.get(p.id) || undefined }, null, 2)], { type: 'application/json' });
+// another device. Whoever can read them can read and write DMs as that profile, so with a
+// passphrase the keys are sealed: { friendspeakProfile: 2, …profile, sealed: { kdf, iter, salt, iv, data } },
+// AES-256-GCM under a key from PBKDF2-SHA-256. Without one they are in the file as they are
+// (friendspeakProfile: 1, which older apps also read).
+const KDF_ITERATIONS = 600000;
+const b64u = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = (s) => Uint8Array.from(atob(String(s).replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+async function passKey(passphrase, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+export async function exportProfile(p, passphrase = '') {
+  const keys = identities.get(p.id) || undefined;
+  let file = { friendspeakProfile: 1, ...p, keys };
+  if (passphrase && keys) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await passKey(passphrase, salt, KDF_ITERATIONS), new TextEncoder().encode(JSON.stringify(keys)));
+    file = { friendspeakProfile: 2, ...p, sealed: { kdf: 'PBKDF2-SHA-256', iter: KDF_ITERATIONS, salt: b64u(salt), iv: b64u(iv), data: b64u(data) } };
+  }
+  const blob = new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `friendspeak-${p.name}.json`;
@@ -299,12 +319,47 @@ export function exportProfile(p) {
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
-export async function importProfile(file) {
-  const data = JSON.parse(await file.text());
-  if (!data.friendspeakProfile) throw new Error('Not a friendspeak profile file');
-  const { friendspeakProfile, keys, ...p } = data;
+// askPassphrase(): asked when the file's keys are sealed; resolves to the passphrase, or null to give up.
+// A profile file can come from anyone: only the fields a profile has are taken, each checked.
+export async function importProfile(file, askPassphrase) {
+  if (file.size > 4 * 1024 * 1024) throw new Error('Not a friendspeak profile file');
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch {
+    data = null;
+  }
+  if (!data || typeof data !== 'object' || !data.friendspeakProfile) throw new Error('Not a friendspeak profile file');
+  const text = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max) : '');
+  const image = (v, max) => typeof v === 'string' && v.length <= max && /^(data:image\/(png|jpe?g|gif|webp);base64,[A-Za-z0-9+/=]+$|https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$)/.test(v);
+  const color = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+  const id = typeof data.id === 'string' && /^[\w-]{1,64}$/.test(data.id) ? data.id : null;
+  if (!id) throw new Error('This profile file has no usable id');
+  const p = {
+    id,
+    name: text(data.name, 32).trim() || 'friend',
+    color: color(data.color) ? data.color : randomColor(),
+    avatar: image(data.avatar, 600 * 1024) ? data.avatar : /^(https?:|data:)/i.test(text(data.avatar, 16)) ? '' : [...text(data.avatar, 16)].slice(0, 2).join(''),
+    banner: image(data.banner, 1024 * 1024) || color(data.banner) ? data.banner : '',
+    status: text(data.status, 64),
+  };
+  let keys = data.keys;
+  if (data.sealed && typeof data.sealed === 'object') {
+    const { iter, salt, iv, data: sealed } = data.sealed;
+    if (data.sealed.kdf !== 'PBKDF2-SHA-256' || !Number.isInteger(iter) || iter < 1 || iter > 5e6) throw new Error('This profile file is protected in a way this version can’t open');
+    const passphrase = await askPassphrase?.();
+    if (!passphrase) throw new Error('The profile wasn’t imported: it needs its passphrase');
+    try {
+      keys = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64u(iv) }, await passKey(passphrase, unb64u(salt), iter), unb64u(sealed))));
+    } catch {
+      throw new Error('Wrong passphrase');
+    }
+  }
+  const key = (v, max) => typeof v === 'string' && v.length <= max && /^[A-Za-z0-9_-]+$/.test(v);
+  const pair = (k) => !!k && typeof k === 'object' && key(k.pub, 64) && key(k.priv, 256);
   profiles.save(p);
-  if (keys?.sign?.priv && keys?.dh?.priv) identities.set(p.id, keys); // older exports have none: new keys are made on first use
+  if (keys && typeof keys === 'object' && pair(keys.sign) && pair(keys.dh)) identities.set(p.id, { sign: { pub: keys.sign.pub, priv: keys.sign.priv }, dh: { pub: keys.dh.pub, priv: keys.dh.priv } });
+  // older exports have none: new keys are made on first use
   profiles.setActive(p.id);
   return p;
 }

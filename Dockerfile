@@ -25,6 +25,14 @@ COPY game ./game
 COPY scripts ./scripts
 RUN npm run build:game
 
+# ---------------------------------------------------------------- runtime dependencies
+# Installed for the target platform in a stage of their own, so the runtime image needs no npm.
+FROM ${NODE_IMAGE} AS deps
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
+
 # ---------------------------------------------------------------- runtime
 FROM ${NODE_IMAGE}
 LABEL org.opencontainers.image.source=https://github.com/nickolaiposs/friendspeak
@@ -40,11 +48,16 @@ ENV NODE_ENV=production \
     FRIENDSPEAK_DOCKER=1 \
     ADMIN_LOCAL=off
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund && npm cache clean --force \
-    && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
+# The server only needs node. npm, npx, corepack and yarn come with the base image and carry
+# packages of their own that scanners (rightly) flag; nothing here runs them. The base's Debian
+# packages get the fixes published since the base image was built.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
+    && apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
-COPY server.js updater.js admin.js logbuffer.js crashlog.js ./
+COPY package.json package-lock.json ./
+COPY --from=deps /app/node_modules ./node_modules
+
+COPY server.js updater.js admin.js logbuffer.js crashlog.js persist.js ./
 COPY admin-ui ./admin-ui
 COPY public/js/util.js ./public/js/util.js
 COPY docker/healthcheck.js ./docker/healthcheck.js

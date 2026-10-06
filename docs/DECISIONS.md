@@ -29,7 +29,7 @@ Status legend: **Active**, **Superseded**, **Revisit** (known weak spot).
 **Consequences:** zero friction. Identity is **spoofable**: anyone who knows your profile id could post as you. Fine for friends, not for public servers. Message history stores `author` (profile id) plus a name snapshot. Avatars live in `state.profiles` so history renders with current avatars.
 **Alternatives:** keypair identities (sign `hello` with a local key), which is the natural upgrade path if spoofing matters. Direct messages took that path (D32), and servers followed (D42): a server now pins the key that first says hello as a profile id. Still no accounts.
 
-## D4: JSON file for server state · Active
+## D4: JSON file for server state · Active · One file became several (D57)
 **Decision:** `data/state.json`, rewritten with a debounced (500 ms) atomic write. History is capped at 500 messages per channel.
 **Consequences:** trivial to inspect, back up and reset, with no DB dependency. It rewrites the whole file on each change, which is fine for friend-group traffic. Custom emojis are stored inline as data URLs (≤256 KB each), so the file grows with them.
 **Alternatives:** SQLite. It's already present for the game and would be the move if history needs to be unbounded or searchable.
@@ -76,7 +76,10 @@ Without a mic, users join **listen-only** instead of failing.
 **Decision:**
 - The UI is served from `friendspeak://app/`, a privileged custom scheme (`standard`, `secure`, fetch/CORS).
 - ~~The main process can run `startServer()` itself.~~ Removed; see D23.
-- The renderer only gets a small preload bridge (`contextIsolation`, `sandbox: true`).
+- The renderer only gets a small preload bridge (`contextIsolation`, `sandbox: true`). Every bridge call is answered only for the app's own page (`friendspeak://app`, the main frame of the app window).
+- The page has a Content-Security-Policy (the `CSP` list in `desktop/main.js`, sent with `index.html`): scripts only from the app itself, plus WebAssembly for noise suppression and camera backgrounds. Messages are drawn from escaped text; this is the second line if something gets past that. Images, media, embeds and connections stay open, because servers and links can be anywhere.
+- Other sites run inside the app (the game from the server, in an iframe or its pop-out window, and link embeds). They get fullscreen and copying to the clipboard. The microphone, camera, screen capture and notifications are for the app's own page only.
+- A new window opens only for the game's pop-out, which the page opens by name (`friendspeak-game`). Any other link, including one to `/game/` on some server, goes to the system browser. The pop-out can't leave the server it was opened for.
 
 **Why a custom scheme:** a secure context means the mic always works. A *fixed* origin means `localStorage`/IndexedDB survive port changes; `http://localhost:<port>` would lose profiles whenever the port changed. And the scheme isn't subject to the https mixed-content rules, so connecting to `http://IP` servers and iframing their `/game/` works (verified against a LAN IP).
 **Consequences:**
@@ -297,15 +300,15 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** you show as online on the call's server while looking at another. Messages and mentions there aren't noticed until you return. Clicking the server you are already on while it reconnects still starts a fresh connection, which ends a call on it. Switching profiles ends a call on another server (the new identity has to reconnect); since D50 it ends any call and leaves every server.
 **Alternatives:** stay connected to every bookmarked server (unread marks everywhere, but a socket and a presence per server, and a much larger change); move the call's signaling to its own socket (two sessions with one profile, which the server replaces by design: one session per profile).
 
-## D32: DMs get keypair identities, end-to-end sealing, server mailboxes, friend codes and images · Active
+## D32: DMs get keypair identities, end-to-end sealing, server mailboxes, friend codes and images · Active (guests, relays and plain ops removed by D55)
 **Context:** D28's DMs needed both people online at once and a server both had bookmarked, anyone who knew a profile id could pose as that profile, the signaling server could sit in the middle of the handshake, and there were no images (issues #5 and #6). Two devices behind home routers can't find each other or hold messages for each other without some third party, so the question was which one, and how little it has to be trusted.
 **Decision:**
 - **Identity:** every local profile gets an Ed25519 signing pair and an X25519 pair, made in the app with WebCrypto and stored in `fs.keys`, apart from the profile so they never reach a server. The public half is a signed **card**. A contact's card is pinned the first time it's seen (trust on first use, like D20), and a different key for the same profile id is refused and shown as "different key" until the user accepts it. Profile ids stay the names of conversations, so nothing stored had to move.
 - **Sealing:** each pair of people derives one AES-256-GCM key from their X25519 keys. Every op and every image chunk is sealed with it, on the data channel as well as in a mailbox, with the direction in the additional data. Only the two key holders can produce or read it, which authenticates the sender without a signature per message. The last 400 op ids per contact are remembered, so a relay can't replay an old edit.
 - **Offline delivery:** servers keep **mailboxes** on `/dm`. A mailbox is filed under the hash of its owner's signing key and handed only to a socket that signs the server's nonce with that key, so there's nothing to register and nothing to squat. Senders leave sealed blobs there: at once when the friend is offline, and after 8 s when a direct connection doesn't come up, which also covers strict NATs (D28 had no answer for those). Mail is deleted when collected, after 30 days, or when the mailbox is full (500 blobs, 8 MB). It's stored in `data/mail.json`, not in `state.json`.
-- **Outside shared servers:** a **friend code** carries a card and the addresses of the owner's bookmarked servers (their relays); `hello` and every mailed op keep that list current. A client connects to a contact's relays as a **guest**: no password, no member list, no mailbox of its own, and presence only for profile ids it names. Guests can signal and leave mail for people whose id or address they already hold. A guest can't use the profile id of one of the server's stored profiles. `DM_GUESTS=off` turns guests away.
+- ~~**Outside shared servers:**~~ Removed; see D55. A **friend code** carries a card and the addresses of the owner's bookmarked servers (their relays); `hello` and every mailed op keep that list current. A client connects to a contact's relays as a **guest**: no password, no member list, no mailbox of its own, and presence only for profile ids it names. Guests can signal and leave mail for people whose id or address they already hold. A guest can't use the profile id of one of the server's stored profiles. `DM_GUESTS=off` turns guests away.
 - **Images:** the message carries a small thumbnail per image, so it fits in a mailbox like any other op. The image stays on the sender's device and is pulled over the sealed data channel when both are online (16 KB chunks, `bufferedAmount` backpressure), then stored in IndexedDB (`dmFiles`). Png, jpeg, gif and webp, 10 MB each, 4 per message. Nothing needs a transfer outbox: the receiver keeps a list of what it lacks and asks again on the next connection.
-- **Old apps:** a peer that shows no card is answered in plain, as before, unless a key is already pinned for that profile. Old servers have no `challenge`, so there are no mailboxes there and delivery works as in D28.
+- **Old apps:** ~~a peer that shows no card is answered in plain, as before, unless a key is already pinned for that profile.~~ Removed; see D55. Old servers have no `challenge`, so there are no mailboxes there and delivery works as in D28.
 
 **Consequences:**
 - The host of a relay sees who leaves mail for whom, when, and how big it is (the sender's card is on the blob), but never the content. It can drop or delay mail.
@@ -343,7 +346,7 @@ Without a mic, users join **listen-only** instead of failing.
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
-- **Local rule:** a request needs no key when the peer is loopback, the `Host` is `localhost`, `127.0.0.1` or `[::1]`, and there are no proxy headers (`X-Forwarded-For`, `Forwarded`, `X-Real-IP`). `ADMIN_LOCAL=off` switches the rule off. The Docker image sets it off, because inside a container loopback is never the admin's own machine.
+- **Local rule:** a request needs no key when the peer is loopback, the `Host` is `localhost`, `127.0.0.1` or `[::1]`, and nothing shows a reverse proxy passed it on (`X-Forwarded-*`, `Forwarded`, `X-Real-IP`, `Via` and similar headers, or HTTP/1.0). `ADMIN_LOCAL=off` switches the rule off. The Docker image sets it off, because inside a container loopback is never the admin's own machine, and so does setting `PUBLIC_URL`, which says there is a proxy. A proxy on the same machine that rewrites `Host` to `localhost`, adds no header and speaks HTTP/1.1 still can't be told from the host's own browser: that setup needs `ADMIN_LOCAL=off`.
 - **Admin keys:** generated by the server (`fsa_` plus 32 random bytes) and stored only as SHA-256 hashes in `DATA_DIR/admin.json`. On first boot, if no key exists, one is generated and printed once to stdout, outside the log buffer the dashboard shows. `ADMIN_KEY` (16+ characters) sets a key from the environment instead and deactivates the first-boot key. There can be several named keys, so one admin can be revoked without rotating the rest. Keys are separate from `PASSWORD`.
 - **TLS:** a key is only accepted over TLS (directly, or `X-Forwarded-Proto: https` from a proxy), or on a direct loopback connection where it never leaves the machine.
 - **Sessions:** an opaque random token, kept in memory as its hash. The cookie is `fs_admin`, `HttpOnly; SameSite=Strict`, `Secure` on TLS, scoped to `/admin`. A session lasts 12 h in total and 1 h idle. An open event stream counts as activity, and the 12 h limit still applies. Revoking a key ends its sessions at once.
@@ -506,7 +509,7 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 - **Proof:** `hello` carries `proof`, a signature over `friendspeak-hello-v1|<socket id>|<host>`. The socket id is chosen by the server for this connection, so it's a fresh challenge with no extra round trip, and a proof can't be replayed on another connection. The host is the server as the app dialed it (`new URL(address).host`), checked against the `Host` header, so a malicious server can't pass on a hello its visitors signed to another server. The card in the hello must be signed by its own key. A proof that's sent and doesn't verify is refused, not treated as an old app.
 - **Old apps** send no proof. They can still use a profile id that has no key pinned yet, and their card is only kept if it's validly signed. A pinned id refuses them with "Update friendspeak".
 - **The card can't change during a session.** `profile:update` keeps the card checked at `hello`.
-- **`/dm` (D28, D32):** a socket for a pinned id is nobody until it answers the existing `challenge` with `identify` using the pinned key. Until then it can use its mailbox, but it isn't present, its signals are dropped, it doesn't count as online, and it replaces no one (newest wins only among verified sockets). Guests can't use a pinned id without the password, as for stored profiles.
+- **`/dm` (D28, D32):** a socket for a pinned id is nobody until it answers the existing `challenge` with `identify` using the pinned key. Until then it can use its mailbox, but it isn't present, its signals are dropped, it doesn't count as online, and it replaces no one (newest wins only among verified sockets). (Guests are gone since D55.)
 - **Several devices** use the same identity by importing the same profile file. Newest wins still applies: one chat session per profile at a time (unchanged).
 - **Lost keys:** removing a member keeps the pin, because removal is open to everyone in the app (D27) and would otherwise let anyone free up someone's id and take it. The admin dashboard (D34) can **Reset key**, which drops the pin and the stored card. The next signed `hello` with that id claims it. The Users view shows the start of each pinned key.
 
@@ -574,7 +577,7 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 
 **Consequences:**
 - **Measured, on one Apple-silicon Mac (M-series, macOS 26), sidecar to Chrome 154 on the same machine, a moving test pattern:** 2560×1440 at 60 fps, VideoToolbox, H.264 High: 58–60 fps sent and decoded, no dropped frames, 8–16 ms per frame in the encoder; 1920×1080 at 60 fps on OpenH264: 60 fps at 4.5 ms per frame. A real camera (1080p30, the built-in one) ran through AVFoundation and VideoToolbox. In the desktop app, two instances in a voice channel: the viewer got 1080p60 with the share's audio on its own connection, the tier changed live, a viewer acting as an older app got the browser engine's capture, and killing the sidecar mid-share was reported to the app, which could start it again.
-- **Not run:** a real screen or window capture (the development machine refused Screen Recording to a process started from a terminal, as in D36), so ScreenCaptureKit's frame delivery, the exclusion of friendspeak from share audio, and window audio are written to the documented API but unconfirmed. **None of the Windows code has been run:** it is compiled for Windows in CI and in a cross-compiling container, no more. Nothing was measured over a real network, with several viewers, or under packet loss; the ladder constants are starting values, as D36's were.
+- **Not run:** a real screen or window capture (the development machine refused Screen Recording to a process started from a terminal, as in D36), so ScreenCaptureKit's frame delivery, the exclusion of friendspeak from share audio, and window audio are written to the documented API but unconfirmed. **None of the Windows code has been run:** it is compiled for Windows in CI and in a cross-compiling container, no more. (It has been since: D56.) Nothing was measured over a real network, with several viewers, or under packet loss; the ladder constants are starting values, as D36's were.
 - **A native binary ships in the desktop app.** This reverses the earlier "no native binary" position for the desktop app only; rule 3 in AGENTS.md is about the server and still holds. Cost: Rust in the build (`npm run build:media`, CI on macOS and Windows), about 8 MB per installer, and a binary to sign once the app is signed (D21).
 - **Not cross-built:** the sidecar uses OS frameworks and compiles C and C++ (OpenH264, the crypto library), so `npm run dist:all` on a Mac produces Windows and Linux installers *without* it. Those apps work, on the browser engine's path. Releases are built per OS in CI and carry it.
 - **Linux has no sidecar yet** (PipeWire capture and VA-API encoding are not written). Linux apps share as before and can watch native streams.
@@ -620,7 +623,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Decision:**
 - **The "Noise suppression" checkbox now switches DeepFilterNet.** `getUserMedia` always asks for `noiseSuppression: false`. It is still the only mic processing besides automatic gain (D44), on by default, and a saved on or off carries over.
-- **A strength slider** under it: the most the noise is turned down by, 6 to 40 dB, with "maximum" (no limit) at the top and as the default. It is libDF's attenuation limit, so it is exact: at 24 dB a noise is 24 dB quieter.
+- **A strength slider** under it: the most the noise is turned down by, 6 to 40 dB, 34 by default, with "maximum" (no limit) at the top. It is libDF's attenuation limit, so it is exact: at 24 dB a noise is 24 dB quieter.
 - **A worklet of our own** (`denoise-worklet.js`, about 100 lines) around upstream's wasm, between `micMono` and `micGain`. It goes into the graph the first time the setting is on and stays; switching and the slider are messages, so nothing is rewired per toggle (the area #43 pointed at) and the mic doesn't restart. Off, it is a wire with no delay.
 - **Our own build of upstream, vendored** in `public/vendor/deepfilternet/` (`scripts/denoise/`, built in Docker from a pinned commit). No npm dependency and no bundler (D1); the server image gets nothing. It carries a patch, for two reasons found while measuring:
   - The wasm binding uses the library's default thresholds, which skip the deep-filtering stage above 20 dB local SNR. With them the voice came out 5 dB down (10 dB in places, 9 dB at 1 to 2 kHz) over noise at −38 dBFS: the kind of change #44 complained about. Upstream's own `deep-filter` program uses −15/35/35 dB and keeps the voice level; the patch uses those.
@@ -680,7 +683,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The log now holds names, id prefixes and, for refused passwords, addresses, for 14 days. It sits behind the same gate as the dashboard, which already shows addresses; the files are mode 0600.
 - A server keeps running after an unhandled rejection, where Node alone would have exited. Its state may be off in whatever that promise was doing; the report says so.
 - Failed saves of `state.json` and the mailboxes are logged (once a minute) and no longer take the process down from a timer.
-- The scrubber only covers what is kept. The process's own stdout (`docker logs`) is unchanged, so the rule above is what protects it.
+- The console (`docker logs`) is scrubbed like what is kept, except for the dashboard's path, which is printed there on purpose (D52). What the server writes to stdout directly (the first-start invite and admin key) is not scrubbed.
 - A short server password (under 6 characters) isn't registered with the scrubber: replacing it everywhere would mangle ordinary text. Nothing logs it.
 - Minidumps of native crashes aren't collected: without symbols they tell the user nothing, and the reason and exit code are in the report.
 - Up to 50 MB more in the data volume, and 10 MB in the app's data folder.
@@ -719,7 +722,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - **`createInvites` permission, off by default**, and off in open mode like `manageRoles`: until someone is an administrator, invites are made in the dashboard. Without it the app shows no Invites page and the server sends no invite (`invite:list` is refused, the `invites` event isn't sent). A holder revokes their own invites; an administrator or the dashboard any.
 - **Optional, on by default:** `state.inviteOnly`. Off, anyone with the address joins as before. Only the dashboard or an administrator changes it, never open mode: otherwise any member could open the server to everyone.
 - **Wrong invites are limited per address:** 10 in 10 minutes, then that address waits. Members aren't affected.
-- **`/dm`:** on an invite-only server a socket is a member only if its profile id has joined and has a pinned key, and it gets presence and a mailbox once `identify` proves that key. Anyone else is a guest (D32) or refused.
+- **`/dm`:** on an invite-only server a socket is a member only if its profile id has joined and has a pinned key, and it gets presence and a mailbox once `identify` proves that key. Anyone else is refused (D55; before it, they could come as a guest).
 - **Version skew:** `/api/info` still sends `password` so older apps ask for one, and `hello` reads `password` when `invite` is missing, so an older app joins with the invite typed as the password. The app sends the same text as both, so it still joins older servers with their password.
 
 **Consequences:**
@@ -789,3 +792,113 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - A server whose `state.json` is copied to a second server shares its id with it; links then resolve to whichever of the two the app has bookmarked first.
 
 **Alternatives:** the address in the link (differs per person: LAN IP, domain); embedding the quoted text in the link or the DM (leaks a channel's messages to anyone the link is forwarded to); linking channels by id in the text, like `<#id>` (unreadable in older apps and in notifications); a search index (nothing to gain at 500 messages per channel); searching server history in the app (it only holds the pages it has loaded).
+
+## D55: No DM guests; the `/dm` login names the server; unsealed DMs are dropped · Active
+**Context:** a security review of D32. Three things added up:
+- An app answered the `/dm` challenge of any server by signing the nonce alone. A server could pass on a nonce it got from another server and be let in there as that person: it then received their mention previews, could read message previews through `msg:peek`, and could collect and delete their sealed mail.
+- Guests made that reachable for a stranger. Anyone who got one op to a person could list relays for themselves, and the person's app connected to those addresses and answered their challenges. A guest also needed nothing but a profile id to send someone an offer, and the answer carries that person's addresses.
+- A peer with no pinned key was still answered in plain (apps from before D32), so whoever a server presented under such a profile id got what was queued for it.
+
+**Decision:**
+- **No guests.** `/dm` takes members only, the app connects only to bookmarked servers, and `DM_GUESTS`, the `watch` event and relay lists are gone. Two people reach each other through a server both have joined. A friend code still pins a key before the first message; it no longer carries servers.
+- **The login is bound to the server.** `challenge` says `v: 2`, and the app signs `friendspeak-dm-auth-v2|<nonce>|<host>`, as `hello` signs the host (D42). An answer made for one server is refused by every other.
+- **The older answer is on its way out, per key.** An app from before this still signs the nonce alone, and a server still accepts that, but never again for a key that has answered `v: 2` there (`state.dmV2`). So an updated app can't be made to produce something an updated server will take.
+- **`mail:put` needs a verified socket.** A profile id alone leaves no mail.
+- **Only sealed ops are read.** The plain path is removed: nothing is sent to a peer before its card arrives, and a plain op is dropped.
+- **An offer is answered only for a contact, or for someone the server it came through lists as online.**
+- **Replays past the op window.** A deleted message stays deleted and an edit never goes back in time, however old the replayed mail is.
+
+**Consequences:**
+- People who share no server can no longer message each other. This was the point of friend codes in D32. The way back, if it is wanted, is a relay that both sides chose, not one the other side names.
+- Apps from before D32 can't exchange DMs with current ones. What is written to such a contact waits in the outbox until they update.
+- An app from before this, and an updated app talking to a server from before this, still sign the nonce alone. Both ends have to update for the binding to hold; after that it holds for good on that server.
+- Apps from before this keep trying their contacts' relays as guests and are refused there (`Not a member…`), which they treat as final.
+- Voice channels are a different case and unchanged: their signaling goes through the server in the clear (D5), so a server can see who talks to whom and could add itself to a call. DM calls ride the sealed link (D33).
+
+**Alternatives:** keeping guests but ignoring relay lists from people who aren't contacts yet (the login relay still works for any server a person has bookmarked, and the unsolicited offer stays); refusing the nonce-only answer outright (locks every app from before this out of DMs on the day a server updates); a `v: 2` flag kept per profile id rather than per key (a mailbox is filed under the key, and on a server without invites there is no pinned id to hang it on); a ratchet for forward secrecy (a different problem: D32's consequence stands).
+
+## D56: On Windows a screen's frames stay on the GPU; keyframes are bounded; a move between layers has no gap · Active
+**Context:** D45 shipped the Windows half of the media sidecar without ever running it. Issue #108 asked for it to be run and measured, and for the copies each frame went through to be cut if the numbers fell short: read back from the GPU, copied, converted on the CPU per layer, copied again and uploaded back to the GPU the encoder runs on. The owner's order of priorities: how a stream looks and how smoothly it plays over the internet first, efficiency second and never at the cost of the first.
+
+**Measured** (one machine: i7-12700K, RTX 3070 Ti with NVIDIA's encoder through Media Foundation, Intel UHD 770 beside it, Windows 11, a 2560×1440 screen at 170 to 180 Hz; the sidecar alone, to Chrome 154 on the same machine; a page of scrolling text and moving blocks as the picture; links simulated between the two by a relay with a bandwidth cap and a 300 ms queue, delay and loss):
+
+| | As D45 left it | Now |
+|---|---|---|
+| Does it run | yes: the encoder's event handshake, forced keyframes and parameter sets all worked the first time | |
+| 1440p60, one viewer | 54 to 57 of 57 captured frames encoded, 10 to 14 ms a frame in the layer, 52 to 65% of a core | every frame, 5.5 to 11 ms (the encoder's own time), 5 to 8% of a core |
+| Several layers | 104% of a core with two (1440p, 720p) | 11% with three (1440p, 720p, 360p), all at the capture's rate |
+| A window bigger than the tier (2918×1454 to 2560×1274) | 17 to 18 fps, 52 to 58 ms a frame | 60 fps, 5.6 ms |
+| Bitrate against the target, 1440p High | 9 to 14% over | 1 to 5% under |
+| Sharp mode | 55 fps at 1.8 to 2 times the target | 30 fps at the target |
+| 8 Mbit/s link: a step up the ladder | a keyframe of 150 to 185 kB; the picture held 190 to 270 ms; the estimate halved; back down a rung, every 12 s or so | a keyframe of 50 to 90 kB; no hold; reached the top rung and stayed |
+| Colours (eleven solid colours, source against decoded, 1440p and 360p) | within 2 of 255 | within 1 of 255 |
+| Hardware acceleration off (OpenH264) | 30 fps at 1440p, 122% of a core; a 100 kB keyframe of its own about every second | 28 fps, 85 to 100%; no keyframes of its own |
+
+**Decision:**
+- **Frames stay textures** (`native/src/d3d.rs`). The capture copies each frame into a texture of its own on the GPU (Windows Graphics Capture takes its own back at once) and hands that out, pooled. A layer scales and converts it to NV12 with the GPU's video processor (BT.709, video range, the driver's "enhancements" off), and gives the result to the encoder as a texture: the encoder shares the capture's device through a DXGI device manager. Nothing leaves the GPU.
+- **Which encoder:** the one on the capture's GPU is tried first, told from its PCI vendor. An encoder on another GPU, or one that isn't Direct3D-aware, or one that turns out not to take textures on its first frame, is fed from memory: the GPU still scales and converts, and only the small NV12 picture is read back (measured with Intel's encoder beside the NVIDIA capture: 60 fps at 1440p, 45% of a core).
+- **With hardware acceleration off (D46)**, or on a GPU with no video processor, the frame is read back as captured and converted on the CPU as before, without the per-frame allocation and copy.
+- **Shrinking by more than two is done in passes of two.** The video processor samples bilinearly, which aliases past half size: at a quarter of the screen's size text came out broken where the CPU's scaler kept it readable. Each pass halves; the last one also converts.
+- **The encoder's events are waited for, not polled:** a thread per encoder blocks on its queue.
+- **A keyframe is bounded** by the rate control's buffer: six frames' worth of the bitrate the layer opens with, within 0.1 to 0.25 s of it, and at least three frames at the layer's highest bitrate. NVIDIA's encoder takes the size before streaming starts and ignores later changes (it says yes to them), so it is set once.
+- **What an encoder spends is measured and trimmed** (`Trim` in `encode/mod.rs`, every platform): over two seconds of output against the targets of that time, and the encoder is told proportionally less when it overshoots, down to 60%. Never more: under the target is what a calm picture looks like.
+- **A viewer moves between layers without a gap** (`engine.rs`, every platform): the layer they are on keeps sending until the new one has a keyframe for them. At most one encoder more than `MAX_LAYERS` runs for this; beyond that the move is a cut, as before.
+- **A layer slower than the capture is paced**, also the best one: in sharp mode the capture runs at the tier's rate and the best rung at half of it.
+- **OpenH264's scene change detection is off.** Keyframes are for viewers who ask.
+- **Two switches for telling a driver's fault from ours:** `FRIENDSPEAK_MEDIA_FRAMES=readback|cpu` steps down from textures, and `FRIENDSPEAK_MEDIA_ENCODER=<part of a name>` picks among several GPUs' encoders.
+
+**Consequences:**
+- **Run on one machine, with one vendor's encoder as the main path.** AMD's encoder, Windows 10, an HDR screen, a laptop that draws on the integrated GPU and encodes on the other, and a real network are still untried. What an untried driver does wrong should land on one of the fallbacks above, and that is itself untested. The desktop app wasn't run with this build: its side of the protocol didn't change.
+- **The three changes in `engine.rs` and `encode/mod.rs` also apply on macOS, where they were not run** (this was done on a Windows machine; CI builds the macOS sidecar). They are the trim, the move between layers and the pacing of the best rung.
+- **A smaller first frame.** A keyframe at a tenth of a second of bitrate is softer than one at a second's worth and sharpens over the next few frames. That is the price of it arriving at once on a link that is nearly full.
+- **Packet loss is unchanged:** recovery is by retransmission only, so each lost packet holds the picture for about a round trip and a half (190 ms at 60 ms away). At 2% loss that is several holds a second on any rung.
+- **The software path is still weak:** 22 to 30 fps at 720p on this machine, and its rate control drops frames in runs (holds of up to 0.6 s). It is the fallback; tuning it is its own task.
+- **The encoder's time is now most of a frame's time:** 5 to 11 ms at 1440p in NVIDIA's encoder at its default quality setting. A faster setting (`CODECAPI_AVScenarioInfo`, `CODECAPI_AVEncCommonQualityVsSpeed`) measured 5.4 ms at about half a quantizer step worse; it was left alone.
+- **The estimate still overshoots a link** before the delay shows: on a 3 Mbit/s link it climbed to 3.9, the queue grew by 100 to 150 ms and it backed off, about every 10 s. That is the bandwidth estimator's sawtooth, not the encoder's.
+- **Each encoder opened leaks two to four handles inside the driver** (fewer with textures than from memory; the same before this). A share that changes rung a few hundred times shows it in Task Manager; it ends with the sidecar.
+- A machine whose display changes mode mid-share (refresh rate, HDR) ends the capture ("the shared screen is no longer available"), and the share restarts on the browser engine (D45). Seen once while measuring.
+
+**Alternatives:** converting once in the capture callback to NV12 and scaling that per layer (the issue's step 3: one conversion less for the best layer, but lower layers would be scaled from chroma already halved, and a full-size conversion is wasted when the tier is smaller than the screen); a shader of our own for scaling and conversion (full control of the filter, at the cost of a render pipeline to write and keep working on three vendors); mip levels from `GenerateMips` as the video processor's input (one call for every layer, but drivers differ on mipped inputs); giving the encoder the same texture every frame (one texture instead of four, relying on the transform to be done with it by the next frame); resizing the buffer on every bitrate change (accepted and ignored by NVIDIA's encoder; with a buffer sized for a low starting bitrate that held it at 60 to 80% of its target); bounding keyframes by a maximum quantizer (bounds quality, not size); correcting the bitrate upward too (a calm picture can't be told from an encoder that underspends, and the correction would overshoot when the picture moves); keeping the 300 µs polling (Rust's sleep is precise on current Windows, so it worked; it woke each layer thread about a thousand times a second for nothing).
+
+## D57: The server state is saved in pieces, off the event loop · Active
+**Context:** D4's `state.json` held everything: every channel's messages, every profile with its avatar and background as data URLs, the emojis, and the rest. Every message, edit, reaction, connect and disconnect rewrote all of it with `JSON.stringify` and `writeFileSync` on the event loop. With 24 members with pictures, 20 emojis and 8 full channels the file is 27 MB, and one save holds the event loop for about 140 ms, during which voice signaling and every other socket wait. The DM mailboxes (`mail.json`) had the same shape.
+
+**Decision:**
+- **Pieces.** `state.json` keeps the small, rarely changed part (name, channels, roles, invites, bans, pins, file list). Each profile, each text channel's messages, the emojis and each mailbox is a JSON file of its own (`profiles/`, `messages/`, `emojis.json`, `mail/`). The in-memory `state` object is unchanged, so nothing that reads it changed.
+- **Marked by hand.** `save()`, `saveProfile(id)`, `saveMessages(channelId)`, `saveEmojis()` and `saveMail(address)` each mark one piece. A message rewrites one channel's file; someone going offline rewrites one profile's.
+- **Written off the event loop** (`persist.js`): `fs.promises`, to a `.tmp` file that is renamed, 500 ms after the first change. The stall is the `JSON.stringify` of one piece. The synchronous write is kept for `close()` and the crash handler, and for the migration.
+- **File names** are the id for the hex ids the server makes, and a hash of it for anything else: profile ids are client-made, so they can't be trusted as file names, and two that differ only in case would share a file on macOS and Windows.
+- **Migration at start, with a copy.** A `state.json` without `format: 2` is copied to `state.pre-split.json`, split, and rewritten last. `mail.json` likewise. An old `state.json` put back later is treated as a restore and replaces the pieces.
+- **While there:** channels and files are found through a `Map`, and the bytes in use are a running total, where each was a scan of the list per call.
+
+**Consequences:**
+- The same scenario (a message every 100 ms on the 27 MB server above): the longest stall went from 139 ms to 3 ms.
+- Backups need the folders too, as they already needed `files/`. The data dir is still plain JSON that can be read, edited and deleted by hand; a file that can't be read is skipped with a warning, where a damaged `state.json` used to mean starting empty.
+- The pieces are not written together. After a crash or power loss, one piece can be up to half a second ahead of another: a message whose attachment is not yet in the file list, say. Each file by itself is always whole.
+- **Going back to an older version** needs `state.pre-split.json` put back as `state.json`. An older server started on split data sees no members and no history, and members then need an invite again. Auto-update never goes back, so this takes a deliberate image rollback.
+- A place that changes a profile, a message or the emojis and calls only `save()` loses that change at the next restart. It is the price of not tracking changes automatically.
+- A profile's file still holds its pictures, so a changed profile rewrites up to a megabyte, though no longer on the event loop. Coming and going doesn't: that only moves `seen`, which has a file of its own (D58).
+
+**Alternatives:** `node:sqlite` for messages (already used by the game, so D13 holds): each write would be small, but synchronous, the module is not marked stable in Node 22, and history stays capped at 500 per channel, so one file per channel is small enough. An append-only log per channel: edits, reactions and deletes need compaction, for a file that is rewritten in a few milliseconds anyway. One write of the whole state in a worker thread: the copy to the worker still stalls the loop. Tracking changes with a `Proxy`, so no call can be forgotten: every read of `state` would pay for it.
+
+## D58: Pictures travel by reference, and presence sends only what changed · Active
+**Context:** avatars, profile backgrounds and emojis are data URLs (D4, D25), and they rode inside socket events that repeat. A disconnect sent the person's whole profile to everyone for the sake of `seen`; a connect did the same though nothing had changed; `users`, sent on every mute, deafen, camera and game toggle, carried the avatar of everyone online; adding one emoji re-sent all of them; and the `hello` ack carried every picture on the server. One person's flaky Wi-Fi cost every other member up to a megabyte per reconnect.
+
+**Decision:**
+- **`proto: 2` in `hello`** says the app understands what follows. The server keeps such sockets in one room and the rest in another, and sends each what it knows. An app from before this is sent exactly what it was sent before.
+- **References.** For `proto: 2`, a picture that is a data URL is replaced by `/media/<SHA-256 of the data URL>` in `server.profiles`, `profile`, `users` and the emojis. The app puts the server's origin in front and loads it with `GET /media/<hash>`, which is `immutable`: once per picture, from the HTTP cache after that.
+- **Small events.** A disconnect sends `profile:seen { id, seen }`. An emoji change sends `emoji:added { emoji }` or `emoji:removed { name }`.
+- **Nothing when nothing changed**, for both kinds of app: a `hello` or `profile:update` with the profile the server already has sends no `profile`. `users` still says who is online.
+- **`seen` has a file of its own** (`seen.json`), so coming and going doesn't rewrite a profile's file with its pictures (D57).
+- **The app draws a server's picture only for a server it is connected to** (`isImage()`): the rule that a picture's host must not learn who is shown it (D25) holds, because that server knows already. A DM contact can't point an avatar at a host of their choosing this way.
+- **Storage is unchanged.** `state` and the profile files still hold data URLs; the hash is worked out when a picture is first sent, and `GET /media` decodes it from memory. Old apps need the data URLs anyway.
+
+**Consequences:**
+- Measured with a 200 KB avatar and a 300 KB background: the `profile` event went from 683 KB to 455 bytes, and a `users` list from 274 KB to 1.3 KB.
+- `/media/<hash>` needs no sign-in, like `/files` (D24): the address is the capability, and only someone who has the picture can work out its hash. A replaced or removed picture stops being served within ten minutes.
+- The server sends two versions of some events while both kinds of app are connected, and still sends old apps the megabytes. That ends when support for apps from before this is dropped, which nothing here decides.
+- The app still uploads its own pictures in every `hello`. The server could say which hashes it has; not done.
+- The server icon is still inline (`hello` ack, `server`, `/api/info`): it is one picture, sent rarely.
+
+**Alternatives:** moving the pictures to files on disk and keeping only references in `state` (old apps would need them read back for every `hello`; the profile files are already off the event loop, D57); the app fetching each reference and turning it back into a data URL (nothing else in the app changes, but every picture is held in memory twice and drawn late); a capability list instead of one number (nothing needs two yet).
+
