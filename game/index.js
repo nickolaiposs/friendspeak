@@ -146,6 +146,9 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
     return 'P' + crypto.randomBytes(5).toString('hex').slice(0, 11);
   }
 
+  // A profile name is user input: no control characters in a log line
+  const logName = (name) => String(name ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 32) || 'anon';
+
   async function login(profile) {
     const [rows] = await db.sequelize.query('SELECT userId, baseName FROM friendspeak_accounts WHERE profileId = ?', {
       replacements: [profile.id],
@@ -163,7 +166,7 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
       await db.sequelize.query('INSERT OR REPLACE INTO friendspeak_accounts (profileId, userId, baseName) VALUES (?, ?, ?)', {
         replacements: [profile.id, user.id, base],
       });
-      console.log(`[game] created penguin "${user.username}" for ${profile.name}`);
+      console.log(`[game] created penguin "${user.username}" for ${logName(profile.name)}`);
     } else if (rows[0].baseName !== base) {
       // The profile was renamed. Comparing the derived name, not the username,
       // keeps a penguin from flipping between "Name" and "Name2".
@@ -171,7 +174,7 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
       if (username !== user.username) {
         const previous = user.username;
         await user.update({ username });
-        console.log(`[game] renamed penguin "${previous}" to "${username}" for ${profile.name}`);
+        console.log(`[game] renamed penguin "${previous}" to "${username}" for ${logName(profile.name)}`);
       }
       await db.sequelize.query('UPDATE friendspeak_accounts SET baseName = ? WHERE profileId = ?', {
         replacements: [base, profile.id],

@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, mediaResolver, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -39,6 +39,10 @@ const S = {
   },
   get sid() {
     return this.conn?.sid || null;
+  },
+  // The secret that goes with our uploads; null on a server from before it had one
+  get uploadKey() {
+    return this.conn?.uploadKey || null;
   },
   get connected() {
     return !!this.conn?.connected;
@@ -98,6 +102,10 @@ function chatById(id) {
   return ch?.type === 'text' ? ch : null;
 }
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
+// What of a `users` entry a member row shows, and a row in the channel list (voice, game)
+const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing'];
+const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
+const sameUsers = (a, b, fields) => a.length === b.length && a.every((u, i) => fields.every((f) => u[f] === b[i][f]));
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
 
 // ---------------------------------------------------------------- permissions
@@ -458,7 +466,7 @@ function leaveDmView() {
   renderAll();
 }
 
-// Friend codes: how to message someone you share no server with (D32)
+// Friend codes: someone's key, handed over directly, so it is known before the first message (D32, D55)
 function friendDialog() {
   if (!DM.identity) return toast('Still starting up, try again in a moment');
   const code = DM.myCode();
@@ -476,11 +484,11 @@ function friendDialog() {
     h(
       'div',
       {},
-      h('p', { class: 'muted' }, 'A friend code lets someone message you without sharing a server. Send yours to a friend, and paste theirs below.'),
+      h('p', { class: 'muted' }, 'A friend code adds someone to your direct messages with their key, so you know it’s really them from the first message. You reach each other through a server you both use. Send yours to a friend, and paste theirs below.'),
       h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
       h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
       h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
-      DM.relays().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers, so a friend can only reach you through one of theirs, and only while you’re both online.')
+      servers.all().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers yet. Direct messages travel through a server you and your friend both use.')
     ),
     { actions: [(c) => h('button', { class: 'btn', onclick: () => add(c) }, 'Add friend')] }
   );
@@ -852,7 +860,7 @@ setInterval(() => {
   if (!v || !dmCallUi.el?.isConnected) return;
   const levels = v.levels();
   if (audio.selfAnalyser) levels.set(me().id, Level(audio.selfAnalyser));
-  for (const el of $$('.tile[data-who]', dmCallUi.el)) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
+  for (const el of dmCallUi.el.getElementsByClassName('tile')) if (el.dataset.who) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
 }, 90);
 
 // ---------------------------------------------------------------- toasts, modals, popovers
@@ -902,6 +910,50 @@ function promptModal(title, label, value = '') {
       onClose: () => !done && resolve(null),
     });
   });
+}
+
+// Asks for the passphrase of a profile file; resolves to it, or null
+function askPassphrase() {
+  return new Promise((resolve) => {
+    let done = false;
+    const input = h('input', { type: 'password', autocomplete: 'off', onkeydown: (e) => e.key === 'Enter' && ok() });
+    const ok = () => {
+      done = true;
+      close();
+      resolve(input.value);
+    };
+    const close = modal('Profile passphrase', h('label', { class: 'field' }, h('span', {}, 'This profile file is protected. Enter its passphrase.'), input), {
+      actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, 'Open')],
+      onClose: () => !done && resolve(null),
+    });
+  });
+}
+
+// Export a profile: its file holds the keys to that identity, so it is offered a passphrase
+function exportDialog(p) {
+  const pass = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'passphrase' });
+  const again = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'again', onkeydown: (e) => e.key === 'Enter' && save() });
+  const save = async () => {
+    if (pass.value !== again.value) return toast('The two passphrases differ', 'error');
+    try {
+      await exportProfile(p, pass.value);
+      close();
+    } catch (e) {
+      toast('Could not export the profile: ' + e.message, 'error');
+    }
+  };
+  const close = modal(
+    `Export ${p.name}`,
+    h(
+      'div',
+      {},
+      h('p', { class: 'muted' }, 'The file holds this profile’s keys. Whoever can read them can read and write your direct messages as you, so protect the file with a passphrase. You will need it to import the profile on another device.'),
+      h('label', { class: 'field' }, h('span', {}, 'Passphrase'), pass),
+      h('label', { class: 'field' }, h('span', {}, 'Repeat it'), again),
+      h('p', { class: 'muted small' }, 'Left empty, the keys are saved unprotected. Only do that if the file never leaves your hands.')
+    ),
+    { actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: save }, 'Export')] }
+  );
 }
 
 function confirmModal(title, text, okLabel = 'Delete') {
@@ -1191,7 +1243,7 @@ function welcome() {
     hidden: true,
     onchange: async () => {
       try {
-        warnIfKeyless(await importProfile(importInput.files[0]));
+        warnIfKeyless(await importProfile(importInput.files[0], askPassphrase));
         close();
         boot();
       } catch (e) {
@@ -1457,6 +1509,7 @@ function openSocket(entry, rejoinVoice = null) {
   const viewed = () => S.conn === c;
   const calling = () => S.call === c;
   c.voice = new VoiceClient(socket, {
+    isPeer: (sid) => !!c.voice.channelId && c.users.some((u) => u.sid === sid && u.voice === c.voice.channelId),
     onPeersChange: renderChannels,
     onMediaChange: () => {
       renderChannels();
@@ -1466,6 +1519,14 @@ function openSocket(entry, rejoinVoice = null) {
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
   c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
+  // Pictures come as references to this server (D58). They are made into addresses here, on the
+  // payload itself: onAny listeners run before the handlers below.
+  const media = mediaResolver(entry.address);
+  socket.onAny((event, payload) => {
+    if (event === 'users') media.users(payload);
+    else if (event === 'profile') media.profile(payload);
+    else if (event === 'emoji:added') media.emoji(payload?.emoji);
+  });
 
   socket.on('connect', async () => {
     const identity = await identityFor(me()).catch(() => null);
@@ -1474,6 +1535,8 @@ function openSocket(entry, rejoinVoice = null) {
       invite: entry.password || '',
       password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
+      uploadKey: true,
+      proto: 2, // pictures by reference, `profile:seen`, `emoji:added` and `emoji:removed` (D58)
     });
     if (res.error) {
       log.warn(`${host} refused hello: ${res.error}`);
@@ -1492,7 +1555,9 @@ function openSocket(entry, rejoinVoice = null) {
       DM.setServers(servers.all());
     }
     DM.retry(entry.address); // its DM socket was refused if it got there before we had joined
-    Object.assign(c, { sid: res.sid, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
+    media.server(res.server);
+    media.users(res.users);
+    Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
     rememberServerLook(c);
@@ -1571,15 +1636,24 @@ function openSocket(entry, rejoinVoice = null) {
     syncForced(c);
     if (calling()) syncStage();
     if (!viewed()) return calling() && renderVoicePanel(); // its video button follows who is sharing
-    renderChannels();
-    renderMembers();
+    // Only what changed is drawn again: a mute toggle isn't in the member list, and someone
+    // who is in no voice channel and no game isn't in the channel list
+    const listed = (us) => us.filter((u) => u.voice || u.playing);
+    if (!sameUsers(listed(prev), listed(users), VOICE_ROW)) renderChannels();
+    if (!sameUsers(prev, users, MEMBER_ROW)) renderMembers();
   });
 
   socket.on('profile', (p) => {
     if (!c.server) return;
+    const was = c.server.profiles[p.id];
     c.server.profiles[p.id] = p;
     if (!viewed()) return;
-    if (S.channelId) renderMessages(true);
+    const same = (k) => was[k] === p[k];
+    // Someone came or went: only their last-seen time moved, and nothing on screen shows that
+    if (was && ['name', 'color', 'avatar', 'banner', 'status'].every(same)) return;
+    // A name is in other people's messages too (mentions, replies, #tags of shared names): all of them.
+    // A color or a picture is only on the person's own.
+    if (S.channelId) was && same('name') ? redrawMessages((m) => m.author === p.id) : renderMessages(true);
     renderMembers();
   });
 
@@ -1667,13 +1741,26 @@ function openSocket(entry, rejoinVoice = null) {
     if (S.channelId && !inDmView()) renderMessages(true); // #channel links follow renames
   });
 
-  socket.on('emojis', (emojis) => {
+  const onEmojis = (emojis) => {
     c.server.emojis = emojis;
     if (!viewed()) return;
     updatePickerEmojis();
     renderChannels();
     refreshChatTitle();
     if (S.channelId) renderMessages(true);
+  };
+  socket.on('emojis', onEmojis);
+  // The one that changed, from servers that send that instead of the whole set (D58)
+  socket.on('emoji:added', ({ emoji } = {}) => {
+    if (c.server && emoji && typeof emoji.name === 'string') onEmojis([...c.server.emojis.filter((e) => e.name !== emoji.name), emoji]);
+  });
+  socket.on('emoji:removed', ({ name } = {}) => {
+    if (c.server) onEmojis(c.server.emojis.filter((e) => e.name !== name));
+  });
+  // Someone went offline: their last-seen time, which a profile card shows (D58)
+  socket.on('profile:seen', ({ id, seen } = {}) => {
+    const p = c.server?.profiles?.[id];
+    if (p && Number.isFinite(seen)) p.seen = seen;
   });
 
   socket.on('msg:new', ({ channelId, message }) => {
@@ -1728,8 +1815,13 @@ function openSocket(entry, rejoinVoice = null) {
     linkPreviews.delete(`${c.server.id}/${channelId}/${messageId}`);
     if (!viewed()) return;
     const list = S.messages.get(channelId);
-    if (list) S.messages.set(channelId, list.filter((m) => m.id !== messageId));
-    if (channelId === S.channelId) renderMessages(true);
+    const i = list ? list.findIndex((m) => m.id === messageId) : -1;
+    if (i < 0) return;
+    list.splice(i, 1);
+    if (channelId !== S.channelId) return;
+    messageNode(messageId)?.remove();
+    // The one after it may no longer follow a message by the same person, and replies to it lose their quote
+    redrawMessages((m, at) => at === i || m.replyTo === messageId);
   });
 
   socket.on('files:new', ({ storage }) => {
@@ -1861,12 +1953,17 @@ function syncVoiceState() {
   renderDmCall();
 }
 
-// Speaking indicators, polled from analysers.
+// Speaking indicators, polled from analysers. The two lists are live collections: the browser
+// keeps them until the page changes, where a selector would search the whole page on every tick.
+const voiceUserEls = document.getElementsByClassName('voice-user');
+const tileEls = document.getElementsByClassName('tile');
 setInterval(() => {
   if (!S.voiceChannel) return;
   const levels = S.voice.levels();
   if (audio.selfAnalyser) levels.set(S.call.sid, Level(audio.selfAnalyser));
-  for (const el of $$('.voice-user, .tile[data-sid]')) el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
+  const mark = (el) => el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
+  for (const el of voiceUserEls) mark(el);
+  for (const el of tileEls) if (el.dataset.sid) mark(el);
 }, 90);
 
 // ---------------------------------------------------------------- sidebar
@@ -2492,8 +2589,12 @@ function renderMembers() {
   const inVoice = S.users.filter((u) => u.voice).sort(byName);
   const rest = S.users.filter((u) => !u.voice).sort(byName);
   // Everyone who has been here before and isn't now (banned people are listed in Server settings)
+  // Worked out once, not per row
+  const online = new Set(S.users.map((u) => u.id));
+  const banned = new Set((S.server.bans || []).map((b) => b.profileId));
+  const dup = sharedNames();
   const offline = Object.entries(S.server.profiles || {})
-    .filter(([pid]) => !isOnline(pid) && !isBanned(pid))
+    .filter(([pid]) => !online.has(pid) && !banned.has(pid))
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
     .sort(byName);
   const hideOffline = settings.get().hideOffline;
@@ -2516,7 +2617,7 @@ function renderMembers() {
       h(
         'div',
         { class: 'member-names' },
-        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
+        h('div', { class: 'member-name', style: { color: u.color } }, u.name, nameTag(u.id, u.name, dup) ? h('span', { class: 'name-tag' }, '#' + mentionTag(u.id)) : null),
         h(
           'div',
           { class: 'member-status' },
@@ -2759,12 +2860,24 @@ function isGrouped(m, prev) {
   return prev && prev.author === m.author && m.ts - prev.ts < 5 * 60e3 && !m.replyTo && new Date(m.ts).getDate() === new Date(prev.ts).getDate();
 }
 
+// formatText(), but a text it can't draw is shown plain: one message must never take the whole list down
+function safeFormat(text, opts) {
+  try {
+    return formatText(text, opts);
+  } catch (e) {
+    log.error('a message could not be formatted', e); // the error, never the text
+    const p = document.createElement('p');
+    p.textContent = text;
+    return { html: p.outerHTML, jumbo: false, embeds: [], links: [] };
+  }
+}
+
 function messageEl(m, prev) {
   const grouped = isGrouped(m, prev);
   const author = profileOf(m.author, m.name);
   const mine = m.author === me().id;
   const inServer = !m.thread && !inDmView() && !!S.server; // DMs keep the plain @name matching
-  const { html, jumbo, embeds, links } = formatText(m.text || '', {
+  const { html, jumbo, embeds, links } = safeFormat(m.text || '', {
     emojis: S.server?.emojis || [],
     myName: me().name,
     linkLabel: messageLinkLabel,
@@ -2813,7 +2926,7 @@ function messageEl(m, prev) {
         m.files?.length ? h('div', { class: 'attachments' }, m.files.map(m.thread ? (f) => dmAttachmentEl(m, f) : attachmentEl)) : null,
         links.length ? h('div', { class: 'embeds' }, links.map(messagePreviewEl)) : null,
         embeds.length ? h('div', { class: 'embeds' }, embeds.map(embedEl)) : null,
-        m.gif
+        m.gif && isImage(m.gif.url)
           ? h(
               'div',
               { class: 'msg-gif' },
@@ -2890,7 +3003,7 @@ function renderMessages(keepScroll = false) {
           `This is the beginning of your direct messages with ${p.name}. They are encrypted so that only your two devices can read them, and stored only there. Servers you both use help you find each other and hold messages, still encrypted, while one of you is away. ` +
             (DM.contacts.get(ch.with)?.card
               ? `This device remembers ${p.name}’s key, so someone else using their profile is refused.`
-              : `${p.name}’s key isn’t known yet. Until they connect with a current friendspeak, anyone who copied their profile could pretend to be them, and images can’t be sent.`)
+              : `${p.name}’s key isn’t known yet. What you write is sent once they connect with a current friendspeak.`)
         )
       )
     );
@@ -2913,6 +3026,14 @@ function renderMessages(keepScroll = false) {
 }
 
 const atBottomOrNew = (box) => box.scrollHeight - box.scrollTop - box.clientHeight < 400;
+
+const messageNode = (id) => $('#messages')?.querySelector(`.msg[data-id="${CSS.escape(String(id))}"]`);
+// Draw again, in place, the messages in view that match(m, index): the rest of the list is left alone
+function redrawMessages(match) {
+  const list = S.messages.get(S.channelId);
+  if (!list || !$('#messages')) return;
+  list.forEach((m, i) => match(m, i) && messageNode(m.id)?.replaceWith(messageEl(m, list[i - 1])));
+}
 
 function appendMessage(m, force) {
   const box = $('#messages');
@@ -2948,9 +3069,21 @@ async function onMessagesScroll(e) {
   if (cid !== S.channelId) return;
   const older = res.messages || [];
   S.hasMore.set(cid, older.length >= 50);
-  S.messages.set(cid, [...older, ...list]);
+  const all = [...older, ...list];
+  S.messages.set(cid, all);
   const fromBottom = box.scrollHeight - box.scrollTop;
-  renderMessages(true);
+  const first = messageNode(list[0].id);
+  // The start of the channel has its intro to draw, so that goes the long way
+  if (!S.hasMore.get(cid) || !first) renderMessages(true);
+  else {
+    // Put the older ones above what is there. Of those, only the first (it may now follow a message
+    // by the same person) and replies to one of the older ones (their quote is known now) change.
+    const frag = document.createDocumentFragment();
+    older.forEach((m, i) => frag.append(messageEl(m, older[i - 1])));
+    box.insertBefore(frag, first);
+    const ids = new Set(older.map((m) => m.id));
+    redrawMessages((m, i) => i === older.length || (i > older.length && ids.has(m.replyTo)));
+  }
   box.scrollTop = box.scrollHeight - fromBottom;
 }
 
@@ -3310,12 +3443,14 @@ function renderAttachTray() {
   );
 }
 
-// Raw-body POST with progress. The socket id proves we passed `hello` (and the password).
+// Raw-body POST with progress. The socket id says who we are, and the upload key from `hello` proves it.
+// (The key's header only goes to a server that gave us one: an older server's CORS doesn't allow it.)
 function uploadFile(a, channelId) {
   return new Promise((resolve, reject) => {
     const xhr = (a.xhr = new XMLHttpRequest());
     xhr.open('POST', `${S.entry.address}/api/files?channelId=${encodeURIComponent(channelId)}`);
     xhr.setRequestHeader('x-friendspeak-sid', S.sid);
+    if (S.uploadKey) xhr.setRequestHeader('x-friendspeak-upload', S.uploadKey);
     xhr.setRequestHeader('x-file-name', encodeURIComponent(a.file.name));
     xhr.setRequestHeader('content-type', a.file.type || 'application/octet-stream');
     xhr.upload.onprogress = (e) => {
@@ -3375,15 +3510,30 @@ function dmAttachmentEl(m, f) {
 }
 
 function embedEl(e) {
-  if (e.kind === 'image') return h('div', { class: 'embed' }, h('img', { src: e.url, loading: 'lazy', alt: '', onclick: () => lightbox(e.url) }));
-  if (e.kind === 'video') return h('div', { class: 'embed' }, h('video', { src: e.url, controls: true, preload: 'metadata' }));
-  if (e.kind === 'audio') return h('div', { class: 'embed' }, h('audio', { src: e.url, controls: true, preload: 'metadata' }));
+  // A picture, video or sound file that a link points at, on any site: loading it tells that site our
+  // address and that we are reading this chat, so it waits for a click unless the setting says to load it.
+  if (['image', 'video', 'audio'].includes(e.kind)) {
+    const media = () =>
+      e.kind === 'image'
+        ? h('img', { src: e.url, loading: 'lazy', alt: '', referrerpolicy: 'no-referrer', onclick: () => lightbox(e.url) })
+        : h(e.kind, { src: e.url, controls: true, preload: 'metadata' });
+    if (settings.get().loadLinkMedia) return h('div', { class: 'embed' }, media());
+    let host = '';
+    try {
+      host = new URL(e.url).host;
+    } catch {}
+    const box = h('div', { class: 'embed' });
+    box.append(h('button', { class: 'btn small ghost embed-load', title: 'Loading it shows your address to that site. Settings → Integrations can load these without asking.', onclick: () => box.replaceChildren(media()) }, `Show ${e.kind === 'audio' ? 'audio' : e.kind} from ${host}`));
+    return box;
+  }
   const frame = (src, style) =>
     h('iframe', {
       src,
       style,
       loading: 'lazy',
-      allow: 'autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture',
+      // An embed is someone else's page: scripts and its own cookies, no top navigation, no clipboard
+      sandbox: 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox allow-presentation',
+      allow: 'autoplay; encrypted-media; fullscreen; picture-in-picture',
       allowfullscreen: true,
       referrerpolicy: 'strict-origin-when-cross-origin',
     });
@@ -5341,8 +5491,10 @@ function popOutGame() {
 // working while it has focus.
 window.addEventListener('message', (e) => {
   const d = e.data;
-  if (!d || d.source !== 'friendspeak-game' || e.origin !== S.game.origin) return;
-  if (d.event === 'keydown') handleKeyDown(d, d.typing);
+  // Only the game frame we opened. A key going down counts only while that frame has the keyboard:
+  // the page in it is the server's, and could otherwise hold push-to-talk down for us at any time.
+  if (!d || d.source !== 'friendspeak-game' || e.origin !== S.game.origin || !S.game.frame || e.source !== S.game.frame.contentWindow) return;
+  if (d.event === 'keydown' && document.activeElement === S.game.frame) handleKeyDown(d, d.typing);
   else if (d.event === 'keyup') handleKeyUp(d);
 });
 
@@ -5548,7 +5700,7 @@ function settingsProfile(body) {
     hidden: true,
     onchange: async () => {
       try {
-        const np = await importProfile(importInput.files[0]);
+        const np = await importProfile(importInput.files[0], askPassphrase);
         toast(`Imported ${np.name}`);
         warnIfKeyless(np);
         switchProfile(np.id);
@@ -5585,7 +5737,7 @@ function settingsProfile(body) {
           avatarEl(x, 32),
           h('span', { class: 'grow' }, x.name, x.id === p.id ? h('span', { class: 'badge' }, 'active') : null),
           x.id !== p.id ? h('button', { class: 'btn small ghost', onclick: () => (switchProfile(x.id), settingsProfile(body.replaceChildren() || body)) }, 'Use') : null,
-          h('button', { class: 'btn small ghost', onclick: () => exportProfile(x) }, 'Export'),
+          h('button', { class: 'btn small ghost', onclick: () => exportDialog(x) }, 'Export'),
           profiles.all().length > 1
             ? h(
                 'button',
@@ -6092,7 +6244,15 @@ function settingsIntegrations(body) {
       { class: 'muted small' },
       'GIF search uses GIPHY. Create a free API key at developers.giphy.com and paste it here. It is stored only on this device. If you leave it empty, the server host’s key (GIPHY_API_KEY) is used if they set one.'
     ),
-    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) }))
+    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
+    h('h3', {}, 'Links'),
+    h(
+      'label',
+      { class: 'check-row' },
+      h('input', { type: 'checkbox', checked: st.loadLinkMedia, onchange: (e) => settings.set({ loadLinkMedia: e.target.checked }) }),
+      h('span', {}, 'Load pictures, video and audio from links without asking'),
+      h('span', { class: 'muted small' }, 'The site a link points to sees your address when its file loads. Off, each one waits for a click.')
+    )
   );
 }
 

@@ -45,7 +45,6 @@ services:
       LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-14}
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
       # off = only members can pass direct messages through this server
-      DM_GUESTS: ${DM_GUESTS:-on}
       HTTPS: ${HTTPS:-1}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
       # and printed once in the container log on first start (docker logs friendspeak).
@@ -101,7 +100,11 @@ services:
   # which was archived in 2025. It's the only service with the Docker socket.
   # Runs only with COMPOSE_PROFILES=autoupdate.
   watchtower:
-    image: nickfedor/watchtower:latest
+    # It holds the Docker socket, which is root on this machine, so it is pinned to a version and its
+    # digest instead of following :latest. To update: pick a version from
+    # https://hub.docker.com/r/nickfedor/watchtower/tags and take the digest from
+    # `docker buildx imagetools inspect nickfedor/watchtower:<version>`.
+    image: nickfedor/watchtower:1.22.3@sha256:2f8f2a9bd21a195b3b650409532a20f6aada8ef5834f00d0d7a999dee0779a81
     profiles: [autoupdate]
     restart: unless-stopped
     command: --http-api-update --label-enable --cleanup

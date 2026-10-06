@@ -8,21 +8,28 @@ on:
     branches: [dev]
   pull_request:
 
+# Actions are pinned to a commit (the tag is in the comment): a tag can be moved, a commit can't.
+# To update one: `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`.
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Syntax check
         run: |
-          for f in server.js updater.js admin.js logbuffer.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
+          for f in server.js updater.js admin.js logbuffer.js persist.js game/index.js desktop/*.js scripts/*.js docker/*.js; do node --check "$f"; done
           for f in public/js/*.js admin-ui/js/*.js admin-ui/js/views/*.js; do node --check --input-type=module < "$f" || { echo "in $f"; exit 1; }; done
       - name: Deploy stack
         run: |
@@ -46,8 +53,10 @@ jobs:
     env:
       AWS_LC_SYS_PREBUILT_NASM: 1 # Windows: the crypto library's assembly, without installing NASM
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/cache@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -65,8 +74,10 @@ jobs:
     if: github.event_name == 'pull_request' && github.base_ref == 'prod'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
       - env:

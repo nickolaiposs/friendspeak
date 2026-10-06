@@ -18,6 +18,7 @@ const te = new TextEncoder();
 const td = new TextDecoder();
 const CARD = 'friendspeak-card-v1|';
 const AUTH = 'friendspeak-dm-auth-v1|';
+const AUTH2 = 'friendspeak-dm-auth-v2|';
 const HELLO = 'friendspeak-hello-v1|';
 const B64 = /^[A-Za-z0-9_-]+$/;
 
@@ -66,7 +67,9 @@ export function identityFor(profile) {
       card,
       address: await addressOf(keys.sign.pub),
       dhKey,
-      login: (nonce) => sign(AUTH + nonce),
+      // The answer to a server's /dm challenge. With `host` (the server as dialed) it is good at that server
+      // only (D55); without, for a server from before that, which checks the nonce alone.
+      login: (nonce, host) => sign(host ? AUTH2 + nonce + '|' + host.toLowerCase() : AUTH + nonce),
       // A server pins the key that first says hello as this profile, and wants it every time after (D42).
       // `sid` is the socket id the server just chose; `host` is the server as dialed, so it can't be passed on.
       hello: (sid, host) => sign(HELLO + sid + '|' + host.toLowerCase()),
@@ -118,13 +121,11 @@ export const sealJson = async (key, aad, obj) => b64(await seal(key, aad, te.enc
 export const unsealJson = async (key, aad, text) => JSON.parse(td.decode(await unseal(key, aad, unb64(text))));
 
 // ---------- friend codes ----------
-// "fs1." + base64url(JSON { card, name, relays }): everything needed to write
-// to someone you share no server with.
+// "fs1." + base64url(JSON { card, name }): who someone is, with their key. Adding one pins the
+// key before the first message. The two of you still meet on a server you both use: codes from
+// before D55 also listed servers to reach their owner on as a guest, which is read past.
 
-export const cleanRelays = (list) =>
-  [...new Set((Array.isArray(list) ? list : []).filter((r) => typeof r === 'string' && r.length <= 200 && /^https?:\/\/[^\s/"'<>]+$/.test(r)))].slice(0, 6);
-
-export const friendCode = (identity, profile, relays) => 'fs1.' + b64(te.encode(JSON.stringify({ card: identity.card, name: profile.name, relays: cleanRelays(relays) })));
+export const friendCode = (identity, profile) => 'fs1.' + b64(te.encode(JSON.stringify({ card: identity.card, name: profile.name, relays: [] }))); // relays: apps from before D55 read a list here
 
 export async function parseFriendCode(text) {
   const m = /fs1\.([A-Za-z0-9_-]+)/.exec(String(text || ''));
@@ -132,7 +133,7 @@ export async function parseFriendCode(text) {
   try {
     const data = JSON.parse(td.decode(unb64(m[1])));
     const card = await verifyCard(data.card);
-    return card && { card, name: typeof data.name === 'string' ? data.name.slice(0, 32).trim() : '', relays: cleanRelays(data.relays) };
+    return card && { card, name: typeof data.name === 'string' ? data.name.slice(0, 32).trim() : '' };
   } catch {
     return null;
   }
