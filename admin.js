@@ -844,7 +844,9 @@ function createAdmin(ctx) {
   });
 
   const DELETED = '(deleted channel)';
-  const DATA_FILES = ['state.json', 'mail.json', 'game.sqlite', 'admin-audit.log'];
+  const DATA_FILES = ['state.json', 'emojis.json', 'game.sqlite', 'admin-audit.log'];
+  const DATA_DIRS = ['profiles', 'messages', 'mail', 'logs', 'crashes']; // the pieces of the saved state (D57), and the logs
+  const OLD_FILES = ['state.pre-split.json', 'mail.pre-split.json']; // copies from before the split: listed while they exist
   api.get('/storage', async (_req, res) => {
     const st = ctx.state();
     const files = st.files.filter((f) => f.messageId);
@@ -858,7 +860,8 @@ function createAdmin(ctx) {
     }
     const dirBytes = (dir) => fs.promises.readdir(dir).then((names) => Promise.all(names.map((n) => fs.promises.stat(path.join(dir, n)).then((s) => (s.isFile() ? s.size : 0), () => 0))).then((a) => a.reduce((x, y) => x + y, 0)), () => 0);
     const data = await Promise.all(DATA_FILES.map((name) => fs.promises.stat(path.join(dataDir, name)).then((s) => ({ name, bytes: s.size }), () => ({ name, bytes: 0 }))));
-    for (const name of ['logs', 'crashes']) data.push({ name: name + '/', bytes: await dirBytes(path.join(dataDir, name)) });
+    for (const name of DATA_DIRS) data.push({ name: name + '/', bytes: await dirBytes(path.join(dataDir, name)) });
+    for (const name of OLD_FILES) await fs.promises.stat(path.join(dataDir, name)).then((s) => data.push({ name, bytes: s.size }), () => {});
     res.json({
       ...ctx.usage(),
       count: files.length,
