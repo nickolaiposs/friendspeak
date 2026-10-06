@@ -39,7 +39,7 @@ There is **no automated test suite**. See "Verifying changes" below.
 ```
 server.js              friendspeak server; exports startServer(opts) (used by the CLI and Docker)
 updater.js             server self-update: GitHub Releases check, cron maintenance window, Watchtower trigger (D29)
-persist.js             writes the saved state in pieces, off the event loop (D56): state.json, profiles/, messages/, emojis.json, mail/
+persist.js             writes the saved state in pieces, off the event loop (D57): state.json, profiles/, messages/, emojis.json, mail/
 admin.js               admin dashboard backend: local rule, admin keys, the random path and TOTP 2-step sign-in (D52), sessions, rate limit, audit log, JSON API + event stream (D34)
 logbuffer.js           the server's console output (D49): a ring buffer for the dashboard's live view, JSON lines in data/logs for history, secrets scrubbed
 crashlog.js            crash reports in data/crashes (D49): uncaught errors, failed starts, unclean exits
@@ -102,7 +102,7 @@ deploy/                the stack for a domain (D53): docker-compose.yaml (friend
 ## Common tasks
 
 ### Add a chat feature (new socket event)
-1. `server.js` → inside `attach()` → `on('thing:do', (payload, ack) => { … })`. Validate the payload, mutate `state`, call `save()` (or `saveProfile(id)`, `saveMessages(channelId)`, `saveEmojis()` for those pieces, D56), then `io.emit(...)`.
+1. `server.js` → inside `attach()` → `on('thing:do', (payload, ack) => { … })`. Validate the payload, mutate `state`, call `save()` (or `saveProfile(id)`, `saveMessages(channelId)`, `saveEmojis()` for those pieces, D57), then `io.emit(...)`.
 2. `public/js/main.js` → in `connectTo()` add `socket.on('thing:done', …)` and update `S`. Re-render the affected region (`renderChannels`, `renderMembers`, `renderMessages`, …).
 3. Document the event in `docs/ARCHITECTURE.md` → Protocol.
 

@@ -1515,7 +1515,7 @@ function openSocket(entry, rejoinVoice = null) {
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
   c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
-  // Pictures come as references to this server (D57). They are made into addresses here, on the
+  // Pictures come as references to this server (D58). They are made into addresses here, on the
   // payload itself: onAny listeners run before the handlers below.
   const media = mediaResolver(entry.address);
   socket.onAny((event, payload) => {
@@ -1532,7 +1532,7 @@ function openSocket(entry, rejoinVoice = null) {
       password: entry.password || '', // servers from before invites (D51)
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
       uploadKey: true,
-      proto: 2, // pictures by reference, `profile:seen`, `emoji:added` and `emoji:removed` (D57)
+      proto: 2, // pictures by reference, `profile:seen`, `emoji:added` and `emoji:removed` (D58)
     });
     if (res.error) {
       log.warn(`${host} refused hello: ${res.error}`);
@@ -1737,14 +1737,14 @@ function openSocket(entry, rejoinVoice = null) {
     if (S.channelId) renderMessages(true);
   };
   socket.on('emojis', onEmojis);
-  // The one that changed, from servers that send that instead of the whole set (D57)
+  // The one that changed, from servers that send that instead of the whole set (D58)
   socket.on('emoji:added', ({ emoji } = {}) => {
     if (c.server && emoji && typeof emoji.name === 'string') onEmojis([...c.server.emojis.filter((e) => e.name !== emoji.name), emoji]);
   });
   socket.on('emoji:removed', ({ name } = {}) => {
     if (c.server) onEmojis(c.server.emojis.filter((e) => e.name !== name));
   });
-  // Someone went offline: their last-seen time, which a profile card shows (D57)
+  // Someone went offline: their last-seen time, which a profile card shows (D58)
   socket.on('profile:seen', ({ id, seen } = {}) => {
     const p = c.server?.profiles?.[id];
     if (p && Number.isFinite(seen)) p.seen = seen;

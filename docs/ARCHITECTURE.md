@@ -39,7 +39,7 @@ flowchart LR
 |---|---|---|
 | `/` | Express | a plain-text notice; the server hosts no chat UI (D26) |
 | `/socket.io/*` | Socket.IO (friendspeak, `serveClient: false`) | chat, presence, voice signaling, game login tokens |
-| `/media/<hash>` | Express | an avatar, profile background or emoji by the SHA-256 of its data URL (D57): what apps that say `proto: 2` are sent in place of the picture. `immutable`, `nosniff`, sandboxed; png, jpeg, gif and webp only |
+| `/media/<hash>` | Express | an avatar, profile background or emoji by the SHA-256 of its data URL (D58): what apps that say `proto: 2` are sent in place of the picture. `immutable`, `nosniff`, sandboxed; png, jpeg, gif and webp only |
 | `/api/info` | Express | `{ name, icon, invite: bool, password: bool, version }`: `invite` says joining takes an invite (D51); `password` is the same value, for apps from before invites |
 | `/admin/*` | Express (`admin.js`) | the admin dashboard's files: `admin-ui/`, plus `public/js/util.js` as `/admin/js/util.js` (D34) |
 | `/admin/api/*` | Express (`admin.js`) | the dashboard's JSON API and event stream (see "Admin dashboard") |
@@ -92,7 +92,7 @@ A client can load its UI from **any** friendspeak server (usually its own, on lo
 
 ### Persistent state
 
-The server keeps one `state` object in memory and saves it in pieces (D56), each a JSON file of its own:
+The server keeps one `state` object in memory and saves it in pieces (D57), each a JSON file of its own:
 
 | File | What | Marked as changed by |
 |---|---|---|
@@ -100,7 +100,7 @@ The server keeps one `state` object in memory and saves it in pieces (D56), each
 | `data/profiles/<name>.json` | `{ id, profile }`: one of `state.profiles` | `saveProfile(profileId)` |
 | `data/messages/<name>.json` | `{ id, messages }`: one text channel's `state.messages[channelId]` | `saveMessages(channelId)` |
 | `data/emojis.json` | `state.emojis` | `saveEmojis()` |
-| `data/seen.json` | `{ [profileId]: seen }`: when each profile was last online (D57) | `saveSeen()` |
+| `data/seen.json` | `{ [profileId]: seen }`: when each profile was last online (D58) | `saveSeen()` |
 | `data/mail/<name>.json` | `{ id, box }`: one DM mailbox (see Direct messages) | `saveMail(address)` |
 
 `<name>` is the id when it is 8 to 64 lowercase hex characters (the ids this server makes), else `x` and 40 hex characters of its SHA-256: profile ids come from clients, and may hold anything. Each file says its own `id`; one that can't be read, or isn't named after its id, is skipped with a warning.
@@ -113,7 +113,7 @@ A `state.json` without `format: 2` is from before the split and holds everything
 
 ```js
 {
-  format: 2,                              // D56: the pieces have files of their own
+  format: 2,                              // D57: the pieces have files of their own
   name, icon /* data: URL, https: URL or '' */, channels: [{ id, name /* may contain emojis, incl. :custom: ones */, type: 'text'|'voice' }],
   messages: { [channelId]: Message[] },   // capped at 500 per channel; saved in messages/
   emojis: [{ name, url /* data: URL */, by }],   // saved in emojis.json
@@ -205,9 +205,9 @@ A profile may carry `card` (`{ id, s, d, sig }`, the public keys for DMs, D32). 
 
 **Server → client:** `users`, `profile`, `server`, `channels`, `emojis`, `msg:new`, `msg:update`, `msg:deleted`, `files:new {files, storage}`, `files:deleted {ids, storage}`, `typing`, `rtc:signal {from, data}`, `voice:peer-left {sid}`, `voice:kicked { reason: 'deleted' \| 'kicked' \| 'perms', by? }` (you're out of voice), `voice:forcemuted { muted, by }`, `perms` (your effective permissions changed), `session:replaced` (the same profile connected again elsewhere; followed by a server-side disconnect), `bans` (the list, without IPs), `roles { roles, memberRoles, defaultPerms, defaultGrantable, permissionsOn }` (any changed), `banned` / `removed` / `left` (each followed by a server-side disconnect), `profile:removed {id}`, `server:update` (the `update` object below changed). A `profile` event also goes out when someone disconnects, carrying their new `seen` time.
 
-**Pictures and presence (D57).** An app that sends `proto: 2` in `hello` is put in the room `proto:2`, any other in `proto:1`, and the two are sent different things:
+**Pictures and presence (D58).** An app that sends `proto: 2` in `hello` is put in the room `proto:2`, any other in `proto:1`, and the two are sent different things:
 
-| | `proto:1` (apps from before D57) | `proto:2` |
+| | `proto:1` (apps from before D58) | `proto:2` |
 |---|---|---|
 | avatars and backgrounds in `server.profiles`, `profile` and `users`, emoji `url`s | the data URL | `/media/<hash>`: the app puts the server's origin in front (`mediaResolver()` in `util.js`) and loads it over HTTP, once |
 | someone disconnects | `profile` (whole, for its `seen`) | `profile:seen { id, seen }` |
@@ -310,7 +310,7 @@ A web page served by the server itself, with a JSON API and one event stream beh
 | `POST /admin/api/update/check` | session | `{ ok, update: status }` after a check now. 400 `Update checks are off (AUTO_UPDATE)` |
 | `POST /admin/api/update/now` | session | `{ ok, update: status }`. Installs in 2 minutes (`installSoon`). 400 with the updater's message: `No newer version is known`, `This server can’t install updates itself (…)`, `Watchtower isn’t answering at <url>` or `An update is already being installed` |
 | `POST /admin/api/update/cancel` | session | `{ ok, update: status }`. 400 `Nothing to cancel` |
-| `GET /admin/api/storage` | session | `{ used, max, count, largest, channels, data }`. `largest`: the 20 biggest attached files `{ id, name, size, type, channelId, channelName, byName, ts }`. `channels`: bytes and file count per text channel, biggest first (files of a deleted channel under `(deleted channel)`). `data`: sizes of `state.json`, `emojis.json`, `game.sqlite`, `admin-audit.log`, and of the folders `profiles/`, `messages/`, `mail/`, `logs/` and `crashes/` (0 if missing); `state.pre-split.json` and `mail.pre-split.json` while they exist (D56) |
+| `GET /admin/api/storage` | session | `{ used, max, count, largest, channels, data }`. `largest`: the 20 biggest attached files `{ id, name, size, type, channelId, channelName, byName, ts }`. `channels`: bytes and file count per text channel, biggest first (files of a deleted channel under `(deleted channel)`). `data`: sizes of `state.json`, `emojis.json`, `game.sqlite`, `admin-audit.log`, and of the folders `profiles/`, `messages/`, `mail/`, `logs/` and `crashes/` (0 if missing); `state.pre-split.json` and `mail.pre-split.json` while they exist (D57) |
 | `GET /admin/api/channels` | session | `{ channels }` in server order. Text: `{ id, name, type, messages, lastMessage, files }`. Voice: `{ id, name, type, occupants: [{ sid, id, name, color, avatar, muted, deafened, sharing, camera }] }`. Read-only |
 | `GET /admin/api/game` | session | `{ available, enabled, reason, world, players, maxUsers, off }`. `players` is the number in the game world, null when it isn't running. `off` is `GAME=off` |
 | `GET /admin/api/server` | session | `{ name, icon, inviteOnly, audioQuality, game: { available, enabled, reason, world } }` |
@@ -350,7 +350,7 @@ Direct messages are never readable by the server. Clients keep a separate socket
 | client → server | `mail:ack` | `{ ids }`: delete collected mail |
 | client → server | `msg:peek` | `{ channelId, messageId }`, ack as `msg:get`: the preview of a linked message, for the app when this server isn't the one in view (D54). Only for a verified socket of a profile that has joined |
 
-Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail/`, a file each (`{ id: address, box: { seen, items: [{ id, blob, ts }] } }`, written like the rest of the state, D56): at most 500 blobs and 8 MB per mailbox, 5000 mailboxes, mail kept 30 days, an empty mailbox dropped after 90 days without its owner. A sender is limited to 240 `mail:put` per minute. The server never parses a blob.
+Newest socket per profile wins, like chat sessions. Mailboxes live in `data/mail/`, a file each (`{ id: address, box: { seen, items: [{ id, blob, ts }] } }`, written like the rest of the state, D57): at most 500 blobs and 8 MB per mailbox, 5000 mailboxes, mail kept 30 days, an empty mailbox dropped after 90 days without its owner. A sender is limited to 240 `mail:put` per minute. The server never parses a blob.
 
 ## Web client (`public/`)
 
