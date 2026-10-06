@@ -551,10 +551,14 @@ emoji-picker { --background: var(--bg-1); --border-color: var(--line); --input-b
 /* ---------------- screen sharing */
 
 #stream-view { display: none; grid-column: 3; grid-row: 1; flex-direction: column; min-width: 0; min-height: 0; background: #000; }
+/* The stage with its header: in #stream-view, or in a window of its own (popout.html) */
+.stage-view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #000; }
+body.stream-pop { background: #000; overflow: hidden; }
+.stream-pop #stream { height: 100%; display: flex; }
 body.stream-visible #stream-view { display: flex; }
 body.stream-visible #main, body.stream-visible #game-view { display: none; }
-#stream-view .chat-header { background: var(--bg-2); gap: 10px; }
-#stream-view .chat-header .stream-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stage-view .chat-header { background: var(--bg-2); gap: 10px; }
+.stage-view .chat-header .stream-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stats-panel { max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; }
 .stats-panel-inner { padding: 10px 12px; }
 .stats-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
