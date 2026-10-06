@@ -331,9 +331,9 @@ const mediaOrigins = new Set(); // of the servers mediaResolver() was asked for
 // An image a profile, a server or a GIF message may point at: one that travels with it (a data URL),
 // or a GIF on GIPHY, which is where the picker gets them. Not any https address: whoever runs it would
 // learn the address of everyone who is shown the picture, and when. server.js has the same rule.
-// Or one a server we are connected to serves itself (D57): that server knows our address already.
+// Or one a server we are connected to serves itself (D58): that server knows our address already.
 export const isImage = (v) => typeof v === 'string' && (/^(data:image\/|https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$)/.test(v) || mediaOrigins.has(SERVER_MEDIA.exec(v)?.[1]));
-// Pictures a server sends by reference ('/media/<hash>', D57) made into addresses on that server,
+// Pictures a server sends by reference ('/media/<hash>', D58) made into addresses on that server,
 // in place: { profile(p), emoji(e), users(list), server(helloAck.server) }. Asking for one is what
 // makes isImage() accept that server's pictures.
 export function mediaResolver(address) {

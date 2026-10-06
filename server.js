@@ -111,14 +111,14 @@ async function startServer(opts = {}) {
       } catch {}
     }
   }
-  // What is saved, in pieces that are written on their own (D56): state.json has everything but
+  // What is saved, in pieces that are written on their own (D57): state.json has everything but
   // the profiles, the messages and the emojis
   const STATE_FILE = path.join(DATA_DIR, 'state.json');
   const STATE_FORMAT = 2; // 2: the pieces have files of their own
   const PROFILES_DIR = path.join(DATA_DIR, 'profiles'); // one file per profile
   const MESSAGES_DIR = path.join(DATA_DIR, 'messages'); // one file per text channel
   const EMOJIS_FILE = path.join(DATA_DIR, 'emojis.json');
-  const SEEN_FILE = path.join(DATA_DIR, 'seen.json'); // when each profile was last online: changes far more often than the profiles do (D57)
+  const SEEN_FILE = path.join(DATA_DIR, 'seen.json'); // when each profile was last online: changes far more often than the profiles do (D58)
   const MAX_HISTORY = 500;
   const MAX_SEARCH_RESULTS = 50;
   const MAX_MESSAGE_LEN = 4000;
@@ -152,7 +152,7 @@ async function startServer(opts = {}) {
   const MAX_FILES_PER_MESSAGE = 10;
   const FILES_DIR = path.join(DATA_DIR, 'files');
   // Mailboxes for direct messages (D32): sealed blobs the server can't read
-  const MAIL_FILE = path.join(DATA_DIR, 'mail.json'); // from before D56: all mailboxes in one file
+  const MAIL_FILE = path.join(DATA_DIR, 'mail.json'); // from before D57: all mailboxes in one file
   const MAIL_DIR = path.join(DATA_DIR, 'mail'); // one file per mailbox
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
   const MAX_MAILBOX_ITEMS = 500;
@@ -239,7 +239,7 @@ async function startServer(opts = {}) {
 
   let state;
   let pinsMissing = false; // a state.json from before D42: pin the keys its profiles already have
-  let unsplit = false; // a state.json from before D56, with everything in it: split below, once save() exists
+  let unsplit = false; // a state.json from before D57, with everything in it: split below, once save() exists
   try {
     state = readJson(STATE_FILE);
     pinsMissing = !state.pins;
@@ -423,7 +423,7 @@ async function startServer(opts = {}) {
     lastSaveError = Date.now();
     console.error(`[server] could not save ${what}: ${err.message}`);
   }
-  // Saving (D56): each of these marks one piece as changed, and persist.js writes it half a second
+  // Saving (D57): each of these marks one piece as changed, and persist.js writes it half a second
   // later, off the event loop. Call the one for what you changed: save() alone no longer covers
   // a profile, a channel's messages or the emojis.
   const disk = createPersist({ delay: 500, onError: saveFailed });
@@ -642,7 +642,7 @@ async function startServer(opts = {}) {
   // The same but for `seen`: nothing anyone else needs to be sent again
   const sameProfile = (a, b) => a.name === b.name && a.color === b.color && a.avatar === b.avatar && a.banner === b.banner && a.status === b.status && a.card?.s === b.card?.s && a.card?.d === b.card?.d && a.card?.sig === b.card?.sig;
 
-  // ---------- pictures by reference (D57) ----------
+  // ---------- pictures by reference (D58) ----------
 
   // Avatars, profile backgrounds and emojis are data URLs in `state`. Apps that say `proto: 2` in
   // hello are sent a reference instead, '/media/<SHA-256 of the data URL>', and fetch the picture
@@ -981,7 +981,7 @@ async function startServer(opts = {}) {
     res.sendFile(f.id, { root: FILES_DIR }, (err) => err && !res.headersSent && res.sendStatus(404));
   });
 
-  // A picture by reference (D57). Like a file's, the address is the capability: the hash of a
+  // A picture by reference (D58). Like a file's, the address is the capability: the hash of a
   // picture can only be worked out by someone who has it. Only png, jpeg, gif and webp get in.
   app.get('/media/:hash', (req, res) => {
     const v = mediaByHash.get(req.params.hash);
@@ -1026,7 +1026,7 @@ async function startServer(opts = {}) {
   // mailbox is filed under the hash of its owner's public key, and only
   // someone who proves they hold that key gets its contents.
   // address -> { seen, items: [{ id, blob, ts }] }
-  // Each mailbox is a piece of its own on disk (D56): mail/<name>.json
+  // Each mailbox is a piece of its own on disk (D57): mail/<name>.json
   const mail = new Map();
   let closing = false; // close() was called: sockets are going away with the server
   const isBox = (box) => isObj(box) && Array.isArray(box.items);
@@ -1098,7 +1098,7 @@ async function startServer(opts = {}) {
 
   // Everyone online. `g`: the perms of whoever this is for; a voice channel they can't see is left out.
   // A force-muted person is muted whatever they send, unless they may lift it themselves.
-  // `lean`: for apps that take pictures by reference (D57).
+  // `lean`: for apps that take pictures by reference (D58).
   function userList(g, lean) {
     return [...users.entries()].map(([sid, { profile: { banner, ...profile }, ...u }]) => {
       const forceMuted = state.forceMuted.includes(profile.id);
@@ -1233,7 +1233,7 @@ async function startServer(opts = {}) {
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
     // Every socket that said hello is in one of two rooms: LEAN for apps that take pictures by
-    // reference and the small events (`proto: 2` in hello, D57), FULL for apps from before that.
+    // reference and the small events (`proto: 2` in hello, D58), FULL for apps from before that.
     const LEAN = 'proto:2';
     const FULL = 'proto:1';
     // A profile as it is now, to both kinds of app. `from`: a socket that needn't be told.
@@ -1246,7 +1246,7 @@ async function startServer(opts = {}) {
 
     // `users` leaves out the voice channels a socket can't see. Sockets that see the same of the
     // channels people are in get the same list, built and encoded once: all of them, usually
-    // (twice while apps from before D57 are around).
+    // (twice while apps from before D58 are around).
     const broadcastUsers = () => {
       const occupied = [...new Set([...users.values()].map((u) => u.voice).filter(Boolean))];
       const groups = new Map(); // the occupied channels hidden from a socket, and its kind -> { g, lean, sids }
@@ -1816,7 +1816,7 @@ async function startServer(opts = {}) {
 
       // `invite`: the token of someone joining. Apps from before invites send what was typed as `password`.
       // `uploadKey: true`: the app wants a key for its uploads (below). Apps from before that send none.
-      // `proto: 2`: the app takes pictures by reference and the small events (D57). Apps from before that send none.
+      // `proto: 2`: the app takes pictures by reference and the small events (D58). Apps from before that send none.
       socket.on('hello', (payload, ack) => {
         if (typeof ack !== 'function') return;
         const { profile, invite, password, proof, uploadKey: wantsKey, proto } = isObj(payload) ? payload : {};
@@ -2194,7 +2194,7 @@ async function startServer(opts = {}) {
         const emoji = { name, url, by: users.get(socket.id).profile.name };
         state.emojis.push(emoji);
         saveEmojis();
-        // The one that changed, by reference; apps from before D57 get the whole set again
+        // The one that changed, by reference; apps from before D58 get the whole set again
         io.to(LEAN).emit('emoji:added', { emoji: leanEmoji(emoji) });
         io.to(FULL).emit('emojis', state.emojis);
         ack({ ok: true });
@@ -2341,7 +2341,7 @@ async function startServer(opts = {}) {
         if (stored) {
           stored.seen = Date.now();
           saveSeen();
-          // Only `seen` changed: apps from before D57 know no event for that, and get the whole profile
+          // Only `seen` changed: apps from before D58 know no event for that, and get the whole profile
           io.to(LEAN).emit('profile:seen', { id: u.profile.id, seen: stored.seen });
           io.to(FULL).emit('profile', { id: u.profile.id, ...stored });
         }
