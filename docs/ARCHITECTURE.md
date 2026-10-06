@@ -496,15 +496,19 @@ flowchart LR
 | `ladder.rs` | rungs, what a rung needs and may spend, the per-viewer step |
 | `net.rs` | one UDP socket per local IPv4 address per viewer, and the STUN request for the public address |
 | `frame.rs` | captured frames, scaling and conversion to NV12 |
-| `encode/` | the `Encoder` trait; `videotoolbox.rs`, `mediafoundation.rs`, `software.rs` (OpenH264) |
+| `d3d.rs` | Windows: frames as Direct3D 11 textures, scaled and converted by the GPU's video processor, and read back for encoders that want memory (D56) |
+| `encode/` | the `Encoder` trait and the bitrate trim; `videotoolbox.rs`, `mediafoundation.rs`, `software.rs` (OpenH264) |
 | `source/` | captures: `screen_mac.rs`, `camera_mac.rs`, `screen_win.rs`, `audio_win.rs`, `camera_win.rs`, `test.rs` (a moving pattern and a tone) |
 | `audio.rs` | Opus for a share's sound (libopus translated to Rust) |
 
 - **Commands (app → sidecar),** one JSON object per line, all with `kind: 'screen' | 'camera'`: `start { source, tier: { width, height, fps }, mode, hw, stun }`, `quality { tier, mode }`, `stop`, `viewer { viewer, self? }`, `unviewer { viewer }`, `signal { viewer, data }` (the viewer's answer or ICE candidate), `view { viewer, w, h, hidden }`.
 - **Events (sidecar → app):** `ready { version, sources, hardware, audio }` once; then per kind `started`, `error { message }` (the start failed), `stopped { reason }` (it ended by itself), `signal { viewer, data }` (the offer, then server-reflexive candidates), `viewer { viewer, state }`, and `stats { viewers: [...] }` every second. stderr is its log.
 - **Threads:** the engine thread owns everything and drives each viewer's `Rtc` between messages. Captures run on the OS's queues or a thread of their own and leave the newest frame in a slot (a frame the engine didn't get to is replaced, never queued). Each layer has a thread that scales and encodes; a busy encoder drops frames instead of queueing them. One reader thread per UDP socket.
-- **A still screen** produces no frames on macOS. The engine repeats the last one twice a second, and at once when a viewer needs a keyframe.
-- **Keyframes** are made only when a viewer joins a layer or asks (PLI), at most every 0.7 s per layer.
+- **A still screen** produces no frames. The engine repeats the last one twice a second, and at once when a viewer needs a keyframe.
+- **Keyframes** are made only when a viewer joins a layer or asks (PLI), at most every 0.7 s per layer. On Windows their size is bounded by the encoder's rate control buffer, set once when the encoder opens (D56).
+- **A viewer changing layer** stays on the old one until the new one has a keyframe for them (`Viewer.next`), so a step on the ladder shows no gap. A layer nobody is on or moving to stops.
+- **Bitrate:** a layer is told to spend 85% of what its slowest viewer's connection carries, within its rung's bounds. What comes out is measured, and an encoder that spends more than it was told is told less (`Trim`).
+- **A screen's frame on Windows** (D56) is a texture on the capture's GPU. Per layer it takes one of three paths, best first: scaled and converted on the GPU and given to the hardware encoder as a texture; the same, read back as NV12 for an encoder that takes memory (another GPU's, or OpenH264 when hardware acceleration is on but no hardware encoder opens); read back as captured and converted on the CPU (hardware acceleration off, or no video processor). `FRIENDSPEAK_MEDIA_FRAMES=readback` or `cpu` in the sidecar's environment forces the second or third; `FRIENDSPEAK_MEDIA_ENCODER=intel` (part of an encoder's name) picks among several GPUs' encoders. The sidecar's log says which encoder a layer got and how it is fed.
 - **Building:** `npm run build:media` (needs Rust; on macOS both `aarch64-apple-darwin` and `x86_64-apple-darwin` targets for a full `dist`). `cargo build --release` in `native/` is enough to run from source. It is built for the machine's own OS only.
 - **To watch a native stream from another client** (a phone, a test page), implement the viewer's side from `voice.js`: `{ watch: kind, on: true, stream: 1 }`, then for the `{ stream: kind, sdp }` offer create an `RTCPeerConnection`, `setRemoteDescription`, `setLocalDescription()` and return `{ viewing: kind, sdp }`; exchange candidates the same way; send `{ view }` with the displayed size. The scratch script used to verify the sidecar did exactly this from a page in Chrome.
 
