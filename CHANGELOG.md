@@ -5,6 +5,13 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.8 - 2026-10-05
+
+- Video view: **Pop out** moves the whole view, with every screen share and
+  camera you are watching, to a window of its own. It stays while you read
+  channels, play or use another app. **Keep on top** holds it above other
+  windows, **Back to app** moves it back, and closing it stops watching
+
 ## 1.1.7 - 2026-10-05
 
 - Server: what it saves is split into files (`profiles/`, `messages/`,
