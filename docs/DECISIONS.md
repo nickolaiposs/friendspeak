@@ -877,6 +877,28 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The pieces are not written together. After a crash or power loss, one piece can be up to half a second ahead of another: a message whose attachment is not yet in the file list, say. Each file by itself is always whole.
 - **Going back to an older version** needs `state.pre-split.json` put back as `state.json`. An older server started on split data sees no members and no history, and members then need an invite again. Auto-update never goes back, so this takes a deliberate image rollback.
 - A place that changes a profile, a message or the emojis and calls only `save()` loses that change at the next restart. It is the price of not tracking changes automatically.
-- A profile's file still holds its pictures, so a disconnect rewrites up to a megabyte, though no longer on the event loop. Taking the pictures out of the profiles is issue #104.
+- A profile's file still holds its pictures, so a changed profile rewrites up to a megabyte, though no longer on the event loop. Coming and going doesn't: that only moves `seen`, which has a file of its own (D58).
 
 **Alternatives:** `node:sqlite` for messages (already used by the game, so D13 holds): each write would be small, but synchronous, the module is not marked stable in Node 22, and history stays capped at 500 per channel, so one file per channel is small enough. An append-only log per channel: edits, reactions and deletes need compaction, for a file that is rewritten in a few milliseconds anyway. One write of the whole state in a worker thread: the copy to the worker still stalls the loop. Tracking changes with a `Proxy`, so no call can be forgotten: every read of `state` would pay for it.
+
+## D58: Pictures travel by reference, and presence sends only what changed · Active
+**Context:** avatars, profile backgrounds and emojis are data URLs (D4, D25), and they rode inside socket events that repeat. A disconnect sent the person's whole profile to everyone for the sake of `seen`; a connect did the same though nothing had changed; `users`, sent on every mute, deafen, camera and game toggle, carried the avatar of everyone online; adding one emoji re-sent all of them; and the `hello` ack carried every picture on the server. One person's flaky Wi-Fi cost every other member up to a megabyte per reconnect.
+
+**Decision:**
+- **`proto: 2` in `hello`** says the app understands what follows. The server keeps such sockets in one room and the rest in another, and sends each what it knows. An app from before this is sent exactly what it was sent before.
+- **References.** For `proto: 2`, a picture that is a data URL is replaced by `/media/<SHA-256 of the data URL>` in `server.profiles`, `profile`, `users` and the emojis. The app puts the server's origin in front and loads it with `GET /media/<hash>`, which is `immutable`: once per picture, from the HTTP cache after that.
+- **Small events.** A disconnect sends `profile:seen { id, seen }`. An emoji change sends `emoji:added { emoji }` or `emoji:removed { name }`.
+- **Nothing when nothing changed**, for both kinds of app: a `hello` or `profile:update` with the profile the server already has sends no `profile`. `users` still says who is online.
+- **`seen` has a file of its own** (`seen.json`), so coming and going doesn't rewrite a profile's file with its pictures (D57).
+- **The app draws a server's picture only for a server it is connected to** (`isImage()`): the rule that a picture's host must not learn who is shown it (D25) holds, because that server knows already. A DM contact can't point an avatar at a host of their choosing this way.
+- **Storage is unchanged.** `state` and the profile files still hold data URLs; the hash is worked out when a picture is first sent, and `GET /media` decodes it from memory. Old apps need the data URLs anyway.
+
+**Consequences:**
+- Measured with a 200 KB avatar and a 300 KB background: the `profile` event went from 683 KB to 455 bytes, and a `users` list from 274 KB to 1.3 KB.
+- `/media/<hash>` needs no sign-in, like `/files` (D24): the address is the capability, and only someone who has the picture can work out its hash. A replaced or removed picture stops being served within ten minutes.
+- The server sends two versions of some events while both kinds of app are connected, and still sends old apps the megabytes. That ends when support for apps from before this is dropped, which nothing here decides.
+- The app still uploads its own pictures in every `hello`. The server could say which hashes it has; not done.
+- The server icon is still inline (`hello` ack, `server`, `/api/info`): it is one picture, sent rarely.
+
+**Alternatives:** moving the pictures to files on disk and keeping only references in `state` (old apps would need them read back for every `hello`; the profile files are already off the event loop, D57); the app fetching each reference and turning it back into a data URL (nothing else in the app changes, but every picture is held in memory twice and drawn late); a capability list instead of one number (nothing needs two yet).
+
