@@ -466,7 +466,23 @@ async function startServer(opts = {}) {
 
   // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
   // (only channels it can see). Open mode: everything but role management and invites (those are the dashboard's until someone is an admin).
+  // The answer is kept per profile until permsStale(), and every caller gets the same frozen object:
+  // the fan-out loops ask once per socket for every message (#105).
+  const permsCache = new Map(); // profileId -> permsOf(profileId)
+  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, permissionsOn, the channels and their overrides, the pins
+  const permsStale = () => permsCache.clear();
   function permsOf(pid) {
+    let g = permsCache.get(pid);
+    if (g) return g;
+    g = resolvePerms(pid);
+    Object.freeze(g.grantable);
+    for (const c of Object.values(g.channels)) Object.freeze(c);
+    Object.freeze(g.channels);
+    if (permsCache.size >= 20000) permsCache.clear(); // ids come from clients
+    permsCache.set(pid, Object.freeze(g));
+    return g;
+  }
+  function resolvePerms(pid) {
     const open = !state.permissionsOn;
     const held = open ? [] : heldRoles(pid);
     const admin = !open && (!!state.defaultPerms.admin || held.some((r) => r.perms.admin === true));
@@ -1056,21 +1072,33 @@ async function startServer(opts = {}) {
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
-    // `users` goes out per socket: voice channels a socket can't see are left out
+    // `users` leaves out the voice channels a socket can't see. Sockets that see the same of the
+    // channels people are in get the same list, built and encoded once: all of them, usually.
     const broadcastUsers = () => {
-      for (const [sid, u] of users) io.to(sid).emit('users', userList(permsOf(u.profile.id)));
+      const occupied = [...new Set([...users.values()].map((u) => u.voice).filter(Boolean))];
+      const groups = new Map(); // the occupied channels hidden from a socket -> { g, sids }
+      for (const [sid, u] of users) {
+        const g = permsOf(u.profile.id);
+        const hidden = occupied.filter((cid) => !g.channels[cid]?.view).join('|');
+        if (!groups.has(hidden)) groups.set(hidden, { g, sids: [] });
+        groups.get(hidden).sids.push(sid);
+      }
+      for (const { g, sids } of groups.values()) io.to(sids).emit('users', userList(g));
       adminRef.current?.notify('users');
     };
 
     // Send an event for a channel only to the sockets that can see it
     const toViewers = (cid, event, payload, exceptSid) => {
-      for (const [sid, u] of users) if (sid !== exceptSid && canView(u.profile.id, cid)) io.to(sid).emit(event, payload);
+      const sids = [];
+      for (const [sid, u] of users) if (sid !== exceptSid && canView(u.profile.id, cid)) sids.push(sid);
+      if (sids.length) io.to(sids).emit(event, payload);
     };
 
     // Something changed who can do or see what (roles, role holders, default or channel permissions,
     // or the channels themselves): tell everyone, take people out of voice channels they lost, and
     // turn permissions on the first time someone is an administrator.
     function permsChanged({ roles = true } = {}) {
+      permsStale();
       if (!state.permissionsOn && (state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole))) state.permissionsOn = true;
       save();
       if (roles) io.emit('roles', rolesPayload());
@@ -1260,6 +1288,7 @@ async function startServer(opts = {}) {
       const hadRoles = Object.hasOwn(state.memberRoles, profileId);
       if (hadProfile) delete state.profiles[profileId];
       if (hadRoles) delete state.memberRoles[profileId];
+      permsStale();
       save();
       if (hadProfile) io.emit('profile:removed', { id: profileId });
       if (hadRoles) permsChanged();
@@ -1361,6 +1390,7 @@ async function startServer(opts = {}) {
         profileId = str(profileId, 64);
         if (!profileId || !pinOf(profileId)) return { error: 'That profile has no key here' };
         delete state.pins[profileId];
+        permsStale();
         // The old card would mislead DM contacts until the new key says hello
         if (Object.hasOwn(state.profiles, profileId)) {
           delete state.profiles[profileId].card;
@@ -1643,7 +1673,10 @@ async function startServer(opts = {}) {
         }
         if (pin && !signed) return refuse('the profile is pinned to a key and the app sent none', { error: 'This profile is protected by a key on this server. Update friendspeak to connect with it.', key: true });
         if (pin && card.s !== pin) return refuse('signed with a different key than the one pinned (D42)', { error: 'This profile belongs to a different key on this server. To use it on this device, import its profile file from the device you made it on.', key: true });
-        if (signed && !pin) state.pins[p.id] = card.s;
+        if (signed && !pin) {
+          state.pins[p.id] = card.s;
+          permsStale(); // roles with permissions count from here on
+        }
         p.card = card;
         lastIp.set(p.id, clientIp(socket));
         // One live session per profile. After a network drop the old socket
@@ -1917,6 +1950,7 @@ async function startServer(opts = {}) {
         if (state.channels.filter((c) => c.type === ch.type).length <= 1) return ack({ error: `There must be at least one ${ch.type} channel` });
         console.log(`[mod] ${whoIs(users.get(socket.id).profile)} deleted the ${ch.type} channel "${ch.name}"`);
         state.channels = state.channels.filter((c) => c.id !== cid);
+        permsStale(); // before deleteFiles() asks who can see it
         delete state.messages[cid];
         deleteFiles(state.files.filter((f) => f.channelId === cid).map((f) => f.id));
         for (const [sid, u] of users) {
