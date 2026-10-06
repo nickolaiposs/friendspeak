@@ -29,7 +29,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 use crate::audio::{self, Opus};
-use crate::encode::{self, Encoded};
+use crate::encode::{self, Encoded, Trim};
 use crate::frame::{even, Frame, Nv12, Scaler};
 use crate::ladder::{self, Rung};
 use crate::log;
@@ -105,6 +105,7 @@ struct Viewer {
     estimate: f64, // bits per second
     ladder: ladder::State,
     layer: Option<u32>,
+    next: Option<u32>, // the layer they move to once it has a keyframe for them; `layer` serves them until then
     timeout: Instant,
     stun_id: [u8; 12],
     stun_done: bool,
@@ -462,6 +463,7 @@ fn new_viewer(kind: Kind, id: &str, own: bool, sound: bool, tx: &Sender<Msg>) ->
         estimate: START_BPS as f64,
         ladder: ladder::State::default(),
         layer: None,
+        next: None,
         timeout: now,
         stun_id: net::txid(),
         stun_done: false,
@@ -586,6 +588,7 @@ impl Stream {
         for v in self.viewers.values_mut() {
             v.ladder.reset();
             v.layer = None;
+            v.next = None;
         }
         self.plan(tx);
     }
@@ -596,12 +599,14 @@ impl Stream {
             return;
         }
         self.cap_frames += 1;
+        let frame = Arc::new(frame);
+        let at = frame.at;
+        // Before the layers are planned: a new one opens its encoder for this kind of frame
+        self.last = Some((frame.clone(), at));
         if self.src != (frame.w, frame.h) {
             self.src = (frame.w, frame.h);
             self.relayout(tx);
         }
-        let frame = Arc::new(frame);
-        let at = frame.at;
         self.feed(frame, at);
     }
 
@@ -618,11 +623,13 @@ impl Stream {
 
     fn feed(&mut self, frame: Arc<Frame>, at: Instant) {
         self.last = Some((frame.clone(), at));
-        let top_fps = self.rungs.first().map_or(0.0, |r| r.fps);
+        // The capture runs at the tier's rate. In sharp mode even the best rung is slower than that (30 a
+        // second at most), and it was handed every frame: twice the frames its bitrate was meant for.
+        let cap_fps = self.tier.fps;
         for l in self.layers.iter_mut() {
             // A layer below the capture's rate takes the frames that keep its own pace. One at the
             // capture's rate takes them all: frames never arrive evenly, and timing them would drop some.
-            if l.rung.fps < top_fps {
+            if l.rung.fps < cap_fps {
                 let step = Duration::from_secs_f32(1.0 / l.rung.fps);
                 match l.due {
                     Some(due) if at + step / 4 < due => continue,
@@ -679,8 +686,18 @@ impl Stream {
         let time = MediaTime::new((at.saturating_duration_since(self.started).as_secs_f64() * 90_000.0) as u64, str0m::media::Frequency::NINETY_KHZ);
         let data: Arc<[u8]> = unit.data.into();
         let kind = self.kind;
-        let mut missed = false;
+        let (mut missed, mut moved) = (false, false);
         for (vid, v) in self.viewers.iter_mut() {
+            // Someone moving here takes over at a keyframe; the layer they are on serves them until then
+            if v.next == Some(id) {
+                if !unit.key {
+                    missed = true;
+                    continue;
+                }
+                v.layer = v.next.take();
+                v.need_key = false;
+                moved = true;
+            }
             if v.layer != Some(id) || !v.connected || v.dead {
                 continue;
             }
@@ -701,6 +718,15 @@ impl Stream {
         if missed {
             l.want_key = true;
         }
+        if moved {
+            self.sweep();
+        }
+    }
+
+    // Layers nobody is on or moving to stop
+    fn sweep(&mut self) {
+        let viewers = &self.viewers;
+        self.layers.retain(|l| viewers.values().any(|v| v.layer == Some(l.id) || v.next == Some(l.id)));
     }
 
     // Drop viewers whose connection broke for good
@@ -793,35 +819,62 @@ impl Stream {
             }
             wants.insert(id.clone(), pick);
         }
-        // Layers nobody wants any more stop; missing ones start
+        // Missing layers start
         let rungs = self.rungs.clone();
-        self.layers.retain(|l| keys.iter().any(|k| rungs[k.0] == l.rung && k.1 == l.high));
         for k in &keys {
             if !self.layers.iter().any(|l| l.rung == rungs[k.0] && l.high == k.1) {
                 let layer = self.spawn_layer(rungs[k.0], k.1, tx);
                 self.layers.push(layer);
             }
         }
+        // A viewer who is watching moves to another layer without a gap: the one they are on keeps sending
+        // until the new one has a keyframe for them (encoded()). Opening an encoder takes a few frames' time,
+        // and over a slow link the keyframe a few more; cutting over at once froze the picture for that long
+        // at every step of the ladder.
         for (id, v) in self.viewers.iter_mut() {
-            let layer = wants.get(id).and_then(|k| self.layers.iter().find(|l| l.rung == rungs[k.0] && l.high == k.1)).map(|l| l.id);
-            if layer != v.layer {
-                v.layer = layer;
+            let to = wants.get(id).and_then(|k| self.layers.iter().find(|l| l.rung == rungs[k.0] && l.high == k.1)).map(|l| l.id);
+            if to == v.layer {
+                v.next = None;
+                continue;
+            }
+            let watching = v.connected && !v.need_key && self.layers.iter().any(|l| Some(l.id) == v.layer && l.up);
+            if to == v.next && watching {
+                continue;
+            }
+            if to.is_some() && watching {
+                v.next = to;
+            } else {
+                v.layer = to;
+                v.next = None;
                 v.need_key = true;
-                if let Some(l) = self.layers.iter_mut().find(|l| Some(l.id) == layer) {
-                    l.want_key = true;
+            }
+            if let Some(l) = self.layers.iter_mut().find(|l| Some(l.id) == to) {
+                l.want_key = true;
+            }
+        }
+        self.sweep();
+        // Encoders are a scarce thing on some GPUs: with more than one extra running, the moves are cuts
+        if self.layers.len() > MAX_LAYERS + 1 {
+            for v in self.viewers.values_mut() {
+                if let Some(to) = v.next.take() {
+                    v.layer = Some(to);
+                    v.need_key = true;
                 }
             }
+            self.sweep();
         }
         // A layer spends what its slowest viewer's connection carries, and no more than the rung is worth
         let top = ladder::ceiling(&rungs[0]) as u64;
         for l in self.layers.iter_mut() {
-            let on = self.viewers.values().filter(|v| v.layer == Some(l.id));
+            let on = self.viewers.values().filter(|v| v.layer == Some(l.id) || v.next == Some(l.id));
             let low = on.clone().filter(|v| !v.own).map(|v| v.estimate).fold(f64::INFINITY, f64::min);
             let want = if low.is_finite() { low * 0.85 } else { ladder::need(&l.rung, self.sharp, self.cap_fps) };
             let bps = (want as u32).clamp(MIN_BPS, ladder::ceiling(&l.rung));
             if (bps as f64 - l.bps as f64).abs() > 0.05 * l.bps as f64 {
-                l.bps = bps;
-                let _ = l.tx.try_send(LayerMsg::Rates(bps, l.rung.fps));
+                // A layer with a frame waiting has no room for this; then it is asked again at the next plan
+                if l.tx.try_send(LayerMsg::Rates(bps, l.rung.fps)).is_ok() {
+                    l.bps = bps;
+                }
             }
         }
         // Let every estimate grow to what the best rung could use
@@ -838,16 +891,22 @@ impl Stream {
         let id = self.next_layer;
         self.next_layer += 1;
         let (ltx, lrx) = std::sync::mpsc::sync_channel::<LayerMsg>(1);
-        let bps = (ladder::need(&rung, self.sharp, self.cap_fps) as u32).clamp(MIN_BPS, ladder::ceiling(&rung));
-        let cfg = encode::Config { w: rung.w, h: rung.h, fps: rung.fps, bps, high, sharp: self.sharp };
+        // What the rung needs at its own frame rate, whatever the capture delivers right now: the encoder sizes
+        // its rate control for this (plan() sends what the viewers' connections carry right after)
+        let bps = (ladder::need(&rung, self.sharp, 0.0) as u32).clamp(MIN_BPS, ladder::ceiling(&rung));
+        let cfg = encode::Config { w: rung.w, h: rung.h, fps: rung.fps, bps, max_bps: ladder::ceiling(&rung), high, sharp: self.sharp };
         let (kind, hw, out) = (self.kind, self.hw, tx.clone());
+        let like = self.last.as_ref().map(|(frame, _)| frame.clone());
         let spawned = std::thread::Builder::new().name(format!("layer-{}p", rung.h)).spawn(move || {
-            let (mut enc, note) = match encode::open(cfg, hw) {
+            let opened = encode::open(cfg, hw, like.as_deref());
+            drop(like);
+            let (mut enc, note) = match opened {
                 Ok(x) => x,
                 Err(why) => return drop(out.send(Msg::LayerDown { kind, id, why })),
             };
             let _ = out.send(Msg::LayerUp { kind, id, name: enc.name(), hw: enc.hardware(), high: enc.high(), note });
-            let mut scaler = Scaler::default();
+            let mut scaler = Scaler::new(hw);
+            let mut trim = Trim::default();
             let mut nv12 = Nv12::default();
             let mut cfg = cfg;
             while let Ok(msg) = lrx.recv() {
@@ -855,25 +914,33 @@ impl Stream {
                     LayerMsg::Rates(bps, fps) => {
                         cfg.bps = bps;
                         cfg.fps = fps;
-                        enc.set_rates(bps, fps);
+                        enc.set_rates((bps as f32 * trim.factor()) as u32, fps);
                     }
                     LayerMsg::Frame(frame, at, key) => {
                         let t = Instant::now();
-                        let mut res = scaler.nv12(&frame, cfg.w, cfg.h, &mut nv12).and_then(|()| enc.encode(&nv12, key));
+                        let mut res = match enc.encode_frame(&frame, key) {
+                            Some(res) => res,
+                            None => scaler.nv12(&frame, cfg.w, cfg.h, &mut nv12).and_then(|()| enc.encode(&nv12, key)),
+                        };
                         if let (Err(why), true) = (&res, enc.hardware()) {
                             // The hardware encoder gave up mid-stream: carry on in software
                             let note = format!("{} failed ({why}); now software", enc.name());
-                            match encode::open(cfg, false) {
+                            match encode::open(cfg, false, None) {
                                 Ok((soft, _)) => {
                                     enc = soft;
+                                    trim = Trim::default();
                                     let _ = out.send(Msg::LayerUp { kind, id, name: enc.name(), hw: false, high: enc.high(), note: Some(note) });
-                                    res = enc.encode(&nv12, true);
+                                    // The hardware encoder may have taken the frame as it was: make the picture now
+                                    res = scaler.nv12(&frame, cfg.w, cfg.h, &mut nv12).and_then(|()| enc.encode(&nv12, true));
                                 }
                                 Err(e) => res = Err(e),
                             }
                         }
                         match res {
                             Ok(Some(unit)) => {
+                                if let Some(factor) = trim.spent(Instant::now(), unit.data.len(), unit.key, cfg.bps) {
+                                    enc.set_rates((cfg.bps as f32 * factor) as u32, cfg.fps);
+                                }
                                 let ms = t.elapsed().as_secs_f32() * 1000.0;
                                 if out.send(Msg::Encoded { kind, id, unit, at, ms }).is_err() {
                                     return;
