@@ -1412,7 +1412,7 @@ function dropConn(c) {
 function disconnect(manual = false, keepCall = false) {
   closePopover();
   closeGame();
-  closeStage();
+  closeStage({ nav: true });
   const c = S.conn;
   S.conn = null;
   if (c && !(keepCall && S.call === c)) dropConn(c);
@@ -1964,6 +1964,8 @@ setInterval(() => {
   const mark = (el) => el.classList.toggle('speaking', (levels.get(el.dataset.sid) || 0) > 0.02);
   for (const el of voiceUserEls) mark(el);
   for (const el of tileEls) if (el.dataset.sid) mark(el);
+  // In a window of its own, the stage's tiles aren't in this page
+  if (S.stage?.pop) for (const t of S.stage.tiles.values()) if (t.el.dataset.sid) mark(t.el);
 }, 90);
 
 // ---------------------------------------------------------------- sidebar
@@ -2832,7 +2834,7 @@ async function selectChannel(id) {
   S.unread.delete(id);
   if (!isDm(id) && S.entry && mentionUnread.clear(S.entry.id, id)) renderRail();
   showGame(false);
-  closeStage();
+  closeStage({ nav: true });
   S.replyTo = null;
   if (isDm(id)) {
     // The thread lives in dm.js; share its array so new messages show up here too
@@ -4981,9 +4983,12 @@ function openStage({ screen } = {}) {
     const main = h('div', { class: 'stage-main' });
     const grid = h('div', { class: 'stage-grid' });
     const body = h('div', { class: 'stage' }, main, grid);
-    const toggleFullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : body.requestFullscreen?.().catch(() => {}));
-    // tiles: key ("screen:<sid>", "camera:<sid>", "user:<sid>") -> tile; watching: sids of screens we receive
-    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), focus: null, title, stats, controls, main, grid, body };
+    const popBtns = h('div', { class: 'stage-controls' });
+    // The stage can be in a window of its own (popOutStage), so ask the page it is in
+    const toggleFullscreen = () => (body.ownerDocument.fullscreenElement ? body.ownerDocument.exitFullscreen() : body.requestFullscreen?.().catch(() => {}));
+    // tiles: key ("screen:<sid>", "camera:<sid>", "user:<sid>") -> tile; watching: sids of screens we receive;
+    // pop: the window the stage is in, when it isn't in the app ({ win, name, ready, onTop })
+    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
     // Resolution, real frame rate and codec of the focused (or first) screen
@@ -5006,7 +5011,7 @@ function openStage({ screen } = {}) {
       const full = base && [base, formatVideoStats(info)].filter(Boolean).join(' · ');
       stats.textContent = full;
       stats.title = full ? 'Stream stats: ' + full : '';
-      stats.style.cursor = full ? 'pointer' : '';
+      stats.style.cursor = full && !S.stage.pop ? 'pointer' : '';
       if (tile && info) {
         const hist = S.stage.history;
         hist.push({ time: new Date().toISOString(), tile: tile.key, kind: tile.kind, role: Array.isArray(info) ? 'sender' : 'receiver', stats: info });
@@ -5014,8 +5019,10 @@ function openStage({ screen } = {}) {
       }
       S.stage.statsPanel?.update(tile, info);
     }, 1000);
-    stats.onclick = () => openStatsPanel(stats);
-    $('#stream-view').replaceChildren(
+    stats.onclick = () => S.stage.pop || openStatsPanel(stats); // the panel is drawn in the app's page
+    S.stage.el = h(
+      'div',
+      { class: 'stage-view' },
       h(
         'header',
         { class: 'chat-header' },
@@ -5024,13 +5031,15 @@ function openStage({ screen } = {}) {
         stats,
         h('div', { class: 'spacer' }),
         controls,
+        popBtns,
         h('button', { class: 'icon-btn', title: 'Fullscreen', onclick: toggleFullscreen }, icon('expand')),
         h('button', { class: 'btn small ghost', onclick: () => closeStage() }, 'Close')
       ),
       body
     );
+    $('#stream-view').replaceChildren(S.stage.el);
     document.body.classList.add('stream-visible');
-  }
+  } else S.stage.pop?.win.focus();
   if (screen) {
     watchScreen(screen, true, false);
     S.stage.focus = 'screen:' + screen;
@@ -5108,7 +5117,8 @@ function stageTile(key, sid, kind, live) {
     },
     ondblclick: () => {
       clearTimeout(clickTimer);
-      if (tile.video) document.fullscreenElement ? document.exitFullscreen() : tile.el.requestFullscreen?.().catch(() => {});
+      const doc = tile.el.ownerDocument;
+      if (tile.video) doc.fullscreenElement ? doc.exitFullscreen() : tile.el.requestFullscreen?.().catch(() => {});
     },
   };
   if (kind !== 'screen') attrs['data-sid'] = sid; // speaking outline
@@ -5163,11 +5173,13 @@ function stageTile(key, sid, kind, live) {
       clearTimeout(timer);
       timer = setTimeout(() => {
         if (!video.isConnected) return;
-        const dpr = devicePixelRatio || 1;
+        // The page the tile is in: the app's, or the stage's own window
+        const doc = video.ownerDocument;
+        const dpr = doc.defaultView?.devicePixelRatio || 1;
         const w = video.clientWidth * dpr;
         const h = video.clientHeight * dpr;
-        if (w && h) S.voice?.view(sid, kind, { w, h, hidden: document.hidden });
-        else if (document.hidden) S.voice?.view(sid, kind, { hidden: true });
+        if (w && h) S.voice?.view(sid, kind, { w, h, hidden: doc.hidden });
+        else if (doc.hidden) S.voice?.view(sid, kind, { hidden: true });
       }, 300);
     };
     tile.ro = new ResizeObserver(tile.report);
@@ -5188,10 +5200,11 @@ function dropTile(key) {
   tile.el.remove();
 }
 
-document.addEventListener('visibilitychange', () => {
+function reportTiles() {
   if (!S.stage) return;
   for (const t of S.stage.tiles.values()) t.report?.();
-});
+}
+document.addEventListener('visibilitychange', reportTiles);
 
 // "H264 (hardware)" for a stream we receive; one entry per viewer for our own
 function formatVideoStats(info) {
@@ -5359,6 +5372,22 @@ function syncStage() {
           ? 'You'
           : fu?.name || 'someone'
   );
+  const pop = st.pop?.ready ? st.pop : null;
+  if (pop) pop.win.document.title = st.title.textContent;
+  st.popBtns.replaceChildren(
+    ...(pop
+      ? [
+          desktop?.streamOnTop &&
+            h(
+              'button',
+              { class: 'btn small ghost', title: 'Keep this window above other windows', onclick: () => ((pop.onTop = !pop.onTop), desktop.streamOnTop(pop.name, pop.onTop), syncStage()) },
+              pop.onTop ? 'On top ✓' : 'Keep on top'
+            ),
+          h('button', { class: 'btn small ghost', title: 'Show the video grid in the app again', onclick: () => dockStage() }, 'Back to app'),
+        ]
+      : [h('button', { class: 'btn small ghost', title: 'Open the video grid in a window of its own', disabled: !!st.pop, onclick: () => popOutStage() }, 'Pop out')]
+    ).filter(Boolean)
+  );
   const sharing = !!S.voice.local.screen;
   st.controls.replaceChildren(
     ...[
@@ -5368,6 +5397,8 @@ function syncStage() {
     ].filter(Boolean)
   );
   layoutStage();
+  // This page's observers don't see sizes change in another window
+  if (pop) reportTiles();
 }
 
 // Grid mode: pick the column count that makes 16:9 tiles as big as possible
@@ -5395,9 +5426,11 @@ function layoutStage(st = S.stage) {
   g.style.gridAutoRows = `${Math.floor((w * 9) / 16)}px`;
 }
 
-function closeStage() {
+// With `nav`, the app's view is moving on (a text channel, the game, another
+// server): a stage in a window of its own isn't in the way, and stays.
+function closeStage({ nav = false } = {}) {
   const st = S.stage;
-  if (!st) return;
+  if (!st || (nav && st.pop)) return;
   clearInterval(st.timer);
   st.statsPanel?.close();
   st.ro.disconnect();
@@ -5405,10 +5438,77 @@ function closeStage() {
   if (S.call?.connected) for (const sid of st.watching) S.voice.watch(sid, 'screen', false);
   S.stage = null;
   if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  if (st.pop && !st.pop.win.closed) st.pop.win.close();
   $('#stream-view').replaceChildren();
   document.body.classList.remove('stream-visible');
   if (S.server) renderChannels();
 }
+
+// "Pop out": the whole stage (header, grid, every stream being watched) moves
+// to a window of its own, so it stays in view while you read a channel, play,
+// or use another app. The window shows popout.html, a page of ours with no
+// script: the stage's elements are moved into it and this page keeps driving
+// them, because a stream can't leave the page that receives it. Closing the
+// window closes the stage; "Back to app" (dockStage) moves it back.
+let stageWinSeq = 0;
+function popOutStage() {
+  const st = S.stage;
+  if (!st) return;
+  if (st.pop) return st.pop.win.focus();
+  const name = 'friendspeak-stream-' + ++stageWinSeq;
+  const win = window.open('/popout.html', name, 'width=1100,height=680');
+  if (!win) return toast('Could not open a window for the video grid', 'error');
+  const pop = (st.pop = { win, name, ready: false, onTop: false });
+  const mine = () => S.stage === st && st.pop === pop;
+  syncStage();
+  // The page loads in its own time; the stage stays in the app until then
+  const timer = setInterval(() => {
+    if (!mine()) return clearInterval(timer);
+    if (win.closed) return clearInterval(timer), closeStage();
+    const host = win.document.getElementById('stream');
+    if (!host) return;
+    clearInterval(timer);
+    // The theme is variables and attributes on <html> (theme.js)
+    for (const a of document.documentElement.attributes) win.document.documentElement.setAttribute(a.name, a.value);
+    st.statsPanel?.close();
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    host.replaceChildren(st.el);
+    document.body.classList.remove('stream-visible');
+    pop.ready = true;
+    win.addEventListener('resize', () => mine() && (layoutStage(), reportTiles()));
+    win.document.addEventListener('visibilitychange', () => mine() && reportTiles());
+    // Closed with its own close button (or reloaded, which empties it)
+    win.addEventListener('pagehide', () => mine() && closeStage());
+    stageMoved();
+  }, 50);
+}
+
+// "Back to app": the stage returns to the app's view and its window closes
+function dockStage() {
+  const st = S.stage;
+  const pop = st?.pop;
+  if (!pop) return;
+  st.pop = null;
+  if (pop.ready) {
+    showGame(false);
+    $('#stream-view').replaceChildren(st.el);
+    document.body.classList.add('stream-visible');
+  }
+  if (!pop.win.closed) pop.win.close();
+  stageMoved();
+  desktop?.focus?.();
+}
+
+// A video stops when its element moves to another page
+function stageMoved() {
+  for (const t of S.stage.tiles.values()) if (t.video?.srcObject) t.video.play().catch(() => {});
+  syncStage();
+  reportTiles();
+  if (S.server) renderChannels();
+}
+
+// The stage's window can't draw itself: it goes with this page
+window.addEventListener('pagehide', () => S.stage?.pop?.win.close());
 
 // ---------------------------------------------------------------- penguin game (Yukon)
 
@@ -5444,7 +5544,7 @@ async function openGame() {
 
 function showGame(visible) {
   if (visible && !S.game.open) return;
-  if (visible) closeStage();
+  if (visible) closeStage({ nav: true });
   S.game.visible = visible;
   document.body.classList.toggle('game-visible', visible);
   if (visible) {
