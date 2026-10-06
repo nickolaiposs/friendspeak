@@ -1,10 +1,11 @@
 // Screens and windows on Windows, through Windows Graphics Capture (Windows 10 1903+).
 //
-// Frames come out as BGRA in system memory and are converted and scaled by the
-// engine. The capture runs on the crate's own thread (it needs a message loop);
-// ours only watches the stop flag and notices when that thread ends by itself,
-// which is how a closed window shows up. A still screen delivers no frames
-// (the engine repeats the last one when a viewer needs it).
+// Frames stay on the GPU: each is copied into a texture of ours (d3d.rs, D56)
+// and scaled and converted there by the layers. The capture runs on the
+// crate's own thread (it needs a message loop); ours only watches the stop
+// flag and notices when that thread ends by itself, which is how a closed
+// window shows up. A still screen delivers no frames (the engine repeats the
+// last one when a viewer needs it).
 //
 // The cursor is captured. The yellow border is switched off where Windows
 // allows it (Windows 11); on Windows 10 the options aren't there and the
@@ -30,6 +31,7 @@ use windows_capture::settings::{
 use windows_capture::window::Window;
 
 use super::{audio_win, Capture, Sinks};
+use crate::d3d;
 use crate::frame::{Frame, Pixels};
 use crate::log;
 use crate::proto::{Source, Tier};
@@ -38,6 +40,7 @@ struct Grab {
     sinks: Arc<Sinks>,
     stop: Arc<AtomicBool>,
     failed: u32,
+    dev: Option<Arc<d3d::Device>>,
 }
 
 impl GraphicsCaptureApiHandler for Grab {
@@ -46,31 +49,39 @@ impl GraphicsCaptureApiHandler for Grab {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, String> {
         let (sinks, stop) = ctx.flags;
-        Ok(Self { sinks, stop, failed: 0 })
+        Ok(Self { sinks, stop, failed: 0, dev: None })
     }
 
     fn on_frame_arrived(&mut self, frame: &mut GrabbedFrame, _control: InternalCaptureControl) -> Result<(), String> {
         if self.stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        // One frame that can't be read (the GPU was busy, the window resized) isn't the end of the share; a
+        let at = Instant::now();
+        // The capture takes its texture back when this returns, so the frame is copied into one of ours:
+        // a copy on the GPU, where the layers pick it up
+        let kept = match &self.dev {
+            Some(dev) => Ok(dev.clone()),
+            None => d3d::Device::new(frame.device(), frame.device_context()),
+        }
+        .and_then(|dev| {
+            let tex = dev.keep(frame.as_raw_texture());
+            self.dev = Some(dev);
+            tex
+        });
+        // One frame that can't be kept (the GPU was busy, the window resized) isn't the end of the share; a
         // long run of them is.
-        let mut buf = match frame.buffer() {
-            Ok(b) => b,
+        let tex = match kept {
+            Ok(tex) => tex,
             Err(e) => {
                 self.failed += 1;
-                return if self.failed > 60 { Err(format!("can't read the captured frames: {e}")) } else { Ok(()) };
+                return if self.failed > 60 { Err(format!("can't keep the captured frames: {e}")) } else { Ok(()) };
             }
         };
         self.failed = 0;
-        let (w, h, stride) = (buf.width() as usize, buf.height() as usize, buf.row_pitch() as usize);
-        let raw = buf.as_raw_buffer();
-        // The last row needs only its own pixels, not the padding after them
-        if w == 0 || h == 0 || stride < w * 4 || raw.len() < stride * (h - 1) + w * 4 {
+        if tex.w == 0 || tex.h == 0 {
             return Ok(());
         }
-        let data = raw[..raw.len().min(stride * h)].to_vec();
-        (self.sinks.video)(Frame { w, h, at: Instant::now(), px: Pixels::Bgra { data, stride } });
+        (self.sinks.video)(Frame { w: tex.w, h: tex.h, at, px: Pixels::D3d11(tex) });
         Ok(())
     }
 }
