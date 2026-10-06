@@ -118,6 +118,7 @@ async function startServer(opts = {}) {
   const PROFILES_DIR = path.join(DATA_DIR, 'profiles'); // one file per profile
   const MESSAGES_DIR = path.join(DATA_DIR, 'messages'); // one file per text channel
   const EMOJIS_FILE = path.join(DATA_DIR, 'emojis.json');
+  const SEEN_FILE = path.join(DATA_DIR, 'seen.json'); // when each profile was last online: changes far more often than the profiles do (D57)
   const MAX_HISTORY = 500;
   const MAX_SEARCH_RESULTS = 50;
   const MAX_MESSAGE_LEN = 4000;
@@ -170,7 +171,7 @@ async function startServer(opts = {}) {
       fs.chmodSync(file, 0o600);
     } catch {}
   };
-  for (const name of ['state.json', 'emojis.json', 'mail.json', 'state.pre-split.json', 'mail.pre-split.json', 'key.pem', 'game.sqlite', 'game-secret']) ownerOnly(path.join(DATA_DIR, name));
+  for (const name of ['state.json', 'emojis.json', 'seen.json', 'mail.json', 'state.pre-split.json', 'mail.pre-split.json', 'key.pem', 'game.sqlite', 'game-secret']) ownerOnly(path.join(DATA_DIR, name));
 
   // Self-update from GitHub Releases (updater.js, D29). Clients learn about a
   // scheduled update from `server:update` and show a maintenance warning.
@@ -261,6 +262,10 @@ async function startServer(opts = {}) {
       state.emojis = [];
     }
     if (!Array.isArray(state.emojis)) state.emojis = [];
+    // Coming and going only writes seen.json, so it is newer than what the profile's own file says
+    try {
+      for (const [pid, seen] of Object.entries(readJson(SEEN_FILE))) if (Object.hasOwn(state.profiles, pid) && Number.isFinite(seen) && !(state.profiles[pid].seen >= seen)) state.profiles[pid].seen = seen;
+    } catch {}
   }
   state.format = STATE_FORMAT;
   // What message links name this server by: made once, the same at every address it has
@@ -444,6 +449,11 @@ async function startServer(opts = {}) {
     disk.write(EMOJIS_FILE, () => state.emojis, 'the emojis');
     stateChanged();
   }
+  // Only a profile's `seen` changed (someone came or went): a small file of its own, so their pictures aren't written again
+  function saveSeen() {
+    disk.write(SEEN_FILE, () => Object.fromEntries(Object.entries(state.profiles).map(([pid, p]) => [pid, p.seen])), 'the last-seen times');
+    stateChanged();
+  }
   // A state.json from before the split: keep a copy of it, then write every piece. state.json goes
   // last, and only then says it is split, so a run that is cut short starts over from the same file.
   // What the folders held before is from another state.json (one restored from a backup): it goes.
@@ -458,6 +468,7 @@ async function startServer(opts = {}) {
     for (const pid of Object.keys(state.profiles)) saveProfile(pid);
     for (const cid of Object.keys(state.messages)) saveMessages(cid);
     saveEmojis();
+    saveSeen();
     disk.flushSync({ strict: true });
     save();
     disk.flushSync({ strict: true });
@@ -628,6 +639,40 @@ async function startServer(opts = {}) {
   }
   // `seen`: when the profile was last online (the member list's "Offline" section)
   const storedProfile = (p, seen = Date.now()) => ({ name: p.name, color: p.color, avatar: p.avatar, banner: p.banner, status: p.status, card: p.card, seen });
+  // The same but for `seen`: nothing anyone else needs to be sent again
+  const sameProfile = (a, b) => a.name === b.name && a.color === b.color && a.avatar === b.avatar && a.banner === b.banner && a.status === b.status && a.card?.s === b.card?.s && a.card?.d === b.card?.d && a.card?.sig === b.card?.sig;
+
+  // ---------- pictures by reference (D57) ----------
+
+  // Avatars, profile backgrounds and emojis are data URLs in `state`. Apps that say `proto: 2` in
+  // hello are sent a reference instead, '/media/<SHA-256 of the data URL>', and fetch the picture
+  // from GET /media/<hash> once: socket events stay small however often they repeat. Apps from
+  // before that are sent the data URLs, as ever.
+  const MEDIA_IMAGE = /^data:(image\/(?:png|jpe?g|gif|webp));base64,/;
+  const mediaRefs = new Map(); // data URL -> its hash
+  const mediaByHash = new Map(); // hash -> data URL
+  // What to send in place of `v`: a reference when it is a picture this server stores, else `v` as it is (an emoji, a GIPHY address, a color)
+  function refOf(v) {
+    if (typeof v !== 'string' || !MEDIA_IMAGE.test(v)) return v;
+    let hash = mediaRefs.get(v);
+    if (!hash) {
+      hash = crypto.createHash('sha256').update(v).digest('hex');
+      mediaRefs.set(v, hash);
+      mediaByHash.set(hash, v);
+    }
+    return '/media/' + hash;
+  }
+  const leanProfile = (p) => ({ ...p, avatar: refOf(p.avatar), banner: refOf(p.banner) });
+  const leanEmoji = (e) => ({ ...e, url: refOf(e.url) });
+  // Pictures nobody has any more (a replaced avatar, a removed emoji, someone who left) stop being served
+  function sweepMedia() {
+    const live = new Set();
+    for (const p of Object.values(state.profiles)) live.add(p.avatar).add(p.banner);
+    for (const e of state.emojis) live.add(e.url);
+    for (const [v, hash] of mediaRefs) if (!live.has(v)) (mediaRefs.delete(v), mediaByHash.delete(hash));
+  }
+  const mediaSweepTimer = setInterval(sweepMedia, 10 * 60e3);
+  mediaSweepTimer.unref();
 
   // The messages of a text channel; null if there's no such channel
   function thread(cid) {
@@ -936,6 +981,22 @@ async function startServer(opts = {}) {
     res.sendFile(f.id, { root: FILES_DIR }, (err) => err && !res.headersSent && res.sendStatus(404));
   });
 
+  // A picture by reference (D57). Like a file's, the address is the capability: the hash of a
+  // picture can only be worked out by someone who has it. Only png, jpeg, gif and webp get in.
+  app.get('/media/:hash', (req, res) => {
+    const v = mediaByHash.get(req.params.hash);
+    const m = v && MEDIA_IMAGE.exec(v);
+    if (!m) return res.sendStatus(404);
+    res.set({
+      'Access-Control-Allow-Origin': '*',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, max-age=31536000, immutable', // the address names the content
+    });
+    res.type(m[1] === 'image/jpg' ? 'image/jpeg' : m[1]).send(Buffer.from(v.slice(m[0].length), 'base64'));
+  });
+
   async function createServer() {
     if (!USE_HTTPS) return http.createServer(app);
     const keyFile = path.join(DATA_DIR, 'key.pem');
@@ -1037,12 +1098,14 @@ async function startServer(opts = {}) {
 
   // Everyone online. `g`: the perms of whoever this is for; a voice channel they can't see is left out.
   // A force-muted person is muted whatever they send, unless they may lift it themselves.
-  function userList(g) {
+  // `lean`: for apps that take pictures by reference (D57).
+  function userList(g, lean) {
     return [...users.entries()].map(([sid, { profile: { banner, ...profile }, ...u }]) => {
       const forceMuted = state.forceMuted.includes(profile.id);
       return {
         sid,
         ...profile, // minus the banner: this is re-sent on every mute toggle; clients get banners from `profiles`
+        ...(lean ? { avatar: refOf(profile.avatar) } : null),
         voice: !g || !u.voice || g.channels[u.voice]?.view ? u.voice : null,
         muted: u.muted || (forceMuted && !permsOf(profile.id).forceMute),
         forceMuted,
@@ -1060,15 +1123,15 @@ async function startServer(opts = {}) {
   // The channels `g` can see; they carry their permission overrides
   const channelsFor = (g) => state.channels.filter((c) => g.channels[c.id]);
 
-  function publicState(g) {
+  function publicState(g, lean) {
     return {
       id: state.id,
       name: state.name,
       icon: state.icon,
       audioQuality: audioQuality(),
       channels: channelsFor(g),
-      emojis: state.emojis,
-      profiles: state.profiles,
+      emojis: lean ? state.emojis.map(leanEmoji) : state.emojis,
+      profiles: lean ? Object.fromEntries(Object.entries(state.profiles).map(([pid, p]) => [pid, leanProfile(p)])) : state.profiles,
       bans: publicBans(),
       roles: state.roles,
       memberRoles: state.memberRoles,
@@ -1169,18 +1232,31 @@ async function startServer(opts = {}) {
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
 
+    // Every socket that said hello is in one of two rooms: LEAN for apps that take pictures by
+    // reference and the small events (`proto: 2` in hello, D57), FULL for apps from before that.
+    const LEAN = 'proto:2';
+    const FULL = 'proto:1';
+    // A profile as it is now, to both kinds of app. `from`: a socket that needn't be told.
+    function emitProfile(pid, from) {
+      const p = { id: pid, ...state.profiles[pid] };
+      const out = from ? from.broadcast : io;
+      out.to(FULL).emit('profile', p);
+      out.to(LEAN).emit('profile', leanProfile(p));
+    }
+
     // `users` leaves out the voice channels a socket can't see. Sockets that see the same of the
-    // channels people are in get the same list, built and encoded once: all of them, usually.
+    // channels people are in get the same list, built and encoded once: all of them, usually
+    // (twice while apps from before D57 are around).
     const broadcastUsers = () => {
       const occupied = [...new Set([...users.values()].map((u) => u.voice).filter(Boolean))];
-      const groups = new Map(); // the occupied channels hidden from a socket -> { g, sids }
+      const groups = new Map(); // the occupied channels hidden from a socket, and its kind -> { g, lean, sids }
       for (const [sid, u] of users) {
         const g = permsOf(u.profile.id);
-        const hidden = occupied.filter((cid) => !g.channels[cid]?.view).join('|');
-        if (!groups.has(hidden)) groups.set(hidden, { g, sids: [] });
-        groups.get(hidden).sids.push(sid);
+        const key = occupied.filter((cid) => !g.channels[cid]?.view).join('|') + (u.lean ? '|lean' : '');
+        if (!groups.has(key)) groups.set(key, { g, lean: u.lean, sids: [] });
+        groups.get(key).sids.push(sid);
       }
-      for (const { g, sids } of groups.values()) io.to(sids).emit('users', userList(g));
+      for (const { g, lean, sids } of groups.values()) io.to(sids).emit('users', userList(g, lean));
       adminRef.current?.notify('users');
     };
 
@@ -1495,7 +1571,7 @@ async function startServer(opts = {}) {
         if (Object.hasOwn(state.profiles, profileId)) {
           delete state.profiles[profileId].card;
           saveProfile(profileId);
-          io.emit('profile', { id: profileId, ...state.profiles[profileId] });
+          emitProfile(profileId);
         }
         // Whoever claims the id next must not inherit roles with permissions
         if (Object.hasOwn(state.memberRoles, profileId)) {
@@ -1740,9 +1816,11 @@ async function startServer(opts = {}) {
 
       // `invite`: the token of someone joining. Apps from before invites send what was typed as `password`.
       // `uploadKey: true`: the app wants a key for its uploads (below). Apps from before that send none.
+      // `proto: 2`: the app takes pictures by reference and the small events (D57). Apps from before that send none.
       socket.on('hello', (payload, ack) => {
         if (typeof ack !== 'function') return;
-        const { profile, invite, password, proof, uploadKey: wantsKey } = isObj(payload) ? payload : {};
+        const { profile, invite, password, proof, uploadKey: wantsKey, proto } = isObj(payload) ? payload : {};
+        const lean = Number.isInteger(proto) && proto >= 2;
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) {
           console.warn(`[auth] banned ${whoIs(p)} refused`);
@@ -1804,13 +1882,25 @@ async function startServer(opts = {}) {
         // The socket id says who uploads, but every member is sent everyone's socket id. An app that asks
         // gets a secret to send along; without it, its uploads would be anyone's to make in its name.
         const uploadKey = wantsKey === true ? crypto.randomBytes(16).toString('hex') : null;
-        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey });
-        state.profiles[p.id] = storedProfile(p);
-        saveProfile(p.id);
+        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey, lean });
+        socket.leave(lean ? FULL : LEAN); // a second hello on the same socket
+        socket.join(lean ? LEAN : FULL);
+        // Back with the profile everyone already has (most connects): only `seen` moves, and nobody
+        // needs that while the person is online. The pictures already held are kept, not the copies just sent.
+        const was = Object.hasOwn(state.profiles, p.id) ? state.profiles[p.id] : null;
+        const changed = !was || !sameProfile(was, p);
+        if (changed) {
+          state.profiles[p.id] = storedProfile(p);
+          saveProfile(p.id);
+        } else {
+          Object.assign(p, { avatar: was.avatar, banner: was.banner });
+          was.seen = Date.now();
+          saveSeen();
+        }
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
-        ack({ ok: true, sid: socket.id, server: publicState(g), users: userList(g), perms: g, uploadKey: uploadKey || undefined });
-        socket.broadcast.emit('profile', { id: p.id, ...storedProfile(p) });
+        ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined });
+        if (changed) emitProfile(p.id, socket);
         broadcastUsers();
         if (joinedWith) invitesChanged();
       });
@@ -1819,10 +1909,11 @@ async function startServer(opts = {}) {
         const u = users.get(socket.id);
         const p = cleanProfile({ ...profile, id: u.profile.id });
         p.card = u.profile.card; // checked at hello; it can't change during a session
+        if (Object.hasOwn(state.profiles, p.id) && sameProfile(state.profiles[p.id], p)) return; // saved again with nothing changed
         u.profile = p;
         state.profiles[p.id] = storedProfile(p);
         saveProfile(p.id);
-        io.emit('profile', { id: p.id, ...storedProfile(p) });
+        emitProfile(p.id);
         broadcastUsers();
       });
 
@@ -2100,9 +2191,12 @@ async function startServer(opts = {}) {
         if (!name) return ack({ error: 'Name must be letters, numbers or _' });
         if (!isDataImage(url, MAX_EMOJI_BYTES)) return ack({ error: 'Image must be png/jpg/gif/webp under 256KB' });
         state.emojis = state.emojis.filter((e) => e.name !== name);
-        state.emojis.push({ name, url, by: users.get(socket.id).profile.name });
+        const emoji = { name, url, by: users.get(socket.id).profile.name };
+        state.emojis.push(emoji);
         saveEmojis();
-        io.emit('emojis', state.emojis);
+        // The one that changed, by reference; apps from before D57 get the whole set again
+        io.to(LEAN).emit('emoji:added', { emoji: leanEmoji(emoji) });
+        io.to(FULL).emit('emojis', state.emojis);
         ack({ ok: true });
       });
 
@@ -2110,7 +2204,8 @@ async function startServer(opts = {}) {
         if (!permsOf(myId()).manageEmojis) return ack(noPerm('remove emojis'));
         state.emojis = state.emojis.filter((e) => e.name !== name);
         saveEmojis();
-        io.emit('emojis', state.emojis);
+        io.to(LEAN).emit('emoji:removed', { name });
+        io.to(FULL).emit('emojis', state.emojis);
         ack({ ok: true });
       });
 
@@ -2245,8 +2340,10 @@ async function startServer(opts = {}) {
         const stored = Object.hasOwn(state.profiles, u.profile.id) && state.profiles[u.profile.id];
         if (stored) {
           stored.seen = Date.now();
-          saveProfile(u.profile.id);
-          io.emit('profile', { id: u.profile.id, ...stored });
+          saveSeen();
+          // Only `seen` changed: apps from before D57 know no event for that, and get the whole profile
+          io.to(LEAN).emit('profile:seen', { id: u.profile.id, seen: stored.seen });
+          io.to(FULL).emit('profile', { id: u.profile.id, ...stored });
         }
         broadcastUsers();
       });
@@ -2336,6 +2433,7 @@ async function startServer(opts = {}) {
     close: async () => {
       clearInterval(sweepTimer);
       clearInterval(mailSweepTimer);
+      clearInterval(mediaSweepTimer);
       updater.stop();
       admin?.close();
       unsubCrashes?.();
