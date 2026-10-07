@@ -571,6 +571,9 @@ body.stream-visible #main, body.stream-visible #game-view { display: none; }
 .stream-volume { display: flex; align-items: center; gap: 6px; color: var(--muted); }
 .stream-volume .icon { width: 20px; height: 20px; }
 .stream-volume input { width: 100px; }
+.stream-volume button { display: grid; color: inherit; border-radius: 4px; }
+.stream-volume button:hover { color: #fff; }
+.stream-volume.muted input { opacity: .5; }
 .live-badge { background: var(--red); color: var(--on-red); font-size: calc(10px * var(--font-scale)); font-weight: 800; letter-spacing: .04em; padding: 1px 5px; border-radius: 4px; margin-left: 6px; flex: none; }
 button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text-strong); }
 .icon-btn.sharing { color: var(--green); }
