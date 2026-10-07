@@ -65,6 +65,7 @@ public/                the client UI, bundled into the desktop app (no bundler; 
 desktop/main.js        Electron main: friendspeak:// protocol, cert pinning, IPC, global hotkeys
 desktop/preload.js     window.friendspeakDesktop bridge (contextIsolation, sandboxed)
 desktop/logs.js        the app's log and crash reports (D49): files in userData, scrubbed, never uploaded
+desktop/steam.js       the Steam game running on this computer (D59): from the registry or the process list, named from Steam's appmanifest files
 native/                the media sidecar (Rust, D45): captures a screen, window or camera, encodes H.264 and sends it to viewers over standard WebRTC; see ARCHITECTURE.md → Native streaming
   src/engine.rs        streams, layers (one encoder per rung of the ladder), viewers (str0m), the run loop
   src/source/          captures per OS, and a test pattern

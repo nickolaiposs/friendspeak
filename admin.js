@@ -701,6 +701,7 @@ function createAdmin(ctx) {
         sharing: !!u.sharing,
         camera: !!u.camera,
         playing: !!u.playing,
+        game: typeof u.game === 'string' ? u.game : '',
         roles: rolesOf(st, p.id),
         key: keyOf(st, p.id),
       });
