@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   // The video grid in a window of its own (opened by the page, by name): keep it above other windows, or not
   streamOnTop: (name, on) => ipcRenderer.invoke('desktop:stream-top', String(name), !!on),
 
+  // The game in a window of its own: say which server's game (its origin) right before opening it by name
+  allowGameWindow: (origin) => ipcRenderer.invoke('desktop:game-window', String(origin)),
+
   // Save a chat file (a normal link would open in the system browser)
   download: (url) => ipcRenderer.invoke('desktop:download', url),
 
@@ -45,6 +48,9 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   },
   // Hardware acceleration (D46): { hardwareAcceleration, atStart, gpu }; pass a patch to change it
   prefs: (patch) => ipcRenderer.invoke('desktop:prefs', patch),
+
+  // The Steam game running on this computer (D59): { id, name } or null. The page asks only while the setting is on.
+  steamGame: () => ipcRenderer.invoke('desktop:steam-game'),
 
   // Logs and crash reports (issue #51), kept on this computer only. write() records a line from the page
   // ({ level: debug|info|warn|error, text, stack? }, fire and forget); read() gives { lines: [{ id, ts, level,

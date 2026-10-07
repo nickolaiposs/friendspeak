@@ -46,6 +46,9 @@ services:
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
       # off = only members can pass direct messages through this server
       HTTPS: ${HTTPS:-1}
+      # 1 = believe the reverse proxy in front about who is calling (the last address in
+      # X-Forwarded-For). Only when nothing but that proxy can reach this port (D61)
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
       # and printed once in the container log on first start (docker logs friendspeak).
       ADMIN_KEY: ${ADMIN_KEY:-}
@@ -88,6 +91,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # Ceilings, so a leak or a flood ends with this container and not with the machine (D65)
+    mem_limit: ${FRIENDSPEAK_MEMORY:-1g}
+    pids_limit: 512
     stop_grace_period: 15s
     logging:
       driver: json-file
@@ -115,6 +121,15 @@ services:
       REPO_PASS: ${GHCR_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    # The socket is what it needs, and root owns that: no capability on top of it, nothing to
+    # write, and ceilings like the others (D65)
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
     logging:
       driver: json-file
       options:

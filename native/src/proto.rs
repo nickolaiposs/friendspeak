@@ -20,6 +20,17 @@ pub struct Tier {
     pub fps: f32,
 }
 
+impl Tier {
+    // The page's numbers, held to what a capture and an encoder can be asked for
+    pub fn clamped(self) -> Self {
+        Tier {
+            width: self.width.clamp(2, 7680),
+            height: self.height.clamp(2, 4320),
+            fps: if self.fps.is_finite() { self.fps.clamp(1.0, 240.0) } else { 30.0 },
+        }
+    }
+}
+
 // What to capture. `id` is Electron's desktopCapturer id for screens and
 // windows ("screen:<n>:0", "window:<n>:0"); cameras are found by `name`.
 #[derive(Clone, Debug, Default, Deserialize)]

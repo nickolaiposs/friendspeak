@@ -488,6 +488,16 @@ export const INVITE_DURATIONS = [
   [30 * 864e5, '30 days'],
 ];
 
+// A server reached over plain http: nothing on the way is encrypted. This computer itself doesn't count.
+export function isUnencrypted(address) {
+  try {
+    const u = new URL(address);
+    return u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname) && !u.hostname.endsWith('.localhost');
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeAddress(input) {
   let a = String(input || '').trim();
   if (!a) return '';

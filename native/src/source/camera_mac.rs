@@ -83,7 +83,8 @@ pub fn start(source: &Source, tier: &Tier, sinks: Sinks) -> Result<Capture, Stri
         let device = devices
             .iter()
             .find(|d| !name.is_empty() && (d.localizedName().to_string() == name || name.starts_with(&d.localizedName().to_string())))
-            .or_else(|| AVCaptureDevice::defaultDeviceWithMediaType(media))
+            // The default camera only when none was asked for: a name that matches nothing is an error
+            .or_else(|| if name.is_empty() { AVCaptureDevice::defaultDeviceWithMediaType(media) } else { None })
             .ok_or("no camera found")?;
         let input = AVCaptureDeviceInput::deviceInputWithDevice_error(&device).map_err(|e| e.localizedDescription().to_string())?;
         let session = AVCaptureSession::new();

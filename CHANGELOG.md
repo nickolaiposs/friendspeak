@@ -5,6 +5,46 @@ version (matching `version` in package.json) before merging `dev` into `prod`:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.1.9 - 2026-10-07
+
+- **No open servers.** Permissions always apply, and the first person to join
+  a new server with an invite becomes its administrator. **Updating:** on a
+  server that had no administrator, nobody in the app can moderate or manage
+  it until the host gives someone a role with Administrator in the dashboard
+  (Roles). Members keep reading and writing, and nothing is deleted
+- Admin dashboard: `localhost` no longer opens it without a key. The server
+  prints a **Local link** at every start, which does. **Updating:** use that
+  link, or the admin key where nobody sees the server's output
+- Admin dashboard: making or revoking a key and resetting 2-step sign-in need
+  a sign-in from the last 15 minutes. The keys page shows each key's sessions
+  and can sign a key out everywhere. A code works for its own 30 seconds and
+  the 30 before
+- The Steam game someone is playing shows next to their name, on servers and
+  in DMs. Settings → Integrations → **Show the Steam game I'm playing** turns
+  it off
+- Streams: the speaker on a stream's tile mutes and unmutes it for you, and
+  the slider keeps its place
+- A server reached over plain `http://` is marked "Not encrypted", and the
+  connect dialog warns before you join one
+- App hardening: other programs can no longer run their own code as
+  friendspeak, the game's pop-out opens only for the server you are on, and a
+  screen share or camera stops when the app's page reloads or crashes
+- Server hardening: `TRUST_PROXY=1` reads people's addresses from a reverse
+  proxy, so a lockout behind one no longer hits everyone (set by the `deploy/`
+  stack; **updating:** add it to a stack installed before this). Data is
+  limited per connection, uploads and downloads per address, chat sockets open
+  only for the app, a message takes 20 different reactions and a server 200
+  channels. Removing or banning someone also disconnects their penguin
+- Docker: every service has a memory and process ceiling. friendspeak gets
+  1 GB; `FRIENDSPEAK_MEMORY` raises it. Watchtower and Caddy run read-only,
+  and the image has no setuid programs
+- Releases: every installer and the server image carry signed build
+  provenance. `SECURITY.md` says how to check a download and how to report a
+  vulnerability
+- Media sidecar: built with Rust 1.99 and str0m 0.24.1, with Control Flow
+  Guard on Windows; a camera that isn't found is an error instead of another
+  camera
+
 ## 1.1.8 - 2026-10-05
 
 - Video view: **Pop out** moves the whole view, with every screen share and

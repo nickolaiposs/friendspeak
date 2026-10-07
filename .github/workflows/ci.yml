@@ -19,10 +19,10 @@ jobs:
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
@@ -53,31 +53,46 @@ jobs:
     env:
       AWS_LC_SYS_PREBUILT_NASM: 1 # Windows: the crypto library's assembly, without installing NASM
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             native/target
-          key: media-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+          key: media-${{ runner.os }}-${{ hashFiles('native/Cargo.lock', 'native/rust-toolchain.toml') }}
+      # The compiler native/rust-toolchain.toml pins
+      - working-directory: native
+        run: rustup toolchain install
       - working-directory: native
         run: cargo build --release --locked
       - name: It runs
         working-directory: native
         run: cargo run --release --locked -- --version
+      # native/.cargo/config.toml asks for Control Flow Guard: the program must carry its table
+      - name: Control Flow Guard is on
+        if: runner.os == 'Windows'
+        working-directory: native
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
+          if (-not $dumpbin) { throw 'dumpbin not found' }
+          $line = & $dumpbin.FullName /loadconfig target\release\friendspeak-media.exe | Select-String 'Guard CF function count'
+          "$line"
+          if (-not $line -or "$line" -match '^\s*0+\s') { throw 'Control Flow Guard is not on in friendspeak-media.exe' }
 
   # A merge into prod releases package.json's version, so it must be new and have notes
   releasable:
     if: github.event_name == 'pull_request' && github.base_ref == 'prod'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
       - env:

@@ -1,12 +1,20 @@
 # Every push to `prod` releases the version in package.json (D29):
 #   1. a draft GitHub Release v<version> with the CHANGELOG.md section as notes
-#   2. desktop installers for macOS, Windows and Linux uploaded to it, with the
-#      latest*.yml files the app's updater reads. Each is built on its own OS,
-#      with the native media sidecar for that OS inside (scripts/build-media.js)
-#   3. the server image ghcr.io/<repo>:<version> (amd64 + arm64)
+#   2. desktop installers for macOS, Windows and Linux, with the latest*.yml
+#      files the app's updater reads. Each is built on its own OS, with the
+#      native media sidecar for that OS inside (scripts/build-media.js), by a
+#      job that can't write anywhere; a second job signs their provenance and
+#      uploads them to the draft
+#   3. the server image ghcr.io/<repo>:<version> (amd64 + arm64), with its
+#      provenance in the registry
 #   4. once everything built: the release is published and the image tagged
 #      :latest. Only then do apps and servers see the update.
 # A version that is already released fails step 1: bump package.json first.
+#
+# Provenance (D64): a signed statement of which commit and which run of this
+# workflow built a file. Check a download with
+#   gh attestation verify <file> --repo <repo>
+#   gh attestation verify oci://ghcr.io/<repo>:<version> --repo <repo>
 name: Release
 
 on:
@@ -21,6 +29,7 @@ concurrency:
 # Nothing by default: each job asks for what it needs. Actions are pinned to a commit (the tag is in
 # the comment), and checkout doesn't leave the token behind for the build steps that follow it:
 # what this workflow publishes is installed by every app and pulled by every auto-updating server.
+# For the same reason no job restores a cache: a cache can be written by any run on `dev`.
 permissions: {}
 
 env:
@@ -29,16 +38,18 @@ env:
 
 jobs:
   prepare:
+    # Releases come from `prod` only, also when run by hand: the other jobs all need this one
+    if: github.ref == 'refs/heads/prod'
     permissions:
       contents: write # create the draft release
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
       - id: version
@@ -58,9 +69,10 @@ jobs:
           if [ "$draft" = "true" ]; then gh release delete "v$V" --yes; fi
           gh release create "v$V" --draft --target "$GITHUB_SHA" --title "friendspeak $V" --notes-file notes.md
 
+  # Builds only: this job runs every dependency's code, so its token can read the repo and nothing else
   desktop:
     permissions:
-      contents: write # upload the installers to the draft release
+      contents: read
     needs: prepare
     strategy:
       fail-fast: true
@@ -76,72 +88,126 @@ jobs:
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       # --ignore-scripts: the installers don't include the game, so skip its build
       - run: npm ci --ignore-scripts --no-audit --no-fund
       # The native media sidecar (D45), built on the OS it is for; on macOS for both chips. Linux has none yet.
+      # The compiler native/rust-toolchain.toml pins, and on macOS its targets for both chips. Linux builds no sidecar.
+      - if: runner.os != 'Linux'
+        working-directory: native
+        run: rustup toolchain install
       - if: runner.os == 'macOS'
+        working-directory: native
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build the media sidecar
         run: node scripts/build-media.js
         env:
           AWS_LC_SYS_PREBUILT_NASM: 1 # Windows: the crypto library's assembly, without installing NASM
-      - name: Build and upload installers
-        run: npx electron-builder ${{ matrix.args }} --publish always
+      - name: Build installers
+        run: npx electron-builder ${{ matrix.args }} --publish never
         env:
-          GH_TOKEN: ${{ github.token }}
           # Unsigned (ad-hoc on macOS) until there's an Apple Developer ID (D21)
           CSC_IDENTITY_AUTO_DISCOVERY: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-${{ runner.os }}
+          # The installers, their blockmaps and the updater's latest*.yml; not the unpacked apps
+          path: |
+            release/friendspeak-*
+            release/latest*.yml
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  # Signs the installers' provenance and puts them on the draft release. No code from the repo or
+  # its dependencies runs here.
+  assets:
+    permissions:
+      contents: write # upload to the draft release
+      id-token: write # sign the provenance as this workflow
+      attestations: write # store it
+    needs: [prepare, desktop]
+    runs-on: ubuntu-latest
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: desktop-*
+          path: dist
+          merge-multiple: true
+      - id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          # The provenance travels with the release too, for checking offline (gh attestation verify --bundle)
+          cp "$BUNDLE" "friendspeak-$V.intoto.jsonl"
+          gh release upload "v$V" dist/* "friendspeak-$V.intoto.jsonl" --repo "$GITHUB_REPOSITORY"
 
   docker:
     permissions:
       contents: read
       packages: write # push to ghcr.io
+      id-token: write # sign the provenance as this workflow
+      attestations: write # store it
     needs: prepare
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ env.IMAGE }}:${{ needs.prepare.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
   publish:
     permissions:
       contents: write # publish the release
       packages: write # tag the image as latest
-    needs: [prepare, desktop, docker]
+    needs: [prepare, assets, docker]
     runs-on: ubuntu-latest
     env:
       V: ${{ needs.prepare.outputs.version }}
+      DIGEST: ${{ needs.docker.outputs.digest }}
     steps:
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
+      # By digest: exactly the image the docker job built and attested, whatever the version tag says by now
       - name: Tag the image as latest
-        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE:$V"
+        run: docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
