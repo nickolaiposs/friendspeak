@@ -1057,3 +1057,28 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - No licence file yet: that is the maintainer's choice to make, not an audit fix. `deploy/install.sh` still runs Docker's own installer from `get.docker.com` when the host has no Docker; it has no hash to pin.
 
 **Alternatives:** the SLSA GitHub generator in a reusable workflow (Level 3, but its builders don't fit three operating systems of electron-builder plus a Rust sidecar; revisit); a signing key of our own with cosign or minisign (a secret to store and rotate, and the keyless signature already names the workflow); having the app verify the attestation before installing an update (the real fix for "whoever can publish can update everyone", but it needs a Sigstore verifier in the app and a way to roll its trust root: later, with code signing, D21); keeping the caches and trusting `dev` (a poisoned cache is exactly what would not show in a review).
+
+## D65: The containers against the CIS Docker Benchmark: ceilings, and the same hardening for the sidecars · Active
+**Context:** an audit of the image and both stacks against the image and container sections of the CIS Docker Benchmark (4 and 5). The friendspeak container already passed most of it (D21: runs as `node`, read-only root, no capabilities, `no-new-privileges`, a health check). The two containers beside it did not. Watchtower, which holds the Docker socket, ran with Docker's defaults. Caddy, the only one the internet reaches in the domain stack (D53), had a writable root and no health check. No service had a memory or process ceiling, so a leak or a flood in one took the machine with it. The image still carried Debian's 11 setuid programs, and nothing looked for known vulnerabilities in it.
+
+**Decision:**
+- **Ceilings on every service** (5.10, 5.28): `mem_limit` and `pids_limit`. friendspeak gets 1 GB (`FRIENDSPEAK_MEMORY`) and 512 processes; it idles at about 80 MB and 12. Caddy 512 MB and 256, Watchtower 256 MB and 128. Past the memory ceiling the kernel ends the container and the restart policy brings it back, which D49 records as an unclean exit.
+- **Watchtower** gets what friendspeak has: `read_only`, `cap_drop: ALL`, `no-new-privileges` (5.3, 5.12, 5.25). It needs none of them to use the socket, which root owns. Checked with a real update from a local registry: the container was replaced and kept its settings.
+- **Caddy** gets `read_only` with a tmpfs `/tmp` (it writes only to its two volumes) and a health check on its admin endpoint, which listens inside the container only (5.12, 5.26).
+- **No setuid programs in the image** (4.8): the bit is removed from all of them after `apt-get upgrade`. `no-new-privileges` already made them useless under compose; this covers a plain `docker run`.
+- **`image-scan.yml`** (4.4) builds the image and fails on a high or critical vulnerability that has a fix, when the `Dockerfile` or the lockfile changes and weekly. Grype, through `anchore/scan-action` pinned to a commit (D64).
+
+**Consequences:**
+- A server that really needs more than 1 GB is restarted until `FRIENDSPEAK_MEMORY` is raised. The dashboard's crash reports show it as unclean exits.
+- For `localhost`, Caddy logs once that it couldn't install its own root certificate in the container's trust store. Nothing uses it there; a real domain doesn't take that path.
+- A failed scan on `dev` usually means "rebuild": the fix arrives through `apt-get upgrade` or a Dependabot PR.
+
+**Left as they are, on purpose:**
+- **The Docker socket in Watchtower** (5.31). It is what replaces the container (D29). A socket proxy in between wouldn't narrow it: creating a container is the call an update needs, and it is also the one that gives root. Still opt-in in the root stack, and `install.sh` says what it is before asking.
+- **Caddy runs as root** (4.1) with only `NET_BIND_SERVICE`. Another user would lose access to the certificates in the volumes of hosts already running. **`caddy:2` isn't pinned** (5.27): hosts update with `docker compose pull`, and a digest in the compose file would stop Caddy's fixes from reaching them.
+- **`restart: unless-stopped`**, not `on-failure:5` (5.14): the server exits on an uncaught error so that Docker restarts it (D49). **Ports on every interface** (5.13): it is a server for friends elsewhere.
+- **No CPU limit** (5.11): one busy container among three is not what takes a small host down, and a cap would slow the server on exactly those hosts.
+- **Secrets as environment variables.** Compose secrets would need the server to read files, and whoever can run `docker inspect` is root on the machine already.
+- **The host** (sections 1 to 3, 6, 7: user namespaces, auditing, the daemon's files) belongs to whoever runs it. `docker-bench-security` checks it.
+
+**Alternatives:** a distroless base (no shell, `apt` or setuid programs at all, but also no `apt-get upgrade` between base releases and a harder container to debug; revisit); a network of its own for Watchtower and friendspeak (only its token-checked API is on the shared one, and a container on two networks is one more thing for Watchtower to recreate correctly); scanning in `release.yml` (a release would then wait on a vulnerability found that morning, in a job that is kept free of anything it doesn't need, D64).
