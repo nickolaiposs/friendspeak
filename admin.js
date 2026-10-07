@@ -14,6 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const net = require('net');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
 
 // The session cookie. Over TLS it carries the __Secure- prefix, so nothing that reaches the browser over
 // plain HTTP can set or replace it (the path is the dashboard's own, which rules __Host- out).
@@ -26,6 +27,7 @@ const LOCAL_COOKIE_AGE = 30 * 86400; // seconds; a local session ends with the s
 const AUDIT_MAX = 5 * 1024 * 1024;
 const MAX_KEYS = 50;
 const MAX_TRACKED_IPS = 10000;
+const STATIC_PER_MINUTE = 600; // the dashboard's own files, per address: a page load is about thirty
 const FREE_FAILURES = 5;
 const PLAIN_PATH = '/admin';
 // Paths the server already answers on: ADMIN_PATH can't be one of them
@@ -48,6 +50,26 @@ function limitKey(ip) {
   return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':') + '::/64';
 }
 const peerOf = (req) => String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+
+// A route's limit: `points` requests a minute per address (limitKey above), then 429 until the minute
+// is over. For the routes that read or write files, which a flood would otherwise turn into disk work.
+// The first refusal of a minute is logged, the rest are not.
+function httpLimit({ points, addrOf, tag }) {
+  const limiter = new RateLimiterMemory({ points, duration: 60 });
+  return (req, res, next) => {
+    const ip = addrOf(req);
+    // Kept on the request and read back: that is the shape CodeQL knows a limiter by (D66)
+    req.limitKey = limitKey(ip);
+    limiter.consume(req.limitKey).then(
+      () => next(),
+      (over) => {
+        if (over instanceof Error) return next(over);
+        if (over.consumedPoints === points + 1) console.warn(`${tag} too many requests from ${ip}: refused for ${Math.ceil(over.msBeforeNext / 1000)} s`);
+        res.set('Retry-After', String(Math.ceil(over.msBeforeNext / 1000))).status(429).json({ error: 'Too many requests, slow down' });
+      },
+    );
+  };
+}
 const hostnameOf = (host) => {
   host = String(host || '').toLowerCase();
   return host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
@@ -1025,8 +1047,9 @@ function createAdmin(ctx) {
   });
 
   // The dashboard's files; util.js is shared with the desktop client
-  app.get(BASE + '/js/util.js', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
-  app.use(BASE, express.static(UI_DIR, { index: 'index.html', redirect: false }));
+  const staticLimit = httpLimit({ points: STATIC_PER_MINUTE, addrOf, tag: '[admin]' });
+  app.get(BASE + '/js/util.js', staticLimit, (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
+  app.use(BASE, staticLimit, express.static(UI_DIR, { index: 'index.html', redirect: false }));
 
   return {
     path: BASE,
@@ -1046,4 +1069,4 @@ function createAdmin(ctx) {
   };
 }
 
-module.exports = { createAdmin };
+module.exports = { createAdmin, httpLimit };

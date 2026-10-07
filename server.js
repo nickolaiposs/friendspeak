@@ -17,7 +17,7 @@ const { createUpdater } = require('./updater');
 const logbuffer = require('./logbuffer');
 const { createCrashLog } = require('./crashlog');
 const { createPersist } = require('./persist');
-const { createAdmin } = require('./admin');
+const { createAdmin, httpLimit } = require('./admin');
 
 const VERSION = require('./package.json').version;
 
@@ -910,12 +910,17 @@ async function startServer(opts = {}) {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     });
   app.options('/api/files', (_req, res) => cors(res).sendStatus(204));
+  // Per address and minute. Behind a proxy without TRUST_PROXY every member shares one address (D61), so
+  // these are well above what a group needs: they stop a flood, not a busy evening.
+  const reqAddr = (req) => addressOf(req.headers, req.socket.remoteAddress);
+  const uploadLimit = httpLimit({ points: 120, addrOf: reqAddr, tag: '[files]' });
+  const downloadLimit = httpLimit({ points: 3000, addrOf: reqAddr, tag: '[files]' });
 
   // Upload one file: raw body, name in x-file-name (URI-encoded), uploader
   // identified by x-friendspeak-sid (a socket that passed `hello`) and, when
   // that socket asked for one, the upload key from its hello in x-friendspeak-upload.
-  app.post('/api/files', (req, res) => {
-    cors(res);
+  // The CORS headers come first, so the app can read a refusal by the limit too
+  app.post('/api/files', (_req, res, next) => (cors(res), next()), uploadLimit, (req, res) => {
     const u = users.get(String(req.get('x-friendspeak-sid') || ''));
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
     if (u.uploadKey) {
@@ -1001,7 +1006,7 @@ async function startServer(opts = {}) {
     pipeline(req, fs.createWriteStream(tmp, { mode: 0o600 }), finish);
   });
 
-  app.get('/files/:id/:name', (req, res) => {
+  app.get('/files/:id/:name', downloadLimit, (req, res) => {
     const f = fileById(req.params.id);
     if (!f || !f.messageId) return res.sendStatus(404);
     const inline = !('download' in req.query) && INLINE_TYPES.test(f.type);

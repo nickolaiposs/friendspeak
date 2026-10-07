@@ -8,7 +8,9 @@ const root = path.join(__dirname, '..');
 const version = (process.argv[2] || require(path.join(root, 'package.json')).version).replace(/^v/, '');
 const lines = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8').split('\n');
 const heading = (l) => /^## /.test(l);
-const start = lines.findIndex((l) => heading(l) && new RegExp(`^## \\[?v?${version.replace(/\./g, '\\.')}\\]?(\\s|$)`).test(l));
+// The version a heading names: "## 1.2.3 - date", "## [1.2.3]", "## v1.2.3". Compared as text, so nothing in the argument is a pattern.
+const versionOf = (l) => /^## \[?v?([^\]\s]+)\]?(\s|$)/.exec(l)?.[1];
+const start = lines.findIndex((l) => versionOf(l) === version);
 if (start < 0) {
   console.error(`CHANGELOG.md has no "## ${version}" section. Add one before releasing.`);
   process.exit(1);
