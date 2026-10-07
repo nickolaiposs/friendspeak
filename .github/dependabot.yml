@@ -1,0 +1,44 @@
+# Weekly PRs into `dev` (the default branch) for what the builds pin (D64): actions and the base
+# image by digest, the Rust toolchain by version, npm and cargo packages by lockfile. One PR per
+# group, and ci.yml runs on each. Security fixes come on their own, when GitHub knows of one.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        update-types: [minor, patch]
+    ignore:
+      # Major versions are a decision each (the game is built against Phaser 3.80 and webpack 5;
+      # see the overrides in package.json), not a weekly PR
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+      - dependency-name: phaser
+
+  - package-ecosystem: cargo
+    directory: /native
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: rust-toolchain
+    directory: /native
+    schedule:
+      interval: monthly
