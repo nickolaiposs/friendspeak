@@ -524,7 +524,7 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 
 **Alternatives:** the profile id becoming the key hash (rejected in D32 for the same reasons: it renames every profile and breaks history, bans and roles); a server-issued nonce event before `hello` (an extra round trip and a new event old servers don't send, where the socket id already is a fresh server-chosen value); keys on the server (accounts, against D3); refusing every unsigned `hello` (locks out old apps on profiles nobody can take from them anyway); trusting `X-Forwarded-Host` (a relaying server would set it to its own name); letting a removal drop the pin (anyone in the app could then take over a member's profile).
 
-## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active
+## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active (open servers removed by D63: the first to join is the admin)
 **Context:** issue #2. Anyone who knew the address (and password) could do everything: channels, emojis, the server's name and icon, files, removals and bans (D3, D27). Roles were labels set in the dashboard (D34). Since D42 a profile id with a pinned key can't be copied, so permissions can finally hang on a profile.
 **Decision:**
 - **Permissions:** `admin` (everything, ignores every other setting), `view`, `send` (message in text channels, join voice channels), `mentionRoles`, `mentionEveryone`, `kick` (remove from the server), `voiceKick`, `ban` (and unban), `forceMute`, `manageRoles`, `manageChannels`, `manageEmojis`, `manageFiles` (other people's files; your own you can always delete), `manageMessages` (delete other people's messages; your own you can always delete). The server's name, icon, voice quality and game switch, and the default permissions, are admin only.
@@ -1013,3 +1013,24 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - `nosniff` is on the dashboard, uploads and media, not on the game's files or `/api/info`.
 
 **Alternatives:** asking for the key or a code again in a dialog instead of a fresh sign-in (more to build and the same proof); no time limit but a code on every key change (a key without 2-step has none); only the current step for codes (the strict reading of the 30 s rule, and a code typed at second 29 fails); believing `X-Forwarded-Proto` only with `TRUST_PROXY` (locks out every host behind their own proxy until they set it, for a header that only the key's owner can forge); a list of allowed origins in the environment (nobody has another client).
+
+## D63: No open servers: the first to join is the administrator · Active
+**Context:** a security review by the OWASP testing guide. D43 left a server open until someone held a role with `admin`: every member could ban and remove the others, delete channels with their history and files, and change the server's name and settings. That was the state of every new server, for as long as the host didn't open the dashboard, and nothing said so. D43 turned down "the first person to connect is admin" as a race. Since D51 joining takes an invite, and the first one is printed only where the host can read it.
+
+**Decision:**
+- **Permissions always apply.** `permissionsOn` is gone from the saved state. `permsOf()` has no open case: without a role, a member gets the defaults (`view`, `send` and the two mention keys, unless the host changed them).
+- **The first to join is the administrator.** When someone joins with an invite, and the server has no members and nobody is an administrator, they are given the highest role that carries `admin`. When there is no such role, one named `Admin` is made, first in the list. It is an ordinary role: it can be renamed, given to others and taken away.
+- **Only with an invite.** On a server with invites switched off, the first to connect gets nothing: an address alone must not be enough to take a server.
+- **Servers from before this are not given an administrator.** One that was open and has members keeps them, with the defaults. The server says at every start that nobody is an administrator, and the dashboard's Roles view says so too, until the host gives someone a role with Administrator.
+- **The app can manage roles from the start**, by `manageRoles` as on any server: the rule that roles were set up in the dashboard until someone was an admin went with the open mode.
+- **Version skew (D29):** `perms.open` is still sent, always `false`, and `permissionsOn` always `true`, so older apps see a server with permissions on. The app still reads both, for servers from before this.
+- **D62's icon rule is the general one now.** Only an administrator or the dashboard changes the server's settings, so the separate check that kept a member of an open server from setting a link as the icon is gone.
+- **With it:** the server no longer says it is Express (`X-Powered-By`), every answer carries `X-Content-Type-Options: nosniff`, and an upload that stops sending for 30 seconds is dropped, so the space it reserved comes back.
+
+**Consequences:**
+- On a server that was open, members lose what only the open mode gave them: channels, emojis, other people's files and messages, bans, removals and the server's settings, until someone has a role that allows it. Nothing is deleted, and nobody is locked out of reading or writing.
+- Whoever the host hands the first invite to is the administrator, the host or not. A host who wants someone else to be it gives them the role and takes their own away, in the app or the dashboard.
+- When everyone has left or been removed, the next person to join with an invite is the administrator again: the server is empty, as a new one is.
+- A server run with `ADMIN=off` that was open has no way to an administrator but the saved state. It needs the dashboard once.
+
+**Alternatives:** making the earliest invite join on record the administrator of a server that was open (the record starts with D51 and keeps a hundred joins: on an older server the first name in it is a friend, not the host); the next member to connect after the update (a race between friends); keeping the open mode behind a setting (the default is what the review was about, and a second mode is a second set of rules to keep right); a warning only (hosts who never open the dashboard never see it).

@@ -161,8 +161,8 @@ export default {
 
     const banner = h('div', { class: 'note', role: 'note' });
     const showBanner = () => {
-      banner.hidden = !data || data.permissionsOn;
-      banner.replaceChildren(h('strong', {}, 'Open: '), 'everyone can do everything, as before. Permissions start applying once someone holds a role with Administrator. Until then the app can’t edit roles; set them up here.');
+      banner.hidden = !data || !data.noAdmin;
+      banner.replaceChildren(h('strong', {}, 'No administrator: '), 'nobody in the app can moderate or manage this server. Give someone a role with Administrator here.');
     };
 
     const name = h('input', { id: 'newrole', maxlength: 32, required: true, autocomplete: 'off' });
