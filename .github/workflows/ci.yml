@@ -62,7 +62,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/target
-          key: media-${{ runner.os }}-${{ hashFiles('native/Cargo.lock') }}
+          key: media-${{ runner.os }}-${{ hashFiles('native/Cargo.lock', 'native/rust-toolchain.toml') }}
+      # The compiler native/rust-toolchain.toml pins
+      - working-directory: native
+        run: rustup toolchain install
       - working-directory: native
         run: cargo build --release --locked
       - name: It runs
