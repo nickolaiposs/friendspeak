@@ -135,13 +135,12 @@ async function startServer(opts = {}) {
   const MAX_CHANNEL_NAME = 48; // room for emojis, incl. :custom: ones
   const MAX_CHANNELS = 200;
   const MAX_REACTIONS = 20; // different reactions on one message
-  // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). Until someone holds
-  // an Administrator role the server is in "open mode" and everyone can do everything.
+  // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). They always apply: the first
+  // person to join a new server becomes its administrator (D63).
   const PERM_KEYS = ['admin', 'view', 'send', 'mentionRoles', 'mentionEveryone', 'kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages', 'createInvites'];
   const CHANNEL_PERM_KEYS = ['view', 'send', 'manage'];
   // createInvites is off unless a role or the defaults turn it on (D51)
   const DEFAULT_PERMS = Object.fromEntries(PERM_KEYS.map((k) => [k, ['view', 'send', 'mentionRoles', 'mentionEveryone'].includes(k)]));
-  const OPEN_ROLES_ERROR = 'Roles are set up in the admin dashboard until someone on this server is an admin';
   // Invites (D51): the tokens people join with
   const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O or U
   const INVITE_CHARS = 16; // 80 random bits
@@ -211,7 +210,6 @@ async function startServer(opts = {}) {
       roles: [], // { id, name, color, perms, grantable }, first = highest; managed in the dashboard and, with permissions, in the app (D34, D43)
       defaultPerms: { ...DEFAULT_PERMS }, // what everybody gets unless a role they hold says otherwise
       defaultGrantable: [], // role ids everyone may hand out when defaultPerms.manageRoles is on
-      permissionsOn: false, // false = open mode (everyone can do everything); sticky once someone holds an Administrator role
       forceMuted: [], // profile ids a moderator force-muted
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
@@ -317,7 +315,7 @@ async function startServer(opts = {}) {
     state.memberRoles = memberRoles;
     state.defaultPerms = { ...DEFAULT_PERMS, ...cleanPermMap(state.defaultPerms) };
     state.defaultGrantable = cleanIdList(state.defaultGrantable, known);
-    state.permissionsOn = state.permissionsOn === true;
+    delete state.permissionsOn; // from before D63: whether permissions applied yet. They always do now.
     state.forceMuted = [...new Set((Array.isArray(state.forceMuted) ? state.forceMuted : []).filter((x) => typeof x === 'string' && x && x.length <= 64))];
     for (const ch of Array.isArray(state.channels) ? state.channels : []) {
       const ov = cleanOverrides(ch.overrides, known);
@@ -505,8 +503,7 @@ async function startServer(opts = {}) {
   const isGiphy = (v) => typeof v === 'string' && v.length <= 1000 && /^https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$/.test(v);
   // An uploaded image (data URL) or a GIF picked from GIPHY: what a member's profile may point at
   const isImageRef = (v, max) => isDataImage(v, max) || isGiphy(v);
-  // The server's own icon may be any https image, when an administrator or the dashboard sets it:
-  // the host chooses it. From anyone else (an open server, D43) it is held to the profile rule above.
+  // The server's own icon may be any https image: only an administrator or the dashboard sets it (D62, D63)
   const isIconRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
   // A message's text: no NUL (the app's renderer uses it as a marker), trimmed, capped
@@ -568,14 +565,17 @@ async function startServer(opts = {}) {
     return state.roles.filter((r) => holdsRole(pid, r.id) && (pinned || isAesthetic(r)));
   };
   const holdsAdminRole = (pid) => heldRoles(pid).some((r) => r.perms.admin === true);
-  const isAdminPid = (pid) => state.permissionsOn && (!!state.defaultPerms.admin || holdsAdminRole(pid));
+  const isAdminPid = (pid) => !!state.defaultPerms.admin || holdsAdminRole(pid);
+  // Whether anybody is an administrator. With nobody, only the dashboard can manage the server.
+  const hasAdmin = () => !!state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole);
 
   // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
+  // (`open` is always false: apps from before D63 read it).
   // (only channels it can see). Open mode: everything but role management and invites (those are the dashboard's until someone is an admin).
   // The answer is kept per profile until permsStale(), and every caller gets the same frozen object:
   // the fan-out loops ask once per socket for every message (#105).
   const permsCache = new Map(); // profileId -> permsOf(profileId)
-  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, permissionsOn, the channels and their overrides, the pins
+  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, the channels and their overrides, the pins
   const permsStale = () => permsCache.clear();
   function permsOf(pid) {
     let g = permsCache.get(pid);
@@ -589,27 +589,24 @@ async function startServer(opts = {}) {
     return g;
   }
   function resolvePerms(pid) {
-    const open = !state.permissionsOn;
-    const held = open ? [] : heldRoles(pid);
-    const admin = !open && (!!state.defaultPerms.admin || held.some((r) => r.perms.admin === true));
-    const g = { open, admin };
+    const held = heldRoles(pid);
+    const admin = !!state.defaultPerms.admin || held.some((r) => r.perms.admin === true);
+    const g = { open: false, admin };
     for (const k of PERM_KEYS) {
       if (k === 'admin') continue;
-      if (open) g[k] = k !== 'manageRoles' && k !== 'createInvites';
-      else if (admin) g[k] = true;
+      if (admin) g[k] = true;
       else {
         const r = held.find((x) => typeof x.perms[k] === 'boolean');
         g[k] = r ? r.perms[k] : !!state.defaultPerms[k];
       }
     }
-    if (open) g.grantable = [];
-    else if (admin) g.grantable = state.roles.map((r) => r.id);
+    if (admin) g.grantable = state.roles.map((r) => r.id);
     else if (!g.manageRoles) g.grantable = [];
     else g.grantable = [...new Set([...(state.defaultPerms.manageRoles ? state.defaultGrantable : []), ...held.flatMap((r) => r.grantable)])];
     g.channels = {};
     for (const ch of state.channels) {
       let c = { view: true, send: true, manage: true };
-      if (!open && !admin) {
+      if (!admin) {
         const pick = (k, base) => {
           const ov = ch.overrides;
           if (!ov) return base;
@@ -895,6 +892,9 @@ async function startServer(opts = {}) {
   // ---------- http ----------
 
   const app = express();
+  app.disable('x-powered-by');
+  // Nothing this server sends is to be read as another type than it says
+  app.use((_req, res, next) => (res.set('X-Content-Type-Options', 'nosniff'), next()));
   // The server hosts no chat UI: the client ships only in the desktop app (D26).
   // The admin dashboard is the one exception (D34), at a path of its own (D52).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
@@ -954,12 +954,15 @@ async function startServer(opts = {}) {
     const fid = crypto.randomBytes(16).toString('hex'); // unguessable: the URL is the capability
     const tmp = filePath(fid) + '.part';
     reserved += size;
+    // The space is held while the upload runs: one that stops sending gives it back
+    req.setTimeout(30e3, () => req.destroy(new Error('Upload stalled')));
     let got = 0;
     let finished = false;
     const finish = (err) => {
       if (finished) return;
       finished = true;
       reserved -= size;
+      req.setTimeout(0);
       if (!err && got !== size) err = new Error('Upload was cut short');
       if (!err) {
         try {
@@ -1171,7 +1174,7 @@ async function startServer(opts = {}) {
       memberRoles: state.memberRoles,
       defaultPerms: state.defaultPerms,
       defaultGrantable: state.defaultGrantable,
-      permissionsOn: state.permissionsOn,
+      permissionsOn: true, // always, since D63: apps from before it read this
       forceMuted: state.forceMuted,
       inviteOnly: state.inviteOnly,
       storage: usage(),
@@ -1295,7 +1298,7 @@ async function startServer(opts = {}) {
     // This socket's connection belongs to a member from here on
     const admit = (socket) => socket.conn.fsAdmit?.();
 
-    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: state.permissionsOn });
+    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: true });
     // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
     const cleanRoleName = (v) => {
       const n = typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
@@ -1318,6 +1321,23 @@ async function startServer(opts = {}) {
     }
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
+
+    // The first person to join a server is its administrator (D63): they are given the highest role
+    // that carries `admin`, made here when there is none. false when it can't be made.
+    function makeFirstAdmin(pid) {
+      let role = state.roles.find((r) => r.perms.admin === true);
+      if (!role) {
+        if (state.roles.length >= MAX_ROLES) return false;
+        let name = 'Admin';
+        for (let i = 2; roleNamed(name); i++) name = 'Admin ' + i;
+        role = { id: id(), name, color: '#e5484d', perms: { admin: true }, grantable: [] };
+        state.roles.unshift(role);
+      }
+      state.memberRoles[pid] = [role.id];
+      permsStale();
+      save();
+      return true;
+    }
 
     // Every socket that said hello is in one of two rooms: LEAN for apps that take pictures by
     // reference and the small events (`proto: 2` in hello, D58), FULL for apps from before that.
@@ -1355,11 +1375,9 @@ async function startServer(opts = {}) {
     };
 
     // Something changed who can do or see what (roles, role holders, default or channel permissions,
-    // or the channels themselves): tell everyone, take people out of voice channels they lost, and
-    // turn permissions on the first time someone is an administrator.
+    // or the channels themselves): tell everyone, and take people out of voice channels they lost.
     function permsChanged({ roles = true } = {}) {
       permsStale();
-      if (!state.permissionsOn && (state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole))) state.permissionsOn = true;
       save();
       if (roles) io.emit('roles', rolesPayload());
       for (const [sid, u] of users) {
@@ -1626,14 +1644,9 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
-      // Name, icon, voice quality and the game: admin only (open mode: anyone, as before).
-      // inviteOnly (whether joining takes an invite): an admin or the dashboard, never open mode.
+      // Name, icon, voice quality, the game and inviteOnly (whether joining takes an invite): an admin or the dashboard
       updateServer(actor, { name, icon, game, audioQuality: quality, inviteOnly }) {
-        if (!isDash(actor)) {
-          const g = permsOf(actor.profileId);
-          if (!g.open && !g.admin) return noPerm('change the server settings');
-          if (inviteOnly !== undefined && !g.admin) return noPerm('change who can join');
-        }
+        if (!isDash(actor) && !permsOf(actor.profileId).admin) return noPerm('change the server settings');
         if (inviteOnly !== undefined && typeof inviteOnly !== 'boolean') return { error: 'inviteOnly must be true or false' };
         if (name !== undefined) {
           name = str(name, 40).trim();
@@ -1642,8 +1655,6 @@ async function startServer(opts = {}) {
         }
         if (icon !== undefined) {
           if (icon && !isIconRef(icon, MAX_ICON_BYTES)) return { error: 'Icon must be an https image link, or png/jpg/gif/webp under 512KB' };
-          // A link makes every app, and the dashboard, fetch from its host, which then knows their addresses
-          if (icon && !isDash(actor) && !permsOf(actor.profileId).admin && !isImageRef(icon, MAX_ICON_BYTES)) return { error: 'Only an administrator can set a link as the icon. Upload an image instead.' };
           state.icon = icon || '';
         }
         if (quality !== undefined) {
@@ -1742,11 +1753,8 @@ async function startServer(opts = {}) {
 
       // --- roles and permissions ---
 
-      // The app can only touch roles once someone is an administrator (until then they are set up in
-      // the dashboard); after that it takes manageRoles. null when allowed.
+      // Touching roles takes manageRoles (the dashboard may always). null when allowed.
       roleGate(actor) {
-        if (isDash(actor)) return null;
-        if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
         return need(actor, 'manageRoles', 'manage roles');
       },
 
@@ -1881,10 +1889,7 @@ async function startServer(opts = {}) {
 
       // What everybody gets (admin only): perms is a partial key -> bool, grantable replaces the list
       setDefaultPerms(actor, { perms, grantable } = {}) {
-        if (!isDash(actor)) {
-          if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
-          if (!permsOf(actor.profileId).admin) return noPerm('change the default permissions');
-        }
+        if (!isDash(actor) && !permsOf(actor.profileId).admin) return noPerm('change the default permissions');
         const next = { ...state.defaultPerms };
         if (perms !== undefined) {
           if (!isObj(perms)) return { error: 'Permissions must be an object' };
@@ -2004,6 +2009,9 @@ async function startServer(opts = {}) {
         // needs that while the person is online. The pictures already held are kept, not the copies just sent.
         const was = Object.hasOwn(state.profiles, p.id) ? state.profiles[p.id] : null;
         const changed = !was || !sameProfile(was, p);
+        // Nobody is on the server yet and nobody is its administrator: whoever the host gave the first
+        // invite to is (D63). Only with an invite: an address alone must not be enough to take a server.
+        const first = !!joinedWith && !Object.keys(state.profiles).length && !hasAdmin();
         if (changed) {
           state.profiles[p.id] = storedProfile(p);
           saveProfile(p.id);
@@ -2012,6 +2020,7 @@ async function startServer(opts = {}) {
           was.seen = Date.now();
           saveSeen();
         }
+        if (first && makeFirstAdmin(p.id)) console.log(`[auth] ${whoIs(p)} is the first to join and is now the administrator`);
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
         ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined });
@@ -2167,7 +2176,7 @@ async function startServer(opts = {}) {
         toViewers(channelId, 'typing', { channelId, sid: socket.id, name: users.get(socket.id).profile.name }, socket.id);
       });
 
-      // --- bans, removing members, server settings: by permission (open mode: anyone, D3, D27, D43) ---
+      // --- bans, removing members, server settings: by permission (D43) ---
 
       on('ban:add', ({ profileId, ip }, ack) => {
         ack(actions.ban({ profileId: myId() }, { profileId, ip, by: users.get(socket.id).profile.name, selfIp: clientIp(socket) }));
@@ -2513,6 +2522,7 @@ async function startServer(opts = {}) {
         lastIp,
         addressOf,
         actions,
+        hasAdmin,
         usage,
         gameInfo,
         audioQuality,
@@ -2542,6 +2552,8 @@ async function startServer(opts = {}) {
   });
   updater.start();
   const port = server.address().port;
+  // The first to join is the administrator (D63). A server from before that with members and no administrator has to be given one.
+  if (Object.keys(state.profiles).length && !hasAdmin()) console.warn('[server] nobody on this server is an administrator, so nobody in the app can moderate or manage it: give someone a role with Administrator in the admin dashboard (Roles)');
   console.log(`[server] version ${VERSION} listening on port ${port}`);
   return {
     port,
