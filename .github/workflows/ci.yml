@@ -71,6 +71,18 @@ jobs:
       - name: It runs
         working-directory: native
         run: cargo run --release --locked -- --version
+      # native/.cargo/config.toml asks for Control Flow Guard: the program must carry its table
+      - name: Control Flow Guard is on
+        if: runner.os == 'Windows'
+        working-directory: native
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -Last 1
+          if (-not $dumpbin) { throw 'dumpbin not found' }
+          $line = & $dumpbin.FullName /loadconfig target\release\friendspeak-media.exe | Select-String 'Guard CF function count'
+          "$line"
+          if (-not $line -or "$line" -match '^\s*0+\s') { throw 'Control Flow Guard is not on in friendspeak-media.exe' }
 
   # A merge into prod releases package.json's version, so it must be new and have notes
   releasable:

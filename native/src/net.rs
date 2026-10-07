@@ -3,13 +3,18 @@
 // our public address (the server-reflexive candidate). Everything else on the
 // wire is str0m's.
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::engine::Msg;
 use crate::proto::Kind;
+
+// Packets read and not yet handled by the engine. Past the limit the readers drop what arrives, as a
+// full socket buffer would, so a flood can't grow the engine's queue without bound.
+pub static QUEUED: AtomicUsize = AtomicUsize::new(0);
+const QUEUE_LIMIT: usize = 4096;
 
 pub struct Sockets {
     pub list: Vec<(SocketAddr, Arc<UdpSocket>)>,
@@ -61,6 +66,10 @@ pub fn open(kind: Kind, viewer: &str, loopback: bool, tx: &Sender<Msg>) -> std::
             while !stop.load(Ordering::Relaxed) {
                 match rd.recv_from(&mut buf) {
                     Ok((n, src)) => {
+                        if QUEUED.load(Ordering::Relaxed) > QUEUE_LIMIT {
+                            continue;
+                        }
+                        QUEUED.fetch_add(1, Ordering::Relaxed);
                         let msg = Msg::Packet { kind, viewer: viewer.clone(), local, src, data: buf[..n].to_vec(), at: Instant::now() };
                         if tx.send(msg).is_err() {
                             return;
