@@ -2,5 +2,5 @@
 # source gives the same program whatever a build machine came with. rustup installs it on the
 # first build. Dependabot opens a PR for a newer one (.github/dependabot.yml).
 [toolchain]
-channel = "1.97.1"
+channel = "1.99.0"
 profile = "minimal"
