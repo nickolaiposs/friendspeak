@@ -903,3 +903,20 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** moving the pictures to files on disk and keeping only references in `state` (old apps would need them read back for every `hello`; the profile files are already off the event loop, D57); the app fetching each reference and turning it back into a data URL (nothing else in the app changes, but every picture is held in memory twice and drawn late); a capability list instead of one number (nothing needs two yet).
 
+## D59: The Steam game someone is playing is read on their computer · Active
+**Context:** people wanted to see what a friend is playing next to their name, the way the member list says who is in voice. Steam's own answer is its web API, which needs an API key, the person's Steam id and a public Steam profile: an account, where friendspeak has none.
+
+**Decision:**
+- **The desktop app works it out locally** (`desktop/steam.js`): the running app's id from the registry on Windows, from Steam's `reaper SteamLaunch AppId=<id>` process on Linux, and from a process inside a library's `steamapps/common/` on macOS; the name from the game's `appmanifest` file. No Steam sign-in and no request to Steam.
+- **It is on by default**, with a switch under Settings → Integrations (`steamPlaying`). Off, the app doesn't look, and tells its servers and DM peers "nothing" at once.
+- **Servers get it as `activity { game }`** and pass it on in `users` as `game`, held in memory only. **DM peers get it in `hello`**, over the sealed link, and keep it only while that link is up.
+- **Nothing checks the name.** It is what the person's app says, like a status: cut to 64 characters and shown as text.
+
+**Consequences:**
+- Only Steam games that are installed on this computer are named. A shortcut to a program from elsewhere has no manifest and is not shown, nor is a game streamed from another machine.
+- A change shows within 15 seconds: the app asks that often (one `ps` or `reg query`).
+- The server's host and everyone on a server see the name, and so does anyone the person has an open DM link with. It is not written to the server's log or its saved state; the dashboard's user list shows it.
+- A server from before this ignores `activity`, an app from before this ignores `game`: no version check.
+- The macOS and Linux ways were tried on a Mac with stand-in processes; the Windows registry read has not been run on Windows.
+
+**Alternatives:** the Steam web API (an account and a key per person); naming any focused program, as other chat apps do (a list of every game's program names to keep up, and it tells friends about programs that aren't games); writing it into the profile's status (it would be saved, sent to mailboxes and left behind after the game ends).
