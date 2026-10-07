@@ -71,4 +71,4 @@ windows = { version = "0.62", features = [
 ] }
 # The implement macro (a COM callback in audio_win) expands to paths in `windows_core`, so it must be a direct dependency;
 # the same version `windows` already uses
-windows-core = "0.62"
+windows-core = "0.100"
