@@ -15,6 +15,7 @@ const tls = require('tls');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const { createLogs, originOf } = require('./logs');
+const { steamGame } = require('./steam');
 
 const APP = 'friendspeak://app'; // the origin of the app's own page
 const isApp = (url) => typeof url === 'string' && (url === APP || url.startsWith(APP + '/'));
@@ -691,6 +692,8 @@ handle('desktop:prefs', async (_e, patch) => {
   }
   return { ...prefs, atStart: HW_AT_START, gpu: app.getGPUFeatureStatus() };
 });
+// The Steam game running on this computer, for the "playing" line (D59): { id, name } or null
+handle('desktop:steam-game', () => steamGame());
 // Logs and crash reports
 listen('desktop:log', (_e, msg) => logs.fromRenderer(msg));
 handle('desktop:logs-read', (_e, o) => logs.read({ limit: o?.limit, before: o?.before }));

@@ -103,7 +103,9 @@ function chatById(id) {
 }
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
 // What of a `users` entry a member row shows, and a row in the channel list (voice, game)
-const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing'];
+const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing', 'game'];
+// The Steam game someone is playing (D59), as the member list and DMs word it
+const playingText = (game) => (game && typeof game === 'string' ? '🎮 ' + game : '');
 const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
 const sameUsers = (a, b, fields) => a.length === b.length && a.every((u, i) => fields.every((f) => u[f] === b[i][f]));
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
@@ -376,6 +378,23 @@ function pruneMentions(c) {
   const ids = new Set(c.server.channels.map((ch) => ch.id));
   for (const id of Object.keys(mentionUnread.all()[c.entry.id] || {})) if (!ids.has(id)) mentionUnread.clear(c.entry.id, id);
 }
+
+// ---------------------------------------------------------------- Steam: the game that is running shows next to our name (D59)
+
+// The desktop app reads it from Steam on this computer. Servers get it as `activity`, DM peers in `hello`.
+const STEAM_POLL = 15e3;
+let steamName = '';
+const sendActivity = (c) => c.connected && c.socket.emit('activity', { game: steamName });
+async function pollSteam() {
+  if (!desktop?.steamGame) return;
+  let name = settings.get().steamPlaying ? (await desktop.steamGame().catch(() => null))?.name || '' : '';
+  if (!settings.get().steamPlaying) name = ''; // turned off while we asked
+  if (name === steamName) return;
+  steamName = name;
+  for (const c of conns()) sendActivity(c);
+  DM.setGame(name);
+}
+if (desktop?.steamGame) (setInterval(pollSteam, STEAM_POLL), pollSteam());
 
 // ---------------------------------------------------------------- direct messages (peer to peer, dm.js)
 
@@ -1132,11 +1151,10 @@ function roleTag(r) {
 function profilePopover(anchor, u, align = 'right') {
   const p = fullProfile(u);
   const live = S.users.find((x) => x.id === p.id);
+  const game = playingText(live?.game || DM.gameOf(p.id)); // a DM contact may not be on the server in view
   const doing = live
-    ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ')
-    : p.seen && p.id !== me()?.id
-      ? 'Last seen ' + fmtTime(p.seen)
-      : '';
+    ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin', game].filter(Boolean).join(' · ')
+    : game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '');
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
   const roles = rolesOf(p.id);
   const pop = popover(
@@ -1318,7 +1336,7 @@ function renderRail() {
             'button',
             {
               class: 'rail-server rail-dm' + (S.channelId === 'dm:' + c.id ? ' active' : '') + (userMuted(c.id) ? ' silenced' : ''),
-              title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (userMuted(c.id) ? '\nNotifications muted' : ''),
+              title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
               onclick: () => selectChannel('dm:' + c.id),
               oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
             },
@@ -1560,6 +1578,7 @@ function openSocket(entry, rejoinVoice = null) {
     Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
+    if (steamName) sendActivity(c);
     rememberServerLook(c);
     pruneMentions(c);
     if (viewed()) showServer(c);
@@ -2101,7 +2120,7 @@ function dmSidebar() {
         'div',
         {
           class: 'channel dm' + ('dm:' + c.id === S.channelId ? ' active' : '') + (c.unread ? ' unread' : ''),
-          title: c.name + (userMuted(c.id) ? '\nNotifications muted' : ''),
+          title: c.name + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
           onclick: () => selectChannel('dm:' + c.id),
           oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
         },
@@ -2623,7 +2642,7 @@ function renderMembers() {
         h(
           'div',
           { class: 'member-status' },
-          [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ') || u.status || ''
+          [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin', playingText(u.game)].filter(Boolean).join(' · ') || u.status || ''
         ),
         roles.length
           ? h(
@@ -2794,7 +2813,7 @@ function syncComposer() {
 // Whether a DM can be delivered right now
 const dmStatus = (peerId) =>
   DM.connected(peerId)
-    ? 'connected'
+    ? ['connected', playingText(DM.gameOf(peerId))].filter(Boolean).join(' · ')
     : DM.online(peerId)
       ? 'connecting…'
       : DM.canMail(peerId)
@@ -6345,6 +6364,14 @@ function settingsIntegrations(body) {
       'GIF search uses GIPHY. Create a free API key at developers.giphy.com and paste it here. It is stored only on this device. If you leave it empty, the server host’s key (GIPHY_API_KEY) is used if they set one.'
     ),
     h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
+    h('h3', {}, 'Steam'),
+    h(
+      'label',
+      { class: 'check-row' + (desktop?.steamGame ? '' : ' disabled') },
+      h('input', { type: 'checkbox', checked: st.steamPlaying, disabled: !desktop?.steamGame, onchange: (e) => (settings.set({ steamPlaying: e.target.checked }), pollSteam()) }),
+      h('span', {}, 'Show the Steam game I’m playing'),
+      h('span', { class: 'muted small' }, 'While a Steam game runs on this computer, its name shows next to yours on your servers and in your DMs. It is read from Steam here: no Steam sign-in.')
+    ),
     h('h3', {}, 'Links'),
     h(
       'label',
