@@ -357,6 +357,10 @@ Examples: `0 4 * * *` is every day at 04:00. `30 3 * * 1-5` is weekdays at 03:30
 
 To update by hand instead, set `AUTO_UPDATE=notify` (or pin `FRIENDSPEAK_IMAGE` to a version), then click **Update the stack** with "Re-pull image" checked. Hosts using `npm start` can use `AUTO_UPDATE=notify` and `git pull && npm install` themselves.
 
+## Steam
+
+While a Steam game is running on your computer, the app shows its name next to yours (🎮): in the member list of your servers and to the people you have a DM open with. The app reads it from Steam on your computer: there is no Steam sign-in, and only games installed through Steam are named. Turn it off under **Settings → Integrations**.
+
 ## GIFs
 
 GIF search uses GIPHY, which requires a free API key from https://developers.giphy.com. You can supply it in either of two ways:
