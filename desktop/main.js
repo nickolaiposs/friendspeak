@@ -272,6 +272,7 @@ function createWindow() {
   // The page's process died (crash, out of memory, killed): offer to reload, but not in a loop
   const goneAt = [];
   win.webContents.on('render-process-gone', async (_e, d) => {
+    stopShares();
     if (d.reason === 'clean-exit' || quitting || !win) return;
     const w = win;
     const now = Date.now();
@@ -294,9 +295,13 @@ function createWindow() {
     else if (!reload && !NO_DIALOGS) app.quit();
   });
 
+  // A new page knows nothing of the old one's shares. The game's iframe navigates on its own: main frame only
+  win.webContents.on('did-start-navigation', (e) => e.isMainFrame && !e.isSameDocument && stopShares());
+
   win.loadURL('friendspeak://app/index.html');
   win.on('closed', () => {
     win = null;
+    stopShares();
     // The video grid's window is drawn by the app's page: without it there is nothing to show
     for (const w of streamWindows.values()) if (!w.isDestroyed()) w.destroy();
   });
@@ -518,6 +523,12 @@ async function describeSource(cmd) {
     }
   }
   return { ...cmd, source, hw: prefs.hardwareAcceleration };
+}
+
+// The page that asked for the shares is gone (reloaded, crashed, closed): nobody is left to stop them
+function stopShares() {
+  if (!media.proc) return;
+  for (const kind of MEDIA_KINDS) media.proc.stdin.write(JSON.stringify({ op: 'stop', kind }) + '\n');
 }
 
 function stopMedia() {

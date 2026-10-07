@@ -121,7 +121,7 @@ fn pick(reader: &IMFSourceReader, tier: &Tier) -> Option<u32> {
     best.map(|(_, i)| i).or(smallest.map(|(_, i)| i))
 }
 
-// Opens the camera named by `name` (the first one when empty) in its best mode, delivering NV12
+// Opens the camera named by `name` (the first one when empty, none when no camera has that name) in its best mode, delivering NV12
 fn open(name: &str, tier: &Tier) -> Result<Camera, String> {
     let all = devices()?;
     let name = name.trim();
@@ -129,7 +129,8 @@ fn open(name: &str, tier: &Tier) -> Result<Camera, String> {
     let (activate, _) = all
         .iter()
         .find(|(_, n)| !name.is_empty() && (n == name || name.starts_with(n.as_str())))
-        .or_else(|| all.first())
+        // The first camera only when none was asked for: a name that matches nothing is an error
+        .or_else(|| if name.is_empty() { all.first() } else { None })
         .cloned()
         .ok_or("no camera found")?;
     drop(all);

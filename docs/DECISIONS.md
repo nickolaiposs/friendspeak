@@ -1100,3 +1100,25 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The limits count requests, not bytes: one address can still download large files 3000 times a minute. Storage is capped (D24) and bandwidth is the host's to limit.
 
 **Alternatives:** `express-rate-limit` (a new dependency for what one already installed does); a limiter of our own like the sockets' (CodeQL can't see it, so the three findings would be dismissed by hand and a route added later would not be checked against it); one limit on every route (the game's client loads hundreds of files at once, and `/media` is fetched in bulk at connect).
+
+## D67: An audit of the media sidecar: shares end with the page, and its input is checked · Active
+**Context:** a security audit of the media sidecar (`native/`, D45) and of the main process's link to it. The sidecar takes commands from the app's page, relayed by the main process, and is built with `panic = "abort"`: any panic ends every share.
+
+**Decision:**
+- **A share ends with the page that started it** (high). The main process stopped the sidecar only when the app quit. After a reload or a crash of the page the capture went on, and the new page knew nothing of it: a screen or camera still being sent with nothing on screen saying so. The main process now sends `stop` for both kinds when the page's main frame navigates to a new document, when its process is gone, and when the window closes (`stopShares` in `desktop/main.js`). The game's iframe navigating and same-document changes don't count.
+- **A `tier` is clamped** (low): 2–7680 by 2–4320, 1–240 fps, 30 when the rate isn't a number (`Tier::clamped`, on `start` and `quality`). It came from the page unchecked, and a width of 120 or less made the test pattern divide by zero or write past its buffer's end, a panic. The test pattern's box now fits any width.
+- **A camera name that matches nothing is an error** (low), `no camera found`, on Windows and macOS. It used to open the first or the default camera: a different camera from the one picked. With no name the default is still used. The app falls back to the browser engine on that error, as on any other.
+- **The Windows program is built with Control Flow Guard and loads its DLLs from System32 only** (hardening; `native/.cargo/config.toml`: `-C control-flow-guard` for Rust, `/guard:cf` for the C++ it compiles, `/DEPENDENTLOADFLAG:0x800` for the linker). CI reads the built program's load configuration and fails when the guard's table is empty.
+- **The queue of UDP packets waiting for the engine holds 4096** (hardening; `net::QUEUED`). Past that the readers drop what arrives, as a full socket buffer would. A flood on Windows showed no memory growth before this; it removes the case in theory.
+
+**Left as they are:**
+- **The sidecar is not code-signed.** That takes a certificate, as for the app itself.
+- **The install directory is the user's own** on a per-user install, so a program running as that user can replace the sidecar. By design: such a program can replace the app too.
+- **The length of a locked camera buffer on Windows** (`Lock2D` in `camera_win.rs`). The audit measured it: the lengths match.
+
+**Consequences:**
+- A page that reloads while sharing has to start its share again; nothing restores it.
+- The sidecar outlives the page, as before: only its streams stop, so the next share starts without a new process.
+- The guard's check runs in CI on Windows only. Nothing checks the DLL search flag.
+
+**Alternatives:** stopping the sidecar's process on navigation (the next page would wait for it to start again, and its `ready`); having the new page ask what is running and take it over (the viewers' connections belong to the old page's signaling, so there is nothing to take over); refusing a bad `tier` with an error (a clamp gives a stream where the numbers are merely odd, and the engine already sizes to the source).

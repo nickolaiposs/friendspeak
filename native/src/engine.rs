@@ -16,6 +16,7 @@
 // Rtc to its next timeout.
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -276,6 +277,7 @@ impl Engine {
                 }
             }
             Msg::Packet { kind, viewer, local, src, data, at } => {
+                net::QUEUED.fetch_sub(1, Ordering::Relaxed);
                 let Some(s) = self.streams.get_mut(&kind) else { return };
                 let Some(v) = s.viewers.get_mut(&viewer) else { return };
                 if self.stun.contains(&src) {
@@ -338,6 +340,7 @@ impl Engine {
     fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Start { kind, source, tier, mode, hw, stun } => {
+                let tier = tier.clamped();
                 self.streams.remove(&kind);
                 if !self.stun_asked && !stun.is_empty() {
                     self.stun_asked = true;
@@ -352,6 +355,7 @@ impl Engine {
                 }
             }
             Cmd::Quality { kind, tier, mode } => {
+                let tier = tier.clamped();
                 if let Some(s) = self.streams.get_mut(&kind) {
                     s.tier = tier;
                     s.sharp = mode == "sharp";
