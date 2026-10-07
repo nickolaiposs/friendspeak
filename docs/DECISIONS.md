@@ -1082,3 +1082,21 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - **The host** (sections 1 to 3, 6, 7: user namespaces, auditing, the daemon's files) belongs to whoever runs it. `docker-bench-security` checks it.
 
 **Alternatives:** a distroless base (no shell, `apt` or setuid programs at all, but also no `apt-get upgrade` between base releases and a harder container to debug; revisit); a network of its own for Watchtower and friendspeak (only its token-checked API is on the shared one, and a container on two networks is one more thing for Watchtower to recreate correctly); scanning in `release.yml` (a release would then wait on a vulnerability found that morning, in a job that is kept free of anything it doesn't need, D64).
+
+## D66: What code scanning found: limits on the file routes, and two findings that stay · Active
+**Context:** the first CodeQL runs on `dev` (D64) reported seven findings, and Dependabot one.
+
+**Decision:**
+- **The routes that touch the disk are limited per address** (`POST /api/files`, `GET /files/…`, the dashboard's files): a number of requests a minute, then `429` (ARCHITECTURE.md → Files). Until now only the sockets and the dashboard's sign-in had limits (D61), so anyone who could reach the port could keep the server reading files. The limiter is `rate-limiter-flexible`, which the game's server already brings: no new dependency, and CodeQL knows it, so the finding closes by itself instead of by a dismissal.
+- **`scripts/release-notes.js` compares the version as text.** It built a pattern from its argument and escaped only the dots. The argument is ours (package.json's version, in CI), so nothing could be done with it; the pattern is gone all the same.
+- **`source-map-js` 1.2.2** in the lockfile (GHSA-68fv-2mgg-jv7q). It comes with `css-loader` and only runs when the game's client is built.
+
+**Left as they are, to be dismissed as false positives:**
+- **"Password hashed insecurely" at `inviteHash`** (`js/insufficient-password-hash`). What is hashed is an invite: 80 random bits that the server made, not a password someone chose (D51). A slow hash protects guessable input; here there is nothing to guess, and every `hello` would pay for it. CodeQL calls it a password because apps from before D51 send it in the field named `password`.
+- **"Disabling certificate validation" in `peekCertificate`** (`js/disabling-certificate-validation`). That connection only reads the certificate a self-signed server presents, to show its fingerprint and pin it (D20's trust on first use). Nothing is sent over it, and every later connection is checked against the pin.
+
+**Consequences:**
+- Behind a proxy without `TRUST_PROXY` everyone shares one address and so one allowance (D61). The numbers leave room for that; a host with a very large group behind such a proxy sets `TRUST_PROXY=1`.
+- The limits count requests, not bytes: one address can still download large files 3000 times a minute. Storage is capped (D24) and bandwidth is the host's to limit.
+
+**Alternatives:** `express-rate-limit` (a new dependency for what one already installed does); a limiter of our own like the sockets' (CodeQL can't see it, so the three findings would be dismissed by hand and a route added later would not be checked against it); one limit on every route (the game's client loads hundreds of files at once, and `/media` is fetched in bulk at connect).
