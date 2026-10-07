@@ -58,7 +58,9 @@ function httpLimit({ points, addrOf, tag }) {
   const limiter = new RateLimiterMemory({ points, duration: 60 });
   return (req, res, next) => {
     const ip = addrOf(req);
-    limiter.consume(limitKey(ip)).then(
+    // Kept on the request and read back: that is the shape CodeQL knows a limiter by (D66)
+    req.limitKey = limitKey(ip);
+    limiter.consume(req.limitKey).then(
       () => next(),
       (over) => {
         if (over instanceof Error) return next(over);
