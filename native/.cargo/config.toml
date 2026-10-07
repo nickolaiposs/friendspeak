@@ -1,0 +1,9 @@
+# Windows hardening for the sidecar: Control Flow Guard in the Rust code and in the C and C++ it
+# compiles (OpenH264), and DLLs it depends on loaded from System32 only, never from beside the exe
+# or the working directory.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "control-flow-guard", "-C", "link-arg=/DEPENDENTLOADFLAG:0x800"]
+
+[env]
+CFLAGS_x86_64_pc_windows_msvc = "/guard:cf"
+CXXFLAGS_x86_64_pc_windows_msvc = "/guard:cf"

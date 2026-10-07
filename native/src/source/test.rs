@@ -29,10 +29,11 @@ pub fn start(source: &Source, tier: &Tier, sinks: Sinks) -> Result<Capture, Stri
                         *p = 40 + ((((x + shift) / 64) % 8) * 24) as u8 + ((r / 90) % 2 * 8) as u8;
                     }
                 }
-                let bx = (n * 9) % (w - 120);
+                let bw = 120.min(w);
+                let bx = (n * 9) % (w - bw + 1);
                 let by = (h / 2).saturating_sub(60);
                 for r in by..(by + 120).min(h) {
-                    y[r * w + bx..r * w + bx + 120].fill(235);
+                    y[r * w + bx..r * w + bx + bw].fill(235);
                 }
                 for (r, row) in uv.chunks_exact_mut(w).enumerate() {
                     for (x, p) in row.chunks_exact_mut(2).enumerate() {
