@@ -920,3 +920,21 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The macOS and Linux ways were tried on a Mac with stand-in processes; the Windows registry read has not been run on Windows.
 
 **Alternatives:** the Steam web API (an account and a key per person); naming any focused program, as other chat apps do (a list of every game's program names to keep up, and it tells friends about programs that aren't games); writing it into the profile's status (it would be saved, sent to mailboxes and left behind after the game ends).
+
+## D60: The desktop app follows Electron's security checklist; plain HTTP stays, marked · Active
+**Context:** a review of the desktop app against Electron's security checklist (issue #12). Most of it held already (D10, the bridge, the permission handlers). What didn't: no fuses were set, a page in a frame could open the game's pop-out window with any address, the window could navigate to another host of the `friendspeak://` scheme, the policy let other pages frame the app, and a plain `http://` server looked the same as an encrypted one.
+
+**Decision:**
+- **Fuses** (`build.electronFuses`): `runAsNode`, `NODE_OPTIONS` and `--inspect` are off, the app loads only from `app.asar`, and `file://` gets no extra privileges. Another program on the computer can no longer run its own code as friendspeak, which on macOS would have come with the app's microphone, camera and screen recording permissions.
+- **The game's pop-out** opens only for the server the app's page names over the bridge, once, within 10 seconds. The window's name alone is not enough: frames can use a name, but they have no bridge.
+- **One origin:** the scheme serves only `friendspeak://app`, and the window stays on it.
+- **`frame-ancestors 'none'`**, and screen sharing is answered only for the app window's main frame.
+- **Plain HTTP stays allowed.** `npm start` serves it, and it is how a LAN server works with no setup. The app marks it: a warning in the connect dialog, with the button reading "Connect without encryption", and "Not encrypted" under the server's header for as long as the server is in view. An address on this computer (`localhost`, `127.0.0.1`, `::1`) is not marked.
+
+**Consequences:**
+- The checklist's "only load secure content" is met by a warning, not by a rule: on an `http://` server the socket, the game and pictures can be read and changed on the way. DMs stay sealed (D32).
+- Asar integrity checking and cookie encryption are left off. Integrity rests on the code signature, which is ad-hoc on macOS (D21) and absent on Linux; the app keeps nothing of its own in cookies.
+- The fuses apply to installers only. From source (`npm run desktop`) Electron is unchanged.
+- The View menu keeps its developer tools item, and updates on Windows and Linux are still unsigned (D29).
+
+**Alternatives:** HTTPS only, with the server defaulting to a self-signed certificate (D20) and the app refusing `http://` except on this computer. It would pass the checklist outright, but every saved `http://` server would stop working at the update. Checking the pop-out's address against a list of servers kept in the main process (the page would have to keep it in step).
