@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   // The video grid in a window of its own (opened by the page, by name): keep it above other windows, or not
   streamOnTop: (name, on) => ipcRenderer.invoke('desktop:stream-top', String(name), !!on),
 
+  // The game in a window of its own: say which server's game (its origin) right before opening it by name
+  allowGameWindow: (origin) => ipcRenderer.invoke('desktop:game-window', String(origin)),
+
   // Save a chat file (a normal link would open in the system browser)
   download: (url) => ipcRenderer.invoke('desktop:download', url),
 
