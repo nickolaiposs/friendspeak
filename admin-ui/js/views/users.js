@@ -18,6 +18,7 @@ function doing(u) {
   if (u.sharing) bits.push('sharing screen');
   if (u.camera) bits.push('camera on');
   if (u.playing) bits.push('playing the game');
+  if (u.game) bits.push(`playing ${u.game}`);
   return bits.join(', ') || h('span', { class: 'muted' }, 'idle');
 }
 

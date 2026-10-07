@@ -141,6 +141,7 @@ const DEFAULT_SETTINGS = {
   cues: true, // master switch for the app's sounds
   sounds: {}, // cue kind -> false when that sound is off (missing = on), see CUES in audio.js
   notify: true, // master switch for notifications (DMs, mentions, calls)
+  steamPlaying: true, // desktop app: the Steam game that is running shows next to your name, on servers and in DMs (D59)
   loadLinkMedia: false, // pictures, video and sound that a message links to load without a click (their host then sees your address)
   notifyMentions: true,
   notifyDms: true,
