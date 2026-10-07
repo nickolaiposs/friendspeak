@@ -343,7 +343,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52; the local rule and forwarded addresses by D61)
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52; the local rule and forwarded addresses by D61; the code window, the cookie's name, key management and `X-Forwarded-Proto` by D62)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -974,3 +974,42 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - An app from before upload keys still uploads by its socket id (D24), which every member is sent. Refusing those would cut off apps that haven't updated.
 
 **Alternatives:** `ADMIN_LOCAL` off by default (closes the same hole, but every host on their own machine then needs a key and an authenticator app); only dropping the `/admin` forward, so that the random path is the secret (it is long-lived and D52 says it is not one); a local token kept in the data folder across restarts (a lasting secret on disk for the sake of one click per start); counting wrong invites per key instead of per address (keys are free to make); no wrong-invite limit at all (80-bit tokens can't be guessed either way, but D51's limit also keeps the log readable); a fixed list of proxy addresses to trust (a container's address changes; the stack's network is the boundary instead); refusing the newest waiting connection (the person locked out would be the one signing in); storing the sender with each mailbox item (the disk would say who wrote to whom).
+
+## D62: A review against OWASP ASVS 5.0 Level 2: what it found in the dashboard and the socket protocol · Active
+**Context:** a review of `admin.js` and the socket protocol against the ASVS 5.0 requirements for Level 2, done at the same time as D61's. D61 already covers the largest findings (the local rule, shared addresses behind a proxy, reactions, mailboxes, bytes per connection). What was left:
+- On an open server (D43) any member could set the server's icon to any https address. Every app and the dashboard then load it, and its host learns their addresses. Profile pictures were held to GIPHY for that reason; the icon was not.
+- A web page on any site could open a chat socket: the handshake accepted any `Origin`.
+- A session of any age could make a key, revoke one, or reset anyone's 2-step sign-in, and a reset left the key's sessions running. Nothing showed which keys were signed in.
+- A code was good for three time steps, 90 seconds.
+- `X-Forwarded-Proto: https` was believed from any peer, which is the test for "keys only over TLS".
+- A profile id could be `__proto__` (never a member, and an invite use spent per connect) or carry a line break into log lines. Voice channel names kept line breaks. `emoji:remove` and the signaling events relayed values they had not looked at.
+- Requests refused for lack of a permission left no trace. `gif:search` and `game:login` answered with the raw error text.
+
+**Decision:**
+- **An icon link is an administrator's to set** (a role with Administrator, or the dashboard). From anyone else the icon follows the profile rule: an uploaded image or a GIPHY address.
+- **Sockets only for the app.** A handshake is accepted with no `Origin` (not a web page) or with `friendspeak://app`; CORS names that origin instead of `*`.
+- **Key management needs a sign-in from the last 15 minutes**: making a key, revoking one, resetting 2-step sign-in. A local session (D61) is exempt: it has no key to show again. A reset ends the key's other sessions. The keys page shows how many sessions each key has and can sign a key out everywhere.
+- **A code is good for its own 30 s step and the one before**, 60 s at most, not the one after.
+- **`X-Forwarded-Proto` counts only from where a proxy can be:** the host said there is one (`TRUST_PROXY`, `PUBLIC_URL`), or the peer's address is loopback or private.
+- **The session cookie is `__Secure-fs_admin` over TLS**, and `object-src 'none'` is in the dashboard's CSP.
+- **Sign-in failures are counted per /64 for IPv6.**
+- **Validation:** a `hello` with an id that is `__proto__` or has a control character is refused before the invite is looked at; channel names lose control characters; `emoji:remove` takes only the name of an emoji that exists; signaling data must be an object; a GIF's size is clamped.
+- **`[perm]` log lines** for refused requests: who and which event, never the content (D49). The two error answers are fixed texts, with the cause in the server's log.
+
+**Consequences:**
+- A member of an open server who pastes a link as the icon is told to upload an image. A link that is already set stays until someone changes it.
+- Anything that opened a chat socket from a web page on another origin stops working. There is no such client: the app has had one origin since D10, and scripts send no `Origin`.
+- An admin who has been signed in for more than 15 minutes signs out and in again before managing keys. With one phone and one key that is one more code.
+- A server whose clock is ahead of the phone's by more than a few seconds refuses codes that 2-step sign-in used to take. The one-step grace is for typing, in one direction.
+- A proxy on a public address in front of a server that was told nothing (`TRUST_PROXY`, `PUBLIC_URL`) can no longer vouch for TLS, and sign-in there says it needs HTTPS. A proxy on the same machine or network works as before. On a private network a client can still send the header itself; what it gives away is its own key, over its own connection.
+- The dashboard's cookie changes name over TLS. Sessions are in memory, so the update's restart ends them anyway.
+- `__Host-` is not used: it needs `Path=/`, and the cookie is scoped to the dashboard's path.
+
+**Not changed, and why:**
+- **HSTS** is still the proxy's to send (the `deploy/` stack's Caddy does). From the server it would also reach `localhost` and a self-signed address, where it either does nothing or breaks other things on the machine. `includeSubDomains` is not added to the stack: a host's other subdomains are theirs.
+- **Open mode** still lets every member ban, remove and manage channels until an administrator exists (D43), and **invite tokens** are still stored in clear so they can be shown again (D51).
+- **TOTP secrets** are stored in clear next to the key hashes (D52); `ADMIN_KEY`'s hash is unsalted, which matters only for a weak key.
+- **Uploads** still trust the declared content type, and a file's address is all it takes to download it (D24).
+- `nosniff` is on the dashboard, uploads and media, not on the game's files or `/api/info`.
+
+**Alternatives:** asking for the key or a code again in a dialog instead of a fresh sign-in (more to build and the same proof); no time limit but a code on every key change (a key without 2-step has none); only the current step for codes (the strict reading of the 30 s rule, and a code typed at second 29 fails); believing `X-Forwarded-Proto` only with `TRUST_PROXY` (locks out every host behind their own proxy until they set it, for a header that only the key's owner can forge); a list of allowed origins in the environment (nobody has another client).
