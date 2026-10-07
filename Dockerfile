@@ -52,9 +52,12 @@ ENV NODE_ENV=production \
 
 # The server only needs node. npm, npx, corepack and yarn come with the base image and carry
 # packages of their own that scanners (rightly) flag; nothing here runs them. The base's Debian
-# packages get the fixes published since the base image was built.
+# packages get the fixes published since the base image was built. Debian's setuid programs (su,
+# mount, passwd, ...) lose that bit, after the upgrade so a replaced one loses it too: the server
+# runs as `node` and nothing in here should be able to become root.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
-    && apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+    && apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+    && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 COPY package.json package-lock.json ./
 COPY --from=deps /app/node_modules ./node_modules
