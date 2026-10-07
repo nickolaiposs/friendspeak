@@ -819,13 +819,13 @@ function createAdmin(ctx) {
     const st = ctx.state();
     const profiles = Object.create(null);
     for (const [pid, p] of Object.entries(st.profiles)) profiles[pid] = { name: p.name, color: p.color, avatar: p.avatar };
-    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn });
+    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: true, noAdmin: !!Object.keys(st.profiles).length && !ctx.hasAdmin() });
   });
 
-  // Permissions: what everybody gets, and whether they apply yet (open mode until someone is an administrator)
+  // Permissions: what everybody gets (`permissionsOn` is always true since D63)
   const permsView = () => {
     const st = ctx.state();
-    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn, roles: st.roles };
+    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: true, roles: st.roles };
   };
   api.get('/permissions', (_req, res) => res.json(permsView()));
 
