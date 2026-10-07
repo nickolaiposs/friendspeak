@@ -1,0 +1,36 @@
+# Known vulnerabilities in the server image (D65): builds it as a release would and fails on a
+# high or critical one that has a fix out, in Debian's packages or in the npm ones. One without a
+# fix doesn't fail it: there is nothing to merge for it. Weekly too, because new ones are found in
+# an image that hasn't changed.
+name: Image scan
+
+on:
+  push:
+    branches: [dev]
+    paths: [Dockerfile, .dockerignore, package.json, package-lock.json, .github/workflows/image-scan.yml]
+  pull_request:
+    branches: [dev, prod]
+    paths: [Dockerfile, .dockerignore, package.json, package-lock.json, .github/workflows/image-scan.yml]
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  scan:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - run: docker build -t friendspeak:scan .
+      - uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: friendspeak:scan
+          only-fixed: true
+          severity-cutoff: high
+          fail-build: true
+          output-format: table

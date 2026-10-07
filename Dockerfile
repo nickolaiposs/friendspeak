@@ -9,12 +9,14 @@
 # The game asset pack is NOT part of the image (third-party art, ~3.4 GB).
 # Mount it at runtime; see docker-compose.yaml.
 
-ARG NODE_IMAGE=node:24-bookworm-slim
+# The base image is pinned by digest, on every FROM line: a tag can be moved, a digest can't.
+# Dependabot (.github/dependabot.yml) opens a PR when node:24-bookworm-slim has a newer one;
+# by hand: `docker buildx imagetools inspect node:24-bookworm-slim` and replace all three.
 
 # ---------------------------------------------------------------- build the game
 # The build output is plain JS, so build once on the native platform even for
 # multi-arch images (no slow emulated webpack run for arm64).
-FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
 WORKDIR /app
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 COPY package.json package-lock.json ./
@@ -27,14 +29,14 @@ RUN npm run build:game
 
 # ---------------------------------------------------------------- runtime dependencies
 # Installed for the target platform in a stage of their own, so the runtime image needs no npm.
-FROM ${NODE_IMAGE} AS deps
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
     && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
 
 # ---------------------------------------------------------------- runtime
-FROM ${NODE_IMAGE}
+FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 LABEL org.opencontainers.image.source=https://github.com/nickolaiposs/friendspeak
 WORKDIR /app
 # FRIENDSPEAK_DOCKER: AUTO_UPDATE=on is only allowed here, where a Watchtower
@@ -50,9 +52,12 @@ ENV NODE_ENV=production \
 
 # The server only needs node. npm, npx, corepack and yarn come with the base image and carry
 # packages of their own that scanners (rightly) flag; nothing here runs them. The base's Debian
-# packages get the fixes published since the base image was built.
+# packages get the fixes published since the base image was built. Debian's setuid programs (su,
+# mount, passwd, ...) lose that bit, after the upgrade so a replaced one loses it too: the server
+# runs as `node` and nothing in here should be able to become root.
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack /opt/yarn-* /usr/local/bin/yarn /usr/local/bin/yarnpkg \
-    && apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
+    && apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+    && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 
 COPY package.json package-lock.json ./
 COPY --from=deps /app/node_modules ./node_modules

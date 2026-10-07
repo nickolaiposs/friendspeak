@@ -15,6 +15,7 @@ const tls = require('tls');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const { createLogs, originOf } = require('./logs');
+const { steamGame } = require('./steam');
 
 const APP = 'friendspeak://app'; // the origin of the app's own page
 const isApp = (url) => typeof url === 'string' && (url === APP || url.startsWith(APP + '/'));
@@ -176,6 +177,10 @@ function acceptPinnedCertificates() {
 
 let win = null;
 const streamWindows = new Map(); // window name -> BrowserWindow, for the video grid in a window of its own
+// The server whose game the page is about to pop out: { origin, at }, used once. The page says so over the
+// bridge, which frames in the window (the game, link embeds) don't have, so they can't open a window by its name.
+let gameWindow = null;
+const GAME_WINDOW_MS = 10_000;
 
 // Everything the bridge in preload.js can ask for is for the app's own page, in the main frame of its own
 // window. The game's window and iframes don't get the bridge today; this holds if that ever changes.
@@ -203,8 +208,16 @@ function createWindow() {
 
   win.webContents.setWindowOpenHandler(({ url, frameName }) => {
     // The game's "Pop out" button opens it in its own window. Only that: the page names the
-    // window when it opens it, and a link in a message can't (those open in the real browser).
-    if (frameName === GAME_WINDOW && /^https?:\/\/[^/]+\/game\//.test(url)) {
+    // window when it opens it, after telling us which server's game it is (desktop:game-window).
+    // A link in a message can't (those open in the real browser), and nor can a page in a frame.
+    if (frameName === GAME_WINDOW) {
+      const allowed = gameWindow;
+      gameWindow = null;
+      let to = null;
+      try {
+        to = new URL(url);
+      } catch {}
+      if (!allowed || Date.now() - allowed.at > GAME_WINDOW_MS || !to || to.origin !== allowed.origin || !to.pathname.startsWith('/game/')) return { action: 'deny' };
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
@@ -250,7 +263,7 @@ function createWindow() {
 
   // Links clicked inside chat open in the real browser
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('friendspeak://')) {
+    if (!isApp(url)) {
       e.preventDefault();
       if (/^https?:\/\//.test(url)) shell.openExternal(url);
     }
@@ -259,6 +272,7 @@ function createWindow() {
   // The page's process died (crash, out of memory, killed): offer to reload, but not in a loop
   const goneAt = [];
   win.webContents.on('render-process-gone', async (_e, d) => {
+    stopShares();
     if (d.reason === 'clean-exit' || quitting || !win) return;
     const w = win;
     const now = Date.now();
@@ -281,9 +295,13 @@ function createWindow() {
     else if (!reload && !NO_DIALOGS) app.quit();
   });
 
+  // A new page knows nothing of the old one's shares. The game's iframe navigates on its own: main frame only
+  win.webContents.on('did-start-navigation', (e) => e.isMainFrame && !e.isSameDocument && stopShares());
+
   win.loadURL('friendspeak://app/index.html');
   win.on('closed', () => {
     win = null;
+    stopShares();
     // The video grid's window is drawn by the app's page: without it there is nothing to show
     for (const w of streamWindows.values()) if (!w.isDestroyed()) w.destroy();
   });
@@ -306,11 +324,14 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
+  "frame-ancestors 'none'", // the app's page in a frame of someone else's (the game, an embed) could be clicked through
 ].join('; ');
 
 function serveApp() {
   protocol.handle('friendspeak', async (request) => {
-    const { pathname } = new URL(request.url);
+    const { pathname, host } = new URL(request.url);
+    // One origin only: the same page under another host would be a second origin with its own storage
+    if (host !== 'app') return new Response('Not found', { status: 404 });
     const clean = decodeURIComponent(pathname);
     for (const [prefix, target] of ROUTES) {
       if (!clean.startsWith(prefix) && clean !== prefix.replace(/\/$/, '')) continue;
@@ -391,6 +412,8 @@ function allowScreenShare() {
     pickedSource = pick && typeof pick.id === 'string' ? { id: pick.id, audio: !!pick.audio, at: Date.now() } : null;
   });
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    // Only the app's own page shares the screen: a pick is not for a frame or another window to use
+    if (!win || win.isDestroyed() || request.frame !== win.webContents.mainFrame || !isApp(request.frame.url)) return callback();
     const pick = pickedSource;
     pickedSource = null;
     if (!pick || Date.now() - pick.at > 30_000) return callback({});
@@ -500,6 +523,12 @@ async function describeSource(cmd) {
     }
   }
   return { ...cmd, source, hw: prefs.hardwareAcceleration };
+}
+
+// The page that asked for the shares is gone (reloaded, crashed, closed): nobody is left to stop them
+function stopShares() {
+  if (!media.proc) return;
+  for (const kind of MEDIA_KINDS) media.proc.stdin.write(JSON.stringify({ op: 'stop', kind }) + '\n');
 }
 
 function stopMedia() {
@@ -662,6 +691,10 @@ handle('desktop:download', (_e, url) => {
 });
 // Notification clicks bring the window back
 // The video grid's window can stay above other windows (its "Keep on top" button)
+// The game's pop-out window: allowed once, for this server, in the next few seconds (see setWindowOpenHandler)
+handle('desktop:game-window', (_e, origin) => {
+  gameWindow = typeof origin === 'string' && /^https?:\/\/[^/]+$/.test(origin) ? { origin, at: Date.now() } : null;
+});
 handle('desktop:stream-top', (_e, name, on) => {
   const w = streamWindows.get(name);
   if (w && !w.isDestroyed()) w.setAlwaysOnTop(!!on, 'floating');
@@ -691,6 +724,8 @@ handle('desktop:prefs', async (_e, patch) => {
   }
   return { ...prefs, atStart: HW_AT_START, gpu: app.getGPUFeatureStatus() };
 });
+// The Steam game running on this computer, for the "playing" line (D59): { id, name } or null
+handle('desktop:steam-game', () => steamGame());
 // Logs and crash reports
 listen('desktop:log', (_e, msg) => logs.fromRenderer(msg));
 handle('desktop:logs-read', (_e, o) => logs.read({ limit: o?.limit, before: o?.before }));

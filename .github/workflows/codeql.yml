@@ -1,0 +1,41 @@
+# Static analysis of our own JavaScript and of these workflows (D64). Findings show under
+# Security → Code scanning, and on the PR that adds them. The vendored game code and the
+# prebuilt wasm glue are left out: they aren't ours to fix (AGENTS.md, rule 1).
+name: CodeQL
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [dev, prod]
+  schedule:
+    - cron: '23 5 * * 1'
+
+permissions: {}
+
+jobs:
+  analyze:
+    permissions:
+      contents: read
+      security-events: write # upload the findings
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: |
+            paths-ignore:
+              - game/client
+              - game/server
+              - public/vendor
+      - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          category: /language:${{ matrix.language }}

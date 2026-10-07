@@ -2,22 +2,32 @@
 // itself, plus the JSON API and the event stream behind it. Its path is random,
 // made on the first start (D52); ADMIN_PATH picks another or the plain /admin.
 //
-// Access: a request from this very machine (loopback peer, localhost Host, no
-// proxy headers) needs no key. Everything else needs an admin key and TLS, and
-// a code from the authenticator app set up at the key's first sign-in (D52).
+// Access: this very machine needs no key, but it has to open the link the
+// server prints at start, which carries a token made for that run (D61): a
+// loopback peer alone proves nothing, a tunnel on the machine looks the same.
+// Everything else needs an admin key and TLS, and a code from the
+// authenticator app set up at the key's first sign-in (D52).
 // Keys are 32 random bytes, stored only as SHA-256 hashes in DATA_DIR/admin.json.
 // Sessions are opaque tokens held in memory. There are no accounts (D3): this
 // is the one place that is gated, because it shows IPs and logs.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
 
+// The session cookie. Over TLS it carries the __Secure- prefix, so nothing that reaches the browser over
+// plain HTTP can set or replace it (the path is the dashboard's own, which rules __Host- out).
 const COOKIE = 'fs_admin';
+const cookieName = (tls) => (tls ? '__Secure-' : '') + COOKIE;
+const REAUTH_AGE = 15 * 60e3; // managing keys takes a sign-in this fresh
 const SESSION_MAX = 12 * 3600e3; // absolute
 const SESSION_IDLE = 3600e3; // sliding
+const LOCAL_COOKIE_AGE = 30 * 86400; // seconds; a local session ends with the server run anyway
 const AUDIT_MAX = 5 * 1024 * 1024;
 const MAX_KEYS = 50;
 const MAX_TRACKED_IPS = 10000;
+const STATIC_PER_MINUTE = 600; // the dashboard's own files, per address: a page load is about thirty
 const FREE_FAILURES = 5;
 const PLAIN_PATH = '/admin';
 // Paths the server already answers on: ADMIN_PATH can't be one of them
@@ -27,7 +37,39 @@ const ENROLL_TTL = 600e3; // how long a 2-step setup waits for its first code
 const sha256 = (v) => crypto.createHash('sha256').update(v).digest();
 const sha256hex = (v) => sha256(v).toString('hex');
 const isLoopbackAddr = (a) => a === '::1' || a.startsWith('127.');
+// An address that is not out on the internet: this machine, its network, a container network
+const isPrivateAddr = (a) => isLoopbackAddr(a) || /^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i.test(a);
+// What sign-in failures are counted against: the address, or for IPv6 its /64, which is what one
+// customer line gets. Counted per address, one line would have a fresh one for every try.
+function limitKey(ip) {
+  if (net.isIP(ip) !== 6) return ip;
+  const [head, tail = ''] = ip.split('%')[0].split('::');
+  const a = head ? head.split(':') : [];
+  const b = ip.includes('::') ? (tail ? tail.split(':') : []) : [];
+  const groups = ip.includes('::') ? [...a, ...Array(Math.max(0, 8 - a.length - b.length)).fill('0'), ...b] : a;
+  return groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(':') + '::/64';
+}
 const peerOf = (req) => String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+
+// A route's limit: `points` requests a minute per address (limitKey above), then 429 until the minute
+// is over. For the routes that read or write files, which a flood would otherwise turn into disk work.
+// The first refusal of a minute is logged, the rest are not.
+function httpLimit({ points, addrOf, tag }) {
+  const limiter = new RateLimiterMemory({ points, duration: 60 });
+  return (req, res, next) => {
+    const ip = addrOf(req);
+    // Kept on the request and read back: that is the shape CodeQL knows a limiter by (D66)
+    req.limitKey = limitKey(ip);
+    limiter.consume(req.limitKey).then(
+      () => next(),
+      (over) => {
+        if (over instanceof Error) return next(over);
+        if (over.consumedPoints === points + 1) console.warn(`${tag} too many requests from ${ip}: refused for ${Math.ceil(over.msBeforeNext / 1000)} s`);
+        res.set('Retry-After', String(Math.ceil(over.msBeforeNext / 1000))).status(429).json({ error: 'Too many requests, slow down' });
+      },
+    );
+  };
+}
 const hostnameOf = (host) => {
   host = String(host || '').toLowerCase();
   return host.startsWith('[') ? host.slice(0, host.indexOf(']') + 1) : host.split(':')[0];
@@ -79,12 +121,12 @@ function totpAt(secret, step) {
   const mac = crypto.createHmac('sha1', unbase32(secret)).update(msg).digest();
   return String((mac.readUInt32BE(mac[19] & 15) & 0x7fffffff) % 1e6).padStart(6, '0');
 }
-// The time step a 6-digit code is good for: this one or a neighbor, and newer
-// than `after` (a code works once). 0 = wrong code.
+// The time step a 6-digit code is good for: this one or the one before (the time
+// it takes to type it), and newer than `after` (a code works once). 0 = wrong code.
 function totpStep(secret, code, after, now) {
   const cur = Math.floor(now / 30e3);
   let found = 0;
-  for (const step of [cur - 1, cur, cur + 1]) {
+  for (const step of [cur - 1, cur]) {
     const ok = crypto.timingSafeEqual(Buffer.from(totpAt(secret, step)), Buffer.from(code));
     if (ok && step > after && !found) found = step;
   }
@@ -92,7 +134,7 @@ function totpStep(secret, code, after, now) {
 }
 
 const HEADERS = {
-  'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+  'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
@@ -105,7 +147,12 @@ function createAdmin(ctx) {
   const KEYS_FILE = path.join(dataDir, 'admin.json');
   const AUDIT_FILE = path.join(dataDir, 'admin-audit.log');
   const UI_DIR = path.join(__dirname, 'admin-ui');
+  // Who is calling, for lockouts and the audit log: the peer, or what a trusted proxy says (TRUST_PROXY, D61)
+  const addrOf = (req) => (ctx.addressOf ? ctx.addressOf(req.headers, req.socket.remoteAddress) : peerOf(req));
   const localAllowed = options.local !== false;
+  // What the link printed at start carries (D61). Made for this run only, kept in memory, never logged.
+  const localToken = localAllowed ? crypto.randomBytes(32).toString('base64url') : null;
+  if (localToken) logs.redact?.(localToken);
   const mfaOn = options.mfa !== false;
 
   // ---------- keys ----------
@@ -172,7 +219,7 @@ function createAdmin(ctx) {
     if (k.env) envTotp = t && { ...t, hash: k.hash };
     else k.totp = t;
   };
-  const keyView = (k, current) => ({ id: k.id, name: k.name, created: k.created, lastUsed: k.lastUsed || null, env: !!k.env, bootstrap: !!k.bootstrap, active: isActive(k), current: k.id === current, mfa: !!totpOf(k) });
+  const keyView = (k, current) => ({ id: k.id, name: k.name, created: k.created, lastUsed: k.lastUsed || null, env: !!k.env, bootstrap: !!k.bootstrap, active: isActive(k), current: k.id === current, mfa: !!totpOf(k), sessions: sessionCount(k.id) });
 
   // Compare the submitted key against every active key, without stopping at the first match
   function matchKey(secret) {
@@ -226,10 +273,17 @@ function createAdmin(ctx) {
   const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-forwarded-server', 'forwarded', 'x-real-ip', 'via', 'x-original-forwarded-for', 'x-client-ip', 'true-client-ip', 'cf-connecting-ip', 'cf-ray', 'fly-client-ip', 'x-envoy-external-address'];
   const hasProxyHeaders = (req) => req.httpVersion === '1.0' || PROXY_HEADERS.some((h) => req.headers[h] !== undefined);
   const hostIsLocal = (req) => ['localhost', '127.0.0.1', '[::1]'].includes(hostnameOf(req.headers.host));
-  const isTls = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+  // TLS: our own, or a reverse proxy's, which says so in X-Forwarded-Proto. Anyone can send that header,
+  // so it counts only from where a proxy can be: the host said there is one (TRUST_PROXY, PUBLIC_URL), or
+  // the peer is on this machine or its network. From an address out on the internet it means nothing.
+  const proxyKnown = options.proxy === true;
+  const isTls = (req) => req.secure || ((proxyKnown || isPrivateAddr(peerOf(req))) && String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https');
+  // `local`: the request could be this machine's own browser. That alone opens nothing (D61):
+  // it is what the local link and a local session need on top of their secret.
   function classify(req) {
-    const ip = peerOf(req);
-    const direct = isLoopbackAddr(ip) && hostIsLocal(req);
+    const ip = addrOf(req);
+    // Always the peer itself: with TRUST_PROXY the address above is what a proxy reported
+    const direct = isLoopbackAddr(peerOf(req)) && hostIsLocal(req);
     const local = localAllowed && direct && !hasProxyHeaders(req);
     const tls = isTls(req);
     // A key over plain HTTP is only fine when it never leaves this machine
@@ -238,7 +292,7 @@ function createAdmin(ctx) {
 
   // ---------- sessions ----------
 
-  const sessions = new Map(); // sha256(token) hex -> { keyId, actor, created, seen }
+  const sessions = new Map(); // sha256(token) hex -> { keyId, actor, created, seen }, or { local: true, actor, created, seen } from the local link
   const parseCookies = (header) => {
     const out = {};
     for (const part of String(header || '').split(';')) {
@@ -247,9 +301,16 @@ function createAdmin(ctx) {
     }
     return out;
   };
-  const sessionExpired = (s, now) => now - s.created > SESSION_MAX || now - s.seen > SESSION_IDLE || !findKey(s.keyId) || !isActive(findKey(s.keyId));
+  // A local session lasts as long as its link does: until the server stops
+  const sessionExpired = (s, now) => (s.local ? false : now - s.created > SESSION_MAX || now - s.seen > SESSION_IDLE || !findKey(s.keyId) || !isActive(findKey(s.keyId)));
+  const sessionCount = (keyId) => {
+    const now = Date.now();
+    let n = 0;
+    for (const s of sessions.values()) if (s.keyId === keyId && !sessionExpired(s, now)) n++;
+    return n;
+  };
   function sessionOf(req, touch) {
-    const token = parseCookies(req.headers.cookie)[COOKIE];
+    const token = parseCookies(req.headers.cookie)[cookieName(isTls(req))];
     if (!token) return null;
     const sk = sha256hex(token);
     const s = sessions.get(sk);
@@ -268,12 +329,16 @@ function createAdmin(ctx) {
   }, 60e3);
   pruneTimer.unref();
 
-  // The identity behind a request: { local, actor, keyId, sk } or null
+  // The identity behind a request: { local, actor, keyId, sk, fresh } or null.
+  // `fresh`: signed in recently enough to manage keys (a local session always is: it has no key to show again).
   function who(req, touch = true) {
-    if (classify(req).local) return { local: true, actor: 'local', keyId: null, sk: null };
     const s = sessionOf(req, touch);
-    return s ? { local: false, actor: s.actor, keyId: s.keyId, sk: s.sk } : null;
+    if (!s) return null;
+    // A local session's cookie is worth nothing from anywhere but this machine
+    if (s.local) return classify(req).local ? { local: true, actor: s.actor, keyId: null, sk: s.sk, fresh: true } : null;
+    return { local: false, actor: s.actor, keyId: s.keyId, sk: s.sk, fresh: Date.now() - s.created <= REAUTH_AGE };
   }
+  const tokenMatches = (given) => !!localToken && typeof given === 'string' && crypto.timingSafeEqual(sha256(given), sha256(localToken));
 
   // ---------- rate limit ----------
 
@@ -285,12 +350,14 @@ function createAdmin(ctx) {
     recent = recent.filter((t) => now - t < 600e3);
   }
   function lockedFor(ip, now) {
+    ip = limitKey(ip);
     // The global lock only applies to an IP that has already failed. Otherwise
     // anyone could keep it on forever and block the real admin (a clean IP is
     // still held back by nothing but the per-IP rules).
     return Math.max(0, failures.has(ip) ? globalUntil - now : 0, (failures.get(ip)?.until || 0) - now);
   }
   function noteFailure(ip, now) {
+    ip = limitKey(ip);
     let f = failures.get(ip);
     if (!f) {
       if (failures.size >= MAX_TRACKED_IPS) {
@@ -371,19 +438,37 @@ function createAdmin(ctx) {
   }, 25e3);
   pingTimer.unref();
 
-  function revokeSessions(keyId) {
+  // Ends a key's sessions; `except`: one to keep (the caller's own)
+  function revokeSessions(keyId, except) {
     const gone = new Set();
-    for (const [sk, s] of sessions) if (s.keyId === keyId) sessions.delete(sk), gone.add(sk);
+    for (const [sk, s] of sessions) if (s.keyId === keyId && sk !== except) sessions.delete(sk), gone.add(sk);
     for (const st of [...streams]) if (st.sk && gone.has(st.sk)) endStream(st, 'expired');
   }
 
   // ---------- routes ----------
 
-  // This machine may still ask at /admin: it needs no key, so the path is no secret to it. Anyone else gets the 404 of any unknown path.
-  if (BASE !== PLAIN_PATH) app.use(PLAIN_PATH, (req, res, next) => (classify(req).local ? res.set(HEADERS).redirect(302, BASE + '/') : next()));
+  // /admin on this machine says where to look and nothing else: what looks local may be a tunnel (D61),
+  // so it is not told the path. Anyone else gets the 404 of any unknown path.
+  if (BASE !== PLAIN_PATH) app.use(PLAIN_PATH, (req, res, next) => (classify(req).local ? res.set(HEADERS).status(404).type('text/plain').send('The admin dashboard is at the address the server prints when it starts ("Admin dashboard:" and, on this computer, "Local link:").\n') : next()));
+
+  const cookieHeader = (value, maxAge, tls) => `${cookieName(tls)}=${value}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
 
   app.use(BASE, (req, res, next) => {
     res.set(HEADERS);
+    // The local link (D61): <path>/?local=<token> from this machine starts a session without a key.
+    // Either way the token leaves the address bar.
+    if (req.path === '/' && req.method === 'GET' && req.query.local !== undefined) {
+      const c = classify(req);
+      if (c.local && tokenMatches(req.query.local)) {
+        const now = Date.now();
+        const token = crypto.randomBytes(32).toString('base64url');
+        sessions.set(sha256hex(token), { local: true, actor: 'local', created: now, seen: now });
+        res.set('Set-Cookie', cookieHeader(token, LOCAL_COOKIE_AGE, c.tls));
+        audit('local', c.ip, 'login', 'local link');
+        console.log('[admin] the local link was opened on this machine');
+      }
+      return res.redirect(302, BASE + '/');
+    }
     // <path> → <path>/ (relative URLs in the page need the slash)
     if (req.path === '/' && !req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(302, BASE + '/' + (req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''));
     next();
@@ -415,17 +500,14 @@ function createAdmin(ctx) {
   });
   api.use(express.json({ limit: '1mb' }));
 
-  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
-
   api.get('/session', (req, res) => {
     const c = classify(req);
     const me = who(req);
-    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, mfa: mfaOn, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
+    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, localLink: c.local && !me, mfa: mfaOn, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
   });
 
   api.post('/login', (req, res) => {
     const c = classify(req);
-    if (c.local) return res.json({ ok: true, actor: 'local' });
     if (!c.canLogin) return res.status(400).json({ error: 'Signing in needs HTTPS. Start the server with HTTPS=1 or put it behind a TLS reverse proxy.' });
     const now = Date.now();
     const wait = lockedFor(c.ip, now);
@@ -471,7 +553,7 @@ function createAdmin(ctx) {
       }
       forgetMfa(key.id);
     }
-    failures.delete(c.ip);
+    failures.delete(limitKey(c.ip));
     key.lastUsed = now;
     saveKeys();
     const token = crypto.randomBytes(32).toString('base64url');
@@ -483,7 +565,7 @@ function createAdmin(ctx) {
     res.json({ ok: true, actor: key.name });
   });
 
-  // Everything below needs a local request or a session
+  // Everything below needs a session: from a key, or from the local link
   api.use((req, res, next) => {
     const me = who(req);
     if (!me) return res.status(401).json({ error: 'Sign in required', login: true });
@@ -498,6 +580,7 @@ function createAdmin(ctx) {
       for (const st of [...streams]) if (st.sk === req.admin.sk) endStream(st, 'expired');
       audit(req.admin.actor, c.ip, 'logout');
       console.log(`[admin] ${req.admin.actor} signed out`);
+      notify('keys');
     }
     res.set('Set-Cookie', cookieHeader('', 0, c.tls)).json({ ok: true });
   });
@@ -582,13 +665,13 @@ function createAdmin(ctx) {
   });
   api.delete('/crashes/:id', (req, res) => {
     if (!crashes.remove(req.params.id)) return res.status(404).json({ error: 'No such crash report' });
-    audit(req.admin.actor, peerOf(req), 'crash.delete', req.params.id);
+    audit(req.admin.actor, addrOf(req), 'crash.delete', req.params.id);
     notify('crashes');
     res.json({ ok: true });
   });
   api.delete('/crashes', (req, res) => {
     const removed = crashes.clear();
-    audit(req.admin.actor, peerOf(req), 'crash.clear', `${removed} reports`);
+    audit(req.admin.actor, addrOf(req), 'crash.clear', `${removed} reports`);
     notify('crashes');
     res.json({ ok: true, removed });
   });
@@ -607,7 +690,10 @@ function createAdmin(ctx) {
 
   api.get('/keys', (req, res) => res.json({ keys: allKeys().map((k) => keyView(k, req.admin.keyId)), mfa: mfaOn }));
 
-  api.post('/keys', (req, res) => {
+  // Making a key, revoking one and resetting 2-step are what a stolen session would do to stay: they take a recent sign-in
+  const fresh = (req, res, next) => (req.admin.fresh ? next() : res.status(403).json({ error: 'Sign out and in again to do this: managing keys needs a sign-in from the last 15 minutes.', reauth: true }));
+
+  api.post('/keys', fresh, (req, res) => {
     const name = cleanName(req.body?.name);
     if (!name) return res.status(400).json({ error: 'Name required (1 to 40 characters)' });
     if (stored.length >= MAX_KEYS) return res.status(400).json({ error: `At most ${MAX_KEYS} keys` });
@@ -615,37 +701,51 @@ function createAdmin(ctx) {
     const key = { id: crypto.randomBytes(8).toString('hex'), name, hash: sha256hex(secret), created: Date.now(), lastUsed: null, bootstrap: false };
     stored.push(key);
     saveKeys();
-    audit(req.admin.actor, peerOf(req), 'key.create', name);
+    audit(req.admin.actor, addrOf(req), 'key.create', name);
     console.log(`[admin] ${req.admin.actor} created the key "${name}"`);
     notify('keys');
     res.json({ ok: true, key: keyView(key, req.admin.keyId), secret });
   });
 
-  api.delete('/keys/:id', (req, res) => {
+  api.delete('/keys/:id', fresh, (req, res) => {
     const k = stored.find((x) => x.id === req.params.id);
     if (!k) return res.status(400).json({ error: req.params.id === 'env' ? 'The ADMIN_KEY key is set in the server environment; remove it there' : 'No such key' });
     stored = stored.filter((x) => x !== k);
     saveKeys();
     forgetMfa(k.id);
     revokeSessions(k.id);
-    audit(req.admin.actor, peerOf(req), 'key.revoke', k.name);
+    audit(req.admin.actor, addrOf(req), 'key.revoke', k.name);
     console.log(`[admin] ${req.admin.actor} revoked the key "${k.name}"`);
     notify('keys');
     res.json({ ok: true });
   });
 
-  // A lost phone: the key sets 2-step up again at its next sign-in
-  api.post('/keys/:id/mfa/reset', (req, res) => {
+  // A lost phone: the key sets 2-step up again at its next sign-in. Its sessions end
+  // (whoever has the phone may have one), except the one that is asking.
+  api.post('/keys/:id/mfa/reset', fresh, (req, res) => {
     const k = findKey(req.params.id);
     if (!k) return res.status(400).json({ error: 'No such key' });
     if (!totpOf(k)) return res.status(400).json({ error: '2-step sign-in isn’t set up for that key' });
     setTotp(k, null);
     saveKeys();
     forgetMfa(k.id);
-    audit(req.admin.actor, peerOf(req), 'key.mfa.reset', k.name);
+    revokeSessions(k.id, req.admin.sk);
+    audit(req.admin.actor, addrOf(req), 'key.mfa.reset', k.name);
     console.log(`[admin] ${req.admin.actor} reset 2-step sign-in for the key "${k.name}"`);
     notify('keys');
     res.json({ ok: true });
+  });
+
+  // Sign a key out everywhere: its sessions end, the key stays
+  api.post('/keys/:id/signout', (req, res) => {
+    const k = findKey(req.params.id);
+    if (!k) return res.status(400).json({ error: 'No such key' });
+    const n = sessionCount(k.id);
+    revokeSessions(k.id);
+    audit(req.admin.actor, addrOf(req), 'key.signout', `${k.name} (${n} sessions)`);
+    console.log(`[admin] ${req.admin.actor} signed the key "${k.name}" out everywhere`);
+    notify('keys');
+    res.json({ ok: true, ended: n });
   });
 
   api.get('/audit', (req, res) => {
@@ -673,7 +773,7 @@ function createAdmin(ctx) {
   };
   const logAction = (req, action, detail) => {
     detail = String(detail).replace(/[\u0000-\u001f\u007f]/g, ' '); // names are user input
-    audit(req.admin.actor, peerOf(req), action, detail);
+    audit(req.admin.actor, addrOf(req), action, detail);
     // What the shared actions do is logged by server.js ([mod], [server]), with this actor
     if (!/^(user|ban|role|perms|server|invite)\./.test(action)) console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
   };
@@ -701,6 +801,7 @@ function createAdmin(ctx) {
         sharing: !!u.sharing,
         camera: !!u.camera,
         playing: !!u.playing,
+        game: typeof u.game === 'string' ? u.game : '',
         roles: rolesOf(st, p.id),
         key: keyOf(st, p.id),
       });
@@ -728,7 +829,7 @@ function createAdmin(ctx) {
     const pid = urlId(req.body?.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
     const ip = req.body?.ip === true;
-    answer(res, actions.ban(dash(req), { profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
+    answer(res, actions.ban(dash(req), { profileId: pid, ip, by: BY, selfIp: addrOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
   });
 
   api.delete('/bans/:id', (req, res) => {
@@ -740,13 +841,13 @@ function createAdmin(ctx) {
     const st = ctx.state();
     const profiles = Object.create(null);
     for (const [pid, p] of Object.entries(st.profiles)) profiles[pid] = { name: p.name, color: p.color, avatar: p.avatar };
-    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn });
+    res.json({ roles: st.roles, memberRoles: st.memberRoles, profiles, defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: true, noAdmin: !!Object.keys(st.profiles).length && !ctx.hasAdmin() });
   });
 
-  // Permissions: what everybody gets, and whether they apply yet (open mode until someone is an administrator)
+  // Permissions: what everybody gets (`permissionsOn` is always true since D63)
   const permsView = () => {
     const st = ctx.state();
-    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: st.permissionsOn, roles: st.roles };
+    return { defaultPerms: st.defaultPerms, defaultGrantable: st.defaultGrantable, permissionsOn: true, roles: st.roles };
   };
   api.get('/permissions', (_req, res) => res.json(permsView()));
 
@@ -946,11 +1047,15 @@ function createAdmin(ctx) {
   });
 
   // The dashboard's files; util.js is shared with the desktop client
-  app.get(BASE + '/js/util.js', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
-  app.use(BASE, express.static(UI_DIR, { index: 'index.html', redirect: false }));
+  const staticLimit = httpLimit({ points: STATIC_PER_MINUTE, addrOf, tag: '[admin]' });
+  app.get(BASE + '/js/util.js', staticLimit, (_req, res) => res.sendFile(path.join(__dirname, 'public', 'js', 'util.js'), (err) => err && !res.headersSent && res.sendStatus(404)));
+  app.use(BASE, staticLimit, express.static(UI_DIR, { index: 'index.html', redirect: false }));
 
   return {
     path: BASE,
+    // The query that makes the dashboard's address the local link (D61), or '' when the local rule is off.
+    // For the CLI to print on stdout only.
+    localQuery: localToken ? '/?local=' + localToken : '',
     mfa: mfaOn,
     notify,
     close() {
@@ -964,4 +1069,4 @@ function createAdmin(ctx) {
   };
 }
 
-module.exports = { createAdmin };
+module.exports = { createAdmin, httpLimit };

@@ -343,7 +343,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52)
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52; the local rule and forwarded addresses by D61; the code window, the cookie's name, key management and `X-Forwarded-Proto` by D62)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -524,7 +524,7 @@ Messages from before `spans` existed keep matching by text, so a rename doesn't 
 
 **Alternatives:** the profile id becoming the key hash (rejected in D32 for the same reasons: it renames every profile and breaks history, bans and roles); a server-issued nonce event before `hello` (an extra round trip and a new event old servers don't send, where the socket id already is a fresh server-chosen value); keys on the server (accounts, against D3); refusing every unsigned `hello` (locks out old apps on profiles nobody can take from them anyway); trusting `X-Forwarded-Host` (a relaying server would set it to its own name); letting a removal drop the pin (anyone in the app could then take over a member's profile).
 
-## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active
+## D43: Roles carry permissions, with per-channel overrides; servers stay open until someone is an admin · Active (open servers removed by D63: the first to join is the admin)
 **Context:** issue #2. Anyone who knew the address (and password) could do everything: channels, emojis, the server's name and icon, files, removals and bans (D3, D27). Roles were labels set in the dashboard (D34). Since D42 a profile id with a pinned key can't be copied, so permissions can finally hang on a profile.
 **Decision:**
 - **Permissions:** `admin` (everything, ignores every other setting), `view`, `send` (message in text channels, join voice channels), `mentionRoles`, `mentionEveryone`, `kick` (remove from the server), `voiceKick`, `ban` (and unban), `forceMute`, `manageRoles`, `manageChannels`, `manageEmojis`, `manageFiles` (other people's files; your own you can always delete), `manageMessages` (delete other people's messages; your own you can always delete). The server's name, icon, voice quality and game switch, and the default permissions, are admin only.
@@ -710,7 +710,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
 
-## D51: People join with invites; a member is then known by their key · Active
+## D51: People join with invites; a member is then known by their key · Active (the address wrong invites are counted for: D61)
 
 **Context:** access was one shared `PASSWORD` from the environment, compared in plaintext on every `hello`. Everyone knew it, it couldn't be taken back from one person, and nothing said who let whom in.
 
@@ -734,7 +734,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).
 
-## D52: The dashboard is at a random path and keys need an authenticator code; both can be switched off · Active
+## D52: The dashboard is at a random path and keys need an authenticator code; both can be switched off · Active (`/admin` from localhost and local requests amended by D61)
 **Context:** issue #82. The dashboard is full control of the server (D34), and it sat at a path anyone could guess, behind one secret: a key that is pasted around, kept in password managers and compose files, and printed in a container log.
 
 **Decision:**
@@ -757,7 +757,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** WebAuthn/passkeys (need a stable HTTPS origin, which a self-signed LAN server on an IP doesn't have); one TOTP secret for the whole server (can't reset one admin); printing the secret in the server output at first boot (ties setup to shell access and puts a lasting secret in `docker logs`); requiring both with no switch (breaks hosts behind an access proxy with path rules, and automation); a QR library (a dependency and a vendored file for one screen); recovery codes (another secret to store; the reset and the host's own access cover it).
 
-## D53: A second compose stack puts Caddy in front, for hosts with a domain · Active
+## D53: A second compose stack puts Caddy in front, for hosts with a domain · Active (the stack now sets `TRUST_PROXY`, D61)
 **Context:** issue #83. D20/D21 cover a host without a domain: a self-signed certificate that the app pins. A host on a rented server with a domain had to put a proxy together from a paragraph in the README, and the admin dashboard is the part that most needs a real certificate: it is opened in a browser, where a self-signed one is a warning to click through.
 
 **Decision:**
@@ -903,3 +903,222 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** moving the pictures to files on disk and keeping only references in `state` (old apps would need them read back for every `hello`; the profile files are already off the event loop, D57); the app fetching each reference and turning it back into a data URL (nothing else in the app changes, but every picture is held in memory twice and drawn late); a capability list instead of one number (nothing needs two yet).
 
+## D59: The Steam game someone is playing is read on their computer · Active
+**Context:** people wanted to see what a friend is playing next to their name, the way the member list says who is in voice. Steam's own answer is its web API, which needs an API key, the person's Steam id and a public Steam profile: an account, where friendspeak has none.
+
+**Decision:**
+- **The desktop app works it out locally** (`desktop/steam.js`): the running app's id from the registry on Windows, from Steam's `reaper SteamLaunch AppId=<id>` process on Linux, and from a process inside a library's `steamapps/common/` on macOS; the name from the game's `appmanifest` file. No Steam sign-in and no request to Steam.
+- **It is on by default**, with a switch under Settings → Integrations (`steamPlaying`). Off, the app doesn't look, and tells its servers and DM peers "nothing" at once.
+- **Servers get it as `activity { game }`** and pass it on in `users` as `game`, held in memory only. **DM peers get it in `hello`**, over the sealed link, and keep it only while that link is up.
+- **Nothing checks the name.** It is what the person's app says, like a status: cut to 64 characters and shown as text.
+
+**Consequences:**
+- Only Steam games that are installed on this computer are named. A shortcut to a program from elsewhere has no manifest and is not shown, nor is a game streamed from another machine.
+- A change shows within 15 seconds: the app asks that often (one `ps` or `reg query`).
+- The server's host and everyone on a server see the name, and so does anyone the person has an open DM link with. It is not written to the server's log or its saved state; the dashboard's user list shows it.
+- A server from before this ignores `activity`, an app from before this ignores `game`: no version check.
+- The macOS and Linux ways were tried on a Mac with stand-in processes; the Windows registry read has not been run on Windows.
+
+**Alternatives:** the Steam web API (an account and a key per person); naming any focused program, as other chat apps do (a list of every game's program names to keep up, and it tells friends about programs that aren't games); writing it into the profile's status (it would be saved, sent to mailboxes and left behind after the game ends).
+
+## D60: The desktop app follows Electron's security checklist; plain HTTP stays, marked · Active
+**Context:** a review of the desktop app against Electron's security checklist (issue #12). Most of it held already (D10, the bridge, the permission handlers). What didn't: no fuses were set, a page in a frame could open the game's pop-out window with any address, the window could navigate to another host of the `friendspeak://` scheme, the policy let other pages frame the app, and a plain `http://` server looked the same as an encrypted one.
+
+**Decision:**
+- **Fuses** (`build.electronFuses`): `runAsNode`, `NODE_OPTIONS` and `--inspect` are off, the app loads only from `app.asar`, and `file://` gets no extra privileges. Another program on the computer can no longer run its own code as friendspeak, which on macOS would have come with the app's microphone, camera and screen recording permissions.
+- **The game's pop-out** opens only for the server the app's page names over the bridge, once, within 10 seconds. The window's name alone is not enough: frames can use a name, but they have no bridge.
+- **One origin:** the scheme serves only `friendspeak://app`, and the window stays on it.
+- **`frame-ancestors 'none'`**, and screen sharing is answered only for the app window's main frame.
+- **Plain HTTP stays allowed.** `npm start` serves it, and it is how a LAN server works with no setup. The app marks it: a warning in the connect dialog, with the button reading "Connect without encryption", and "Not encrypted" under the server's header for as long as the server is in view. An address on this computer (`localhost`, `127.0.0.1`, `::1`) is not marked.
+
+**Consequences:**
+- The checklist's "only load secure content" is met by a warning, not by a rule: on an `http://` server the socket, the game and pictures can be read and changed on the way. DMs stay sealed (D32).
+- Asar integrity checking and cookie encryption are left off. Integrity rests on the code signature, which is ad-hoc on macOS (D21) and absent on Linux; the app keeps nothing of its own in cookies.
+- The fuses apply to installers only. From source (`npm run desktop`) Electron is unchanged.
+- The View menu keeps its developer tools item, and updates on Windows and Linux are still unsigned (D29).
+
+**Alternatives:** HTTPS only, with the server defaulting to a self-signed certificate (D20) and the app refusing `http://` except on this computer. It would pass the checklist outright, but every saved `http://` server would stop working at the update. Checking the pop-out's address against a list of servers kept in the main process (the page would have to keep it in step).
+
+## D61: A security review by STRIDE: a local link, addresses from a trusted proxy, and limits where there were none · Active
+**Context:** a review of the whole app by threat category (spoofing, tampering, repudiation, information disclosure, denial of service, elevation of privilege). Most of it held. What didn't:
+- D34's local rule gave the dashboard to any request from loopback with `Host: localhost` and no proxy headers. A tunnel on the host's machine (`ssh -R`, ngrok, playit, frp) delivers exactly that from anywhere, and `/admin` then also told it the random path.
+- Behind a proxy every address is the proxy's (D34, D53), so ten wrong invites from anyone kept everyone from joining (D51), for as long as someone kept sending them.
+- The per-socket budget counted events, not bytes, and applied before `hello` too: a socket that never signed in could send 4 MB packets, 40 a second, for the server to parse.
+- A message took any number of different reactions, a server any number of channels, one member could make mailboxes until the 5000 were used up, and could fill someone else's.
+- Removing or banning someone, or switching the game off, didn't reach the game's worlds: they are socket.io servers of their own with their own sign-in tokens.
+- The uploads folder was made with the default mode, unlike the rest of the data folder.
+
+**Decision:**
+- **A local link instead of the local rule.** Looking local (D34's test, unchanged) no longer opens the dashboard. At every start the server makes a token (32 random bytes, memory only, known to the log scrubber) and the CLI prints `http://localhost:<port><path>/?local=<token>` on stdout. Opened from a request that looks local, it starts a session that lasts until the server stops, and whose cookie only counts on requests that look local. `/admin` from localhost no longer forwards: it says the address is in the server's output. `ADMIN_LOCAL=off` means no link, as before it meant no rule.
+- **`TRUST_PROXY=1`, off by default, set by the `deploy/` stack.** With it, the address of a socket or a dashboard request is the last one in `X-Forwarded-For`: the one the proxy next to the server wrote, whatever a client put in front. It is used for bans, the wrong-invite and sign-in limits, the user list and the audit log. The local rule never uses it. In `deploy/` only Caddy reaches the container, so the stack sets it; the root stack and `npm start` leave it to the host. Without it, a refusal for too many wrong invites that came through a proxy says what to set.
+- **Bytes are budgeted per connection, and connections that haven't signed in are counted per address** (the numbers are in ARCHITECTURE.md → Protocol). A connection gets what one `hello` needs until it is a member's. One too many from an address closes the oldest that is still waiting, not the newest, so the person signing in right now is not the one refused.
+- **Caps:** 20 different reactions on a message, 200 channels, a new mailbox only for the key the profile is pinned to, and one sender fills at most half of a mailbox.
+- **The game follows membership.** When someone stops being a member their game sign-in tokens are deleted and their penguin is disconnected; the penguin itself stays for when they are let back in. While the game is switched off the worlds refuse connections. Both are done in `game/index.js`, with nothing changed in the vendored server.
+- **The uploads folder is 0700** and new uploads 0600, like the rest of the data folder.
+- A second `hello` on one socket leaves voice first.
+
+**Consequences:**
+- Hosts who opened `http://localhost:3000/admin` now use the link from the server's output, once per start and per browser. A server started where nobody sees stdout (a service, a detached process without a log) has no local way in: it needs the admin key, as Docker always has.
+- The link is as good as a key for as long as the server runs, on that machine only. It is in the terminal's scrollback, in whatever captures stdout (a service's journal), and in the browser's history of the one request that used it. Whoever can read those on the machine could already read the data folder.
+- A tunnel on the machine still makes the sign-in page reachable for anyone who knows the path, with a key accepted over what looks like loopback (D34's TLS rule). The key and the code are the gate, as from anywhere else.
+- `TRUST_PROXY=1` on a server that people can also reach directly lets them claim any address: bans by address and the lockouts stop meaning anything. It is for a port that only the proxy reaches.
+- A `deploy/` stack installed before this has no `TRUST_PROXY` line: its compose file is the host's own and an update doesn't change it. Until the host adds the line, the shared lockouts of D53 remain.
+- Behind a proxy without `TRUST_PROXY`, the 64 waiting connections are shared by everyone as well. Members who are signed in don't count, and a waiting connection is only closed when a newer one needs its place.
+- Who left a mailbox item is known only while the server runs, so the per-sender half starts over at a restart.
+- A message that already has more than 20 different reactions keeps them; it takes no new ones until some are gone. The same goes for a server with more than 200 channels.
+- The game's own address limits still read the first address in `X-Forwarded-For` whether or not a proxy is trusted. That is upstream's behaviour in the vendored server; changing it would lump every player behind a host's own proxy together, so it is left.
+
+**Not changed, and why:**
+- Plain HTTP is still what `npm start` serves; the app marks it (D60).
+- Installers and updates are still unsigned on Windows and Linux and ad-hoc signed on macOS (D21, D29): that takes certificates, not code.
+- An app from before upload keys still uploads by its socket id (D24), which every member is sent. Refusing those would cut off apps that haven't updated.
+
+**Alternatives:** `ADMIN_LOCAL` off by default (closes the same hole, but every host on their own machine then needs a key and an authenticator app); only dropping the `/admin` forward, so that the random path is the secret (it is long-lived and D52 says it is not one); a local token kept in the data folder across restarts (a lasting secret on disk for the sake of one click per start); counting wrong invites per key instead of per address (keys are free to make); no wrong-invite limit at all (80-bit tokens can't be guessed either way, but D51's limit also keeps the log readable); a fixed list of proxy addresses to trust (a container's address changes; the stack's network is the boundary instead); refusing the newest waiting connection (the person locked out would be the one signing in); storing the sender with each mailbox item (the disk would say who wrote to whom).
+
+## D62: A review against OWASP ASVS 5.0 Level 2: what it found in the dashboard and the socket protocol · Active
+**Context:** a review of `admin.js` and the socket protocol against the ASVS 5.0 requirements for Level 2, done at the same time as D61's. D61 already covers the largest findings (the local rule, shared addresses behind a proxy, reactions, mailboxes, bytes per connection). What was left:
+- On an open server (D43) any member could set the server's icon to any https address. Every app and the dashboard then load it, and its host learns their addresses. Profile pictures were held to GIPHY for that reason; the icon was not.
+- A web page on any site could open a chat socket: the handshake accepted any `Origin`.
+- A session of any age could make a key, revoke one, or reset anyone's 2-step sign-in, and a reset left the key's sessions running. Nothing showed which keys were signed in.
+- A code was good for three time steps, 90 seconds.
+- `X-Forwarded-Proto: https` was believed from any peer, which is the test for "keys only over TLS".
+- A profile id could be `__proto__` (never a member, and an invite use spent per connect) or carry a line break into log lines. Voice channel names kept line breaks. `emoji:remove` and the signaling events relayed values they had not looked at.
+- Requests refused for lack of a permission left no trace. `gif:search` and `game:login` answered with the raw error text.
+
+**Decision:**
+- **An icon link is an administrator's to set** (a role with Administrator, or the dashboard). From anyone else the icon follows the profile rule: an uploaded image or a GIPHY address.
+- **Sockets only for the app.** A handshake is accepted with no `Origin` (not a web page) or with `friendspeak://app`; CORS names that origin instead of `*`.
+- **Key management needs a sign-in from the last 15 minutes**: making a key, revoking one, resetting 2-step sign-in. A local session (D61) is exempt: it has no key to show again. A reset ends the key's other sessions. The keys page shows how many sessions each key has and can sign a key out everywhere.
+- **A code is good for its own 30 s step and the one before**, 60 s at most, not the one after.
+- **`X-Forwarded-Proto` counts only from where a proxy can be:** the host said there is one (`TRUST_PROXY`, `PUBLIC_URL`), or the peer's address is loopback or private.
+- **The session cookie is `__Secure-fs_admin` over TLS**, and `object-src 'none'` is in the dashboard's CSP.
+- **Sign-in failures are counted per /64 for IPv6.**
+- **Validation:** a `hello` with an id that is `__proto__` or has a control character is refused before the invite is looked at; channel names lose control characters; `emoji:remove` takes only the name of an emoji that exists; signaling data must be an object; a GIF's size is clamped.
+- **`[perm]` log lines** for refused requests: who and which event, never the content (D49). The two error answers are fixed texts, with the cause in the server's log.
+
+**Consequences:**
+- A member of an open server who pastes a link as the icon is told to upload an image. A link that is already set stays until someone changes it.
+- Anything that opened a chat socket from a web page on another origin stops working. There is no such client: the app has had one origin since D10, and scripts send no `Origin`.
+- An admin who has been signed in for more than 15 minutes signs out and in again before managing keys. With one phone and one key that is one more code.
+- A server whose clock is ahead of the phone's by more than a few seconds refuses codes that 2-step sign-in used to take. The one-step grace is for typing, in one direction.
+- A proxy on a public address in front of a server that was told nothing (`TRUST_PROXY`, `PUBLIC_URL`) can no longer vouch for TLS, and sign-in there says it needs HTTPS. A proxy on the same machine or network works as before. On a private network a client can still send the header itself; what it gives away is its own key, over its own connection.
+- The dashboard's cookie changes name over TLS. Sessions are in memory, so the update's restart ends them anyway.
+- `__Host-` is not used: it needs `Path=/`, and the cookie is scoped to the dashboard's path.
+
+**Not changed, and why:**
+- **HSTS** is still the proxy's to send (the `deploy/` stack's Caddy does). From the server it would also reach `localhost` and a self-signed address, where it either does nothing or breaks other things on the machine. `includeSubDomains` is not added to the stack: a host's other subdomains are theirs.
+- **Open mode** still lets every member ban, remove and manage channels until an administrator exists (D43), and **invite tokens** are still stored in clear so they can be shown again (D51).
+- **TOTP secrets** are stored in clear next to the key hashes (D52); `ADMIN_KEY`'s hash is unsalted, which matters only for a weak key.
+- **Uploads** still trust the declared content type, and a file's address is all it takes to download it (D24).
+- `nosniff` is on the dashboard, uploads and media, not on the game's files or `/api/info`.
+
+**Alternatives:** asking for the key or a code again in a dialog instead of a fresh sign-in (more to build and the same proof); no time limit but a code on every key change (a key without 2-step has none); only the current step for codes (the strict reading of the 30 s rule, and a code typed at second 29 fails); believing `X-Forwarded-Proto` only with `TRUST_PROXY` (locks out every host behind their own proxy until they set it, for a header that only the key's owner can forge); a list of allowed origins in the environment (nobody has another client).
+
+## D63: No open servers: the first to join is the administrator · Active
+**Context:** a security review by the OWASP testing guide. D43 left a server open until someone held a role with `admin`: every member could ban and remove the others, delete channels with their history and files, and change the server's name and settings. That was the state of every new server, for as long as the host didn't open the dashboard, and nothing said so. D43 turned down "the first person to connect is admin" as a race. Since D51 joining takes an invite, and the first one is printed only where the host can read it.
+
+**Decision:**
+- **Permissions always apply.** `permissionsOn` is gone from the saved state. `permsOf()` has no open case: without a role, a member gets the defaults (`view`, `send` and the two mention keys, unless the host changed them).
+- **The first to join is the administrator.** When someone joins with an invite, and the server has no members and nobody is an administrator, they are given the highest role that carries `admin`. When there is no such role, one named `Admin` is made, first in the list. It is an ordinary role: it can be renamed, given to others and taken away.
+- **Only with an invite.** On a server with invites switched off, the first to connect gets nothing: an address alone must not be enough to take a server.
+- **Servers from before this are not given an administrator.** One that was open and has members keeps them, with the defaults. The server says at every start that nobody is an administrator, and the dashboard's Roles view says so too, until the host gives someone a role with Administrator.
+- **The app can manage roles from the start**, by `manageRoles` as on any server: the rule that roles were set up in the dashboard until someone was an admin went with the open mode.
+- **Version skew (D29):** `perms.open` is still sent, always `false`, and `permissionsOn` always `true`, so older apps see a server with permissions on. The app still reads both, for servers from before this.
+- **D62's icon rule is the general one now.** Only an administrator or the dashboard changes the server's settings, so the separate check that kept a member of an open server from setting a link as the icon is gone.
+- **With it:** the server no longer says it is Express (`X-Powered-By`), every answer carries `X-Content-Type-Options: nosniff`, and an upload that stops sending for 30 seconds is dropped, so the space it reserved comes back.
+
+**Consequences:**
+- On a server that was open, members lose what only the open mode gave them: channels, emojis, other people's files and messages, bans, removals and the server's settings, until someone has a role that allows it. Nothing is deleted, and nobody is locked out of reading or writing.
+- Whoever the host hands the first invite to is the administrator, the host or not. A host who wants someone else to be it gives them the role and takes their own away, in the app or the dashboard.
+- When everyone has left or been removed, the next person to join with an invite is the administrator again: the server is empty, as a new one is.
+- A server run with `ADMIN=off` that was open has no way to an administrator but the saved state. It needs the dashboard once.
+
+**Alternatives:** making the earliest invite join on record the administrator of a server that was open (the record starts with D51 and keeps a hundred joins: on an older server the first name in it is a friend, not the host); the next member to connect after the update (a race between friends); keeping the open mode behind a setting (the default is what the review was about, and a second mode is a second set of rules to keep right); a warning only (hosts who never open the dashboard never see it).
+
+## D64: Releases carry signed provenance, and the job that builds can't publish · Active
+**Context:** an audit of the release pipeline with OpenSSF Scorecard (3.4 of 10) and against SLSA. The workflow was already careful (D29: actions pinned to commits, a token per job, a draft until everything built), but nothing tied a published file to the commit and the run that built it, so the release reached no SLSA build level. The job that built the installers also held the token that uploads them, and it runs every dependency's code. Release builds restored caches that any run on `dev` can write. A release could be started by hand from any branch. The base image and the Rust compiler were whatever a tag or the runner gave that day. What ships is installed by every app and pulled by every auto-updating server.
+
+**Decision:**
+- **Provenance:** the release workflow signs an attestation for every installer, blockmap and `latest*.yml`, and for the image by its digest (`actions/attest-build-provenance`: Sigstore, signed as the workflow itself through GitHub's OIDC token, so there is no key to keep or lose). It says which repository, commit, workflow and run built the file. GitHub stores it, the image's copy is also pushed to the registry, and the installers' is also a release asset, `friendspeak-<version>.intoto.jsonl`. Anyone checks a download with `gh attestation verify` (SECURITY.md).
+- **Building and publishing are separate jobs.** `desktop` builds with a token that can only read, and hands the files over as workflow artifacts. `assets` runs no code from the repo or its dependencies: it downloads them, signs and uploads to the draft. electron-builder no longer publishes (`--publish never`).
+- **No caches in release builds:** no npm cache and no BuildKit layer cache. A release takes a few minutes longer.
+- **`prod` only:** the first job, which the others all need, runs only for `refs/heads/prod`, also when the workflow is started by hand.
+- **`:latest` is set by digest,** from the build job's output, not by reading the version tag back.
+- **Pinned inputs:** the base image by digest in the `Dockerfile` (on each `FROM` line, so Dependabot can read it), the sidecar's compiler in `native/rust-toolchain.toml`. `.github/dependabot.yml` opens weekly PRs into `dev` for those, the actions, and npm and cargo packages (minor and patch; a major version is a decision).
+- **With it:** `SECURITY.md` (private reports through GitHub), and CodeQL on our JavaScript and the workflows (`.github/workflows/codeql.yml`; the vendored game code is left out).
+- **In the repository's settings, which no file here can set:** rulesets (`prod` changes only by pull request with CI passed, no force push or deletion; `v*` tags can't be moved or deleted), immutable releases, secret scanning with push protection, Dependabot alerts, and private vulnerability reporting, which `SECURITY.md` points to. The maintainer turns these on.
+
+**Consequences:**
+- This is SLSA Build Level 2: built on a hosted platform, with provenance the platform signs. The separate jobs and the missing caches are steps toward Level 3; the level itself wants the build in a reusable workflow that the calling workflow can't influence.
+- Nothing in the app or the server changes, and neither checks the provenance. The app still trusts the hash in `latest*.yml` from the same release, and servers still follow `:latest`. Someone who can publish a release can still update everyone; what's new is that a file not built by this workflow from this repository can be told apart, by anyone who looks.
+- The base image no longer follows its tag. The image still gets Debian's fixes at build time (`apt-get upgrade`), and a newer Node only when the Dependabot PR is merged. That step also means two builds of one commit can differ.
+- Dependabot's npm PRs need a look at the lockfile: an npm other than Node 24's can drop optional entries (AGENTS.md → Gotchas), which `npm ci` in CI catches.
+- A build machine downloads the pinned compiler once (rustup does it on the first build in `native/`).
+- No licence file yet: that is the maintainer's choice to make, not an audit fix. `deploy/install.sh` still runs Docker's own installer from `get.docker.com` when the host has no Docker; it has no hash to pin.
+
+**Alternatives:** the SLSA GitHub generator in a reusable workflow (Level 3, but its builders don't fit three operating systems of electron-builder plus a Rust sidecar; revisit); a signing key of our own with cosign or minisign (a secret to store and rotate, and the keyless signature already names the workflow); having the app verify the attestation before installing an update (the real fix for "whoever can publish can update everyone", but it needs a Sigstore verifier in the app and a way to roll its trust root: later, with code signing, D21); keeping the caches and trusting `dev` (a poisoned cache is exactly what would not show in a review).
+
+## D65: The containers against the CIS Docker Benchmark: ceilings, and the same hardening for the sidecars · Active
+**Context:** an audit of the image and both stacks against the image and container sections of the CIS Docker Benchmark (4 and 5). The friendspeak container already passed most of it (D21: runs as `node`, read-only root, no capabilities, `no-new-privileges`, a health check). The two containers beside it did not. Watchtower, which holds the Docker socket, ran with Docker's defaults. Caddy, the only one the internet reaches in the domain stack (D53), had a writable root and no health check. No service had a memory or process ceiling, so a leak or a flood in one took the machine with it. The image still carried Debian's 11 setuid programs, and nothing looked for known vulnerabilities in it.
+
+**Decision:**
+- **Ceilings on every service** (5.10, 5.28): `mem_limit` and `pids_limit`. friendspeak gets 1 GB (`FRIENDSPEAK_MEMORY`) and 512 processes; it idles at about 80 MB and 12. Caddy 512 MB and 256, Watchtower 256 MB and 128. Past the memory ceiling the kernel ends the container and the restart policy brings it back, which D49 records as an unclean exit.
+- **Watchtower** gets what friendspeak has: `read_only`, `cap_drop: ALL`, `no-new-privileges` (5.3, 5.12, 5.25). It needs none of them to use the socket, which root owns. Checked with a real update from a local registry: the container was replaced and kept its settings.
+- **Caddy** gets `read_only` with a tmpfs `/tmp` (it writes only to its two volumes) and a health check on its admin endpoint, which listens inside the container only (5.12, 5.26).
+- **No setuid programs in the image** (4.8): the bit is removed from all of them after `apt-get upgrade`. `no-new-privileges` already made them useless under compose; this covers a plain `docker run`.
+- **`image-scan.yml`** (4.4) builds the image and fails on a high or critical vulnerability that has a fix, when the `Dockerfile` or the lockfile changes and weekly. Grype, through `anchore/scan-action` pinned to a commit (D64).
+
+**Consequences:**
+- A server that really needs more than 1 GB is restarted until `FRIENDSPEAK_MEMORY` is raised. The dashboard's crash reports show it as unclean exits.
+- For `localhost`, Caddy logs once that it couldn't install its own root certificate in the container's trust store. Nothing uses it there; a real domain doesn't take that path.
+- A failed scan on `dev` usually means "rebuild": the fix arrives through `apt-get upgrade` or a Dependabot PR.
+
+**Left as they are, on purpose:**
+- **The Docker socket in Watchtower** (5.31). It is what replaces the container (D29). A socket proxy in between wouldn't narrow it: creating a container is the call an update needs, and it is also the one that gives root. Still opt-in in the root stack, and `install.sh` says what it is before asking.
+- **Caddy runs as root** (4.1) with only `NET_BIND_SERVICE`. Another user would lose access to the certificates in the volumes of hosts already running. **`caddy:2` isn't pinned** (5.27): hosts update with `docker compose pull`, and a digest in the compose file would stop Caddy's fixes from reaching them.
+- **`restart: unless-stopped`**, not `on-failure:5` (5.14): the server exits on an uncaught error so that Docker restarts it (D49). **Ports on every interface** (5.13): it is a server for friends elsewhere.
+- **No CPU limit** (5.11): one busy container among three is not what takes a small host down, and a cap would slow the server on exactly those hosts.
+- **Secrets as environment variables.** Compose secrets would need the server to read files, and whoever can run `docker inspect` is root on the machine already.
+- **The host** (sections 1 to 3, 6, 7: user namespaces, auditing, the daemon's files) belongs to whoever runs it. `docker-bench-security` checks it.
+
+**Alternatives:** a distroless base (no shell, `apt` or setuid programs at all, but also no `apt-get upgrade` between base releases and a harder container to debug; revisit); a network of its own for Watchtower and friendspeak (only its token-checked API is on the shared one, and a container on two networks is one more thing for Watchtower to recreate correctly); scanning in `release.yml` (a release would then wait on a vulnerability found that morning, in a job that is kept free of anything it doesn't need, D64).
+
+## D66: What code scanning found: limits on the file routes, and two findings that stay · Active
+**Context:** the first CodeQL runs on `dev` (D64) reported seven findings, and Dependabot one.
+
+**Decision:**
+- **The routes that touch the disk are limited per address** (`POST /api/files`, `GET /files/…`, the dashboard's files): a number of requests a minute, then `429` (ARCHITECTURE.md → Files). Until now only the sockets and the dashboard's sign-in had limits (D61), so anyone who could reach the port could keep the server reading files. The limiter is `rate-limiter-flexible`, which the game's server already brings: no new dependency, and CodeQL knows it, so the finding closes by itself instead of by a dismissal.
+- **`scripts/release-notes.js` compares the version as text.** It built a pattern from its argument and escaped only the dots. The argument is ours (package.json's version, in CI), so nothing could be done with it; the pattern is gone all the same.
+- **`source-map-js` 1.2.2** in the lockfile (GHSA-68fv-2mgg-jv7q). It comes with `css-loader` and only runs when the game's client is built.
+
+**Left as they are, to be dismissed as false positives:**
+- **"Password hashed insecurely" at `inviteHash`** (`js/insufficient-password-hash`). What is hashed is an invite: 80 random bits that the server made, not a password someone chose (D51). A slow hash protects guessable input; here there is nothing to guess, and every `hello` would pay for it. CodeQL calls it a password because apps from before D51 send it in the field named `password`.
+- **"Disabling certificate validation" in `peekCertificate`** (`js/disabling-certificate-validation`). That connection only reads the certificate a self-signed server presents, to show its fingerprint and pin it (D20's trust on first use). Nothing is sent over it, and every later connection is checked against the pin.
+
+**Consequences:**
+- Behind a proxy without `TRUST_PROXY` everyone shares one address and so one allowance (D61). The numbers leave room for that; a host with a very large group behind such a proxy sets `TRUST_PROXY=1`.
+- The limits count requests, not bytes: one address can still download large files 3000 times a minute. Storage is capped (D24) and bandwidth is the host's to limit.
+
+**Alternatives:** `express-rate-limit` (a new dependency for what one already installed does); a limiter of our own like the sockets' (CodeQL can't see it, so the three findings would be dismissed by hand and a route added later would not be checked against it); one limit on every route (the game's client loads hundreds of files at once, and `/media` is fetched in bulk at connect).
+
+## D67: An audit of the media sidecar: shares end with the page, and its input is checked · Active
+**Context:** a security audit of the media sidecar (`native/`, D45) and of the main process's link to it. The sidecar takes commands from the app's page, relayed by the main process, and is built with `panic = "abort"`: any panic ends every share.
+
+**Decision:**
+- **A share ends with the page that started it** (high). The main process stopped the sidecar only when the app quit. After a reload or a crash of the page the capture went on, and the new page knew nothing of it: a screen or camera still being sent with nothing on screen saying so. The main process now sends `stop` for both kinds when the page's main frame navigates to a new document, when its process is gone, and when the window closes (`stopShares` in `desktop/main.js`). The game's iframe navigating and same-document changes don't count.
+- **A `tier` is clamped** (low): 2–7680 by 2–4320, 1–240 fps, 30 when the rate isn't a number (`Tier::clamped`, on `start` and `quality`). It came from the page unchecked, and a width of 120 or less made the test pattern divide by zero or write past its buffer's end, a panic. The test pattern's box now fits any width.
+- **A camera name that matches nothing is an error** (low), `no camera found`, on Windows and macOS. It used to open the first or the default camera: a different camera from the one picked. With no name the default is still used. The app falls back to the browser engine on that error, as on any other.
+- **The Windows program is built with Control Flow Guard and loads its DLLs from System32 only** (hardening; `native/.cargo/config.toml`: `-C control-flow-guard` for Rust, `/guard:cf` for the C++ it compiles, `/DEPENDENTLOADFLAG:0x800` for the linker). CI reads the built program's load configuration and fails when the guard's table is empty.
+- **The queue of UDP packets waiting for the engine holds 4096** (hardening; `net::QUEUED`). Past that the readers drop what arrives, as a full socket buffer would. A flood on Windows showed no memory growth before this; it removes the case in theory.
+
+**Left as they are:**
+- **The sidecar is not code-signed.** That takes a certificate, as for the app itself.
+- **The install directory is the user's own** on a per-user install, so a program running as that user can replace the sidecar. By design: such a program can replace the app too.
+- **The length of a locked camera buffer on Windows** (`Lock2D` in `camera_win.rs`). The audit measured it: the lengths match.
+
+**Consequences:**
+- A page that reloads while sharing has to start its share again; nothing restores it.
+- The sidecar outlives the page, as before: only its streams stop, so the next share starts without a new process.
+- The guard's check runs in CI on Windows only. Nothing checks the DLL search flag.
+
+**Alternatives:** stopping the sidecar's process on navigation (the next page would wait for it to start again, and its `ready`); having the new page ask what is running and take it over (the viewers' connections belong to the old page's signaling, so there is nothing to take over); refusing a bad `tier` with an error (a clamp gives a stream where the numbers are merely odd, and the engine already sizes to the source).

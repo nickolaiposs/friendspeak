@@ -8,6 +8,7 @@ const http = require('http');
 const https = require('https');
 const os = require('os');
 const crypto = require('crypto');
+const net = require('net');
 const { pipeline } = require('stream');
 const express = require('express');
 const { Server } = require('socket.io');
@@ -16,7 +17,7 @@ const { createUpdater } = require('./updater');
 const logbuffer = require('./logbuffer');
 const { createCrashLog } = require('./crashlog');
 const { createPersist } = require('./persist');
-const { createAdmin } = require('./admin');
+const { createAdmin, httpLimit } = require('./admin');
 
 const VERSION = require('./package.json').version;
 
@@ -58,6 +59,7 @@ async function startServer(opts = {}) {
   const PORT = opts.port ?? 3000;
   const HOST = opts.host;
   const USE_HTTPS = !!opts.https;
+  const TRUST_PROXY = opts.trustProxy === true; // TRUST_PROXY=1: a reverse proxy in front says who is calling (D61)
   const GIPHY_API_KEY = opts.giphyKey || '';
   let fingerprint = null; // SHA-256 of the self-signed certificate, when HTTPS
   const DATA_DIR = opts.dataDir || path.join(__dirname, 'data');
@@ -131,13 +133,14 @@ async function startServer(opts = {}) {
   const MAX_ROLES_PER_MEMBER = 10;
   const MAX_ROLE_NAME = 32;
   const MAX_CHANNEL_NAME = 48; // room for emojis, incl. :custom: ones
-  // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). Until someone holds
-  // an Administrator role the server is in "open mode" and everyone can do everything.
+  const MAX_CHANNELS = 200;
+  const MAX_REACTIONS = 20; // different reactions on one message
+  // Server-wide permissions (docs/ARCHITECTURE.md → Permissions). They always apply: the first
+  // person to join a new server becomes its administrator (D63).
   const PERM_KEYS = ['admin', 'view', 'send', 'mentionRoles', 'mentionEveryone', 'kick', 'voiceKick', 'ban', 'forceMute', 'manageRoles', 'manageChannels', 'manageEmojis', 'manageFiles', 'manageMessages', 'createInvites'];
   const CHANNEL_PERM_KEYS = ['view', 'send', 'manage'];
   // createInvites is off unless a role or the defaults turn it on (D51)
   const DEFAULT_PERMS = Object.fromEntries(PERM_KEYS.map((k) => [k, ['view', 'send', 'mentionRoles', 'mentionEveryone'].includes(k)]));
-  const OPEN_ROLES_ERROR = 'Roles are set up in the admin dashboard until someone on this server is an admin';
   // Invites (D51): the tokens people join with
   const INVITE_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'; // Crockford base32: no I, L, O or U
   const INVITE_CHARS = 16; // 80 random bits
@@ -157,13 +160,18 @@ async function startServer(opts = {}) {
   const MAX_MAIL_BLOB = 160 * 1024; // one sealed op (MAX_BLOB in dm.js)
   const MAX_MAILBOX_ITEMS = 500;
   const MAX_MAILBOX_BYTES = 8 * 1024 * 1024;
+  const MAILBOX_SHARE = 2; // one sender fills at most 1/MAILBOX_SHARE of a mailbox, so mail from others still fits
   const MAX_MAILBOXES = 5000;
   const MAX_DM_KEYS = 20000; // keys remembered as answering the /dm challenge the new way
   const MAIL_TTL = 30 * 864e5; // mail nobody collected
   const MAILBOX_IDLE = 90 * 864e5; // an empty mailbox whose owner never came back
 
-  fs.mkdirSync(FILES_DIR, { recursive: true });
-  for (const dir of [PROFILES_DIR, MESSAGES_DIR, MAIL_DIR]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const dir of [FILES_DIR, PROFILES_DIR, MESSAGES_DIR, MAIL_DIR]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Uploads are served by the server, to whoever has a file's address (D24); nobody else on the machine reads the folder.
+  // One from before this was made with the default mode (best effort, like the files below).
+  try {
+    fs.chmodSync(FILES_DIR, 0o700);
+  } catch {}
   // What holds messages, invites, keys and addresses is for the server's own user only. Files
   // from before this were made with the default mode: tighten them (best effort: some volumes can't).
   const ownerOnly = (file) => {
@@ -202,7 +210,6 @@ async function startServer(opts = {}) {
       roles: [], // { id, name, color, perms, grantable }, first = highest; managed in the dashboard and, with permissions, in the app (D34, D43)
       defaultPerms: { ...DEFAULT_PERMS }, // what everybody gets unless a role they hold says otherwise
       defaultGrantable: [], // role ids everyone may hand out when defaultPerms.manageRoles is on
-      permissionsOn: false, // false = open mode (everyone can do everything); sticky once someone holds an Administrator role
       forceMuted: [], // profile ids a moderator force-muted
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
@@ -308,7 +315,7 @@ async function startServer(opts = {}) {
     state.memberRoles = memberRoles;
     state.defaultPerms = { ...DEFAULT_PERMS, ...cleanPermMap(state.defaultPerms) };
     state.defaultGrantable = cleanIdList(state.defaultGrantable, known);
-    state.permissionsOn = state.permissionsOn === true;
+    delete state.permissionsOn; // from before D63: whether permissions applied yet. They always do now.
     state.forceMuted = [...new Set((Array.isArray(state.forceMuted) ? state.forceMuted : []).filter((x) => typeof x === 'string' && x && x.length <= 64))];
     for (const ch of Array.isArray(state.channels) ? state.channels : []) {
       const ov = cleanOverrides(ch.overrides, known);
@@ -480,7 +487,7 @@ async function startServer(opts = {}) {
 
   const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '');
   // Who a log line is about: a name is user input, so no control characters; plus the start of the id
-  const whoIs = (p) => `${String(p?.name ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 32) || 'anon'} (${String(p?.id ?? '').slice(0, 8)})`;
+  const whoIs = (p) => `${String(p?.name ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 32) || 'anon'} (${String(p?.id ?? '').replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 8)})`;
   const channelIndex = new Map(); // id -> its entry in state.channels
   // Call after state.channels gains or loses one
   function indexChannels() {
@@ -496,7 +503,7 @@ async function startServer(opts = {}) {
   const isGiphy = (v) => typeof v === 'string' && v.length <= 1000 && /^https:\/\/(?:media\d*|i)\.giphy\.com\/[^\s"'<>]+$/.test(v);
   // An uploaded image (data URL) or a GIF picked from GIPHY: what a member's profile may point at
   const isImageRef = (v, max) => isDataImage(v, max) || isGiphy(v);
-  // The server's own icon may be any https image: the host chooses it (Settings → Server, the dashboard)
+  // The server's own icon may be any https image: only an administrator or the dashboard sets it (D62, D63)
   const isIconRef = (v, max) => isDataImage(v, max) || (typeof v === 'string' && v.length <= 1000 && /^https:\/\/[^\s"'<>]+$/.test(v));
   const isHexColor = (v) => /^#[0-9a-f]{6}$/i.test(v);
   // A message's text: no NUL (the app's renderer uses it as a marker), trimmed, capped
@@ -558,14 +565,17 @@ async function startServer(opts = {}) {
     return state.roles.filter((r) => holdsRole(pid, r.id) && (pinned || isAesthetic(r)));
   };
   const holdsAdminRole = (pid) => heldRoles(pid).some((r) => r.perms.admin === true);
-  const isAdminPid = (pid) => state.permissionsOn && (!!state.defaultPerms.admin || holdsAdminRole(pid));
+  const isAdminPid = (pid) => !!state.defaultPerms.admin || holdsAdminRole(pid);
+  // Whether anybody is an administrator. With nobody, only the dashboard can manage the server.
+  const hasAdmin = () => !!state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole);
 
   // What a profile may do: { open, admin, ...PERM_KEYS, grantable, channels: { [channelId]: { view, send, manage } } }
+  // (`open` is always false: apps from before D63 read it).
   // (only channels it can see). Open mode: everything but role management and invites (those are the dashboard's until someone is an admin).
   // The answer is kept per profile until permsStale(), and every caller gets the same frozen object:
   // the fan-out loops ask once per socket for every message (#105).
   const permsCache = new Map(); // profileId -> permsOf(profileId)
-  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, permissionsOn, the channels and their overrides, the pins
+  // Call after anything permsOf() reads has changed: roles, who holds them, the defaults, the channels and their overrides, the pins
   const permsStale = () => permsCache.clear();
   function permsOf(pid) {
     let g = permsCache.get(pid);
@@ -579,27 +589,24 @@ async function startServer(opts = {}) {
     return g;
   }
   function resolvePerms(pid) {
-    const open = !state.permissionsOn;
-    const held = open ? [] : heldRoles(pid);
-    const admin = !open && (!!state.defaultPerms.admin || held.some((r) => r.perms.admin === true));
-    const g = { open, admin };
+    const held = heldRoles(pid);
+    const admin = !!state.defaultPerms.admin || held.some((r) => r.perms.admin === true);
+    const g = { open: false, admin };
     for (const k of PERM_KEYS) {
       if (k === 'admin') continue;
-      if (open) g[k] = k !== 'manageRoles' && k !== 'createInvites';
-      else if (admin) g[k] = true;
+      if (admin) g[k] = true;
       else {
         const r = held.find((x) => typeof x.perms[k] === 'boolean');
         g[k] = r ? r.perms[k] : !!state.defaultPerms[k];
       }
     }
-    if (open) g.grantable = [];
-    else if (admin) g.grantable = state.roles.map((r) => r.id);
+    if (admin) g.grantable = state.roles.map((r) => r.id);
     else if (!g.manageRoles) g.grantable = [];
     else g.grantable = [...new Set([...(state.defaultPerms.manageRoles ? state.defaultGrantable : []), ...held.flatMap((r) => r.grantable)])];
     g.channels = {};
     for (const ch of state.channels) {
       let c = { view: true, send: true, manage: true };
-      if (!open && !admin) {
+      if (!admin) {
         const pick = (k, base) => {
           const ov = ch.overrides;
           if (!ov) return base;
@@ -617,16 +624,28 @@ async function startServer(opts = {}) {
   const canView = (pid, cid) => !!permsOf(pid).channels[cid]?.view;
   // The actor of an action is { profileId } (the app) or { dashboard: true } (the admin dashboard, which may do anything valid)
   const isDash = (actor) => actor?.dashboard === true;
-  const noPerm = (what) => ({ error: `You don’t have permission to ${what}` });
+  // The answer to a request its sender may not make. `refusals` remembers these, so the sockets can log them.
+  const refusals = new WeakSet();
+  const noPerm = (what) => {
+    const r = { error: `You don’t have permission to ${what}` };
+    refusals.add(r);
+    return r;
+  };
   // null when the actor holds `key`, else the { error } to answer with
   const need = (actor, key, what) => (isDash(actor) || (typeof actor?.profileId === 'string' && permsOf(actor.profileId)[key]) ? null : noPerm(what));
   // Nobody but an admin acts on an admin
   const touchable = (actor, targetPid) => isDash(actor) || !isAdminPid(targetPid) || isAdminPid(actor.profileId);
   const ADMIN_TARGET = { error: 'Only an administrator can do that to an administrator' };
+  refusals.add(ADMIN_TARGET);
+  // A profile id is whatever the app made up (a UUID), but it becomes a key of state.profiles and part of
+  // log lines: no control characters, and not the one name that is special on every object.
+  const isProfileId = (v) => typeof v === 'string' && v !== '__proto__' && !/[\u0000-\u001f\u007f]/.test(v);
+  // A channel's name: one line
+  const cleanChannelName = (v) => str(typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, ' ') : '', MAX_CHANNEL_NAME).trim();
 
   function cleanProfile(p) {
     if (!isObj(p)) p = {};
-    const pid = str(p.id, 64) || id();
+    const pid = (isProfileId(p.id) && str(p.id, 64)) || id();
     return {
       id: pid,
       card: cleanCard(p.card, pid),
@@ -802,7 +821,18 @@ async function startServer(opts = {}) {
   // Bans match the profile id and, optionally, the IP it last connected from.
   // Identities are spoofable (D3), so this keeps out a friend who's not
   // welcome any more, not a determined attacker (D27).
-  const clientIp = (socket) => String(socket.handshake.address || '').replace(/^::ffff:/, '');
+  // The address a request came from. Behind a reverse proxy that is the proxy's own, for everyone, unless
+  // TRUST_PROXY says the proxy is to be believed (D61): then it is the last address in X-Forwarded-For,
+  // the one the proxy next to us added itself. Anything a client put in front of it is not looked at.
+  const addressOf = (headers, peer) => {
+    peer = String(peer || '').replace(/^::ffff:/, '');
+    if (!TRUST_PROXY) return peer;
+    const last = String(headers?.['x-forwarded-for'] || '').split(',').pop().trim().replace(/^::ffff:/, '');
+    return net.isIP(last) ? last : peer;
+  };
+  const clientIp = (socket) => addressOf(socket.handshake.headers, socket.handshake.address);
+  // Behind a proxy we were not told to believe: every address we see is the proxy's
+  const proxied = (socket) => !TRUST_PROXY && socket.handshake.headers['x-forwarded-for'] !== undefined;
   const isLoopback = (ip) => ip === '::1' || ip.startsWith('127.');
   const lastIp = new Map(); // profileId -> IP, for banning people who already left (memory only)
   const banFor = (pid, ip) => state.bans.find((b) => b.profileId === pid || (b.ip && b.ip === ip));
@@ -862,6 +892,9 @@ async function startServer(opts = {}) {
   // ---------- http ----------
 
   const app = express();
+  app.disable('x-powered-by');
+  // Nothing this server sends is to be read as another type than it says
+  app.use((_req, res, next) => (res.set('X-Content-Type-Options', 'nosniff'), next()));
   // The server hosts no chat UI: the client ships only in the desktop app (D26).
   // The admin dashboard is the one exception (D34), at a path of its own (D52).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
@@ -877,12 +910,17 @@ async function startServer(opts = {}) {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     });
   app.options('/api/files', (_req, res) => cors(res).sendStatus(204));
+  // Per address and minute. Behind a proxy without TRUST_PROXY every member shares one address (D61), so
+  // these are well above what a group needs: they stop a flood, not a busy evening.
+  const reqAddr = (req) => addressOf(req.headers, req.socket.remoteAddress);
+  const uploadLimit = httpLimit({ points: 120, addrOf: reqAddr, tag: '[files]' });
+  const downloadLimit = httpLimit({ points: 3000, addrOf: reqAddr, tag: '[files]' });
 
   // Upload one file: raw body, name in x-file-name (URI-encoded), uploader
   // identified by x-friendspeak-sid (a socket that passed `hello`) and, when
   // that socket asked for one, the upload key from its hello in x-friendspeak-upload.
-  app.post('/api/files', (req, res) => {
-    cors(res);
+  // The CORS headers come first, so the app can read a refusal by the limit too
+  app.post('/api/files', (_req, res, next) => (cors(res), next()), uploadLimit, (req, res) => {
     const u = users.get(String(req.get('x-friendspeak-sid') || ''));
     if (!u) return res.status(401).json({ error: 'Not connected to this server' });
     if (u.uploadKey) {
@@ -921,12 +959,15 @@ async function startServer(opts = {}) {
     const fid = crypto.randomBytes(16).toString('hex'); // unguessable: the URL is the capability
     const tmp = filePath(fid) + '.part';
     reserved += size;
+    // The space is held while the upload runs: one that stops sending gives it back
+    req.setTimeout(30e3, () => req.destroy(new Error('Upload stalled')));
     let got = 0;
     let finished = false;
     const finish = (err) => {
       if (finished) return;
       finished = true;
       reserved -= size;
+      req.setTimeout(0);
       if (!err && got !== size) err = new Error('Upload was cut short');
       if (!err) {
         try {
@@ -962,10 +1003,10 @@ async function startServer(opts = {}) {
       got += chunk.length;
       if (got > size) req.destroy(Object.assign(new Error('File is larger than announced'), { status: 413 }));
     });
-    pipeline(req, fs.createWriteStream(tmp), finish);
+    pipeline(req, fs.createWriteStream(tmp, { mode: 0o600 }), finish);
   });
 
-  app.get('/files/:id/:name', (req, res) => {
+  app.get('/files/:id/:name', downloadLimit, (req, res) => {
     const f = fileById(req.params.id);
     if (!f || !f.messageId) return res.sendStatus(404);
     const inline = !('download' in req.query) && INLINE_TYPES.test(f.type);
@@ -1113,6 +1154,7 @@ async function startServer(opts = {}) {
         sharing: u.sharing,
         camera: u.camera,
         playing: u.playing,
+        game: u.game || '',
       };
     });
   }
@@ -1137,7 +1179,7 @@ async function startServer(opts = {}) {
       memberRoles: state.memberRoles,
       defaultPerms: state.defaultPerms,
       defaultGrantable: state.defaultGrantable,
-      permissionsOn: state.permissionsOn,
+      permissionsOn: true, // always, since D63: apps from before it read this
       forceMuted: state.forceMuted,
       inviteOnly: state.inviteOnly,
       storage: usage(),
@@ -1156,9 +1198,16 @@ async function startServer(opts = {}) {
 
   const gameRef = { current: null };
 
+  // Where the chat sockets may be opened from. A browser always names the page's origin; the app's is fixed (D10).
+  const APP_ORIGINS = ['friendspeak://app'];
+  const originAllowed = (origin) => origin === undefined || APP_ORIGINS.includes(origin);
+
   function attach(server) {
     const io = new Server(server, {
-      cors: { origin: '*' }, // clients connect from the desktop app's friendspeak:// origin
+      // Clients connect from the desktop app's friendspeak:// origin, or are no web page at all (no Origin).
+      // A page on some website is neither: its browser would otherwise open a socket for it.
+      cors: { origin: APP_ORIGINS },
+      allowRequest: (req, cb) => cb(null, originAllowed(req.headers.origin)),
       serveClient: false, // the desktop app bundles socket.io.js itself
       maxHttpBufferSize: 4e6, // hello/profile:update carry the avatar and background images
       destroyUpgrade: false, // the game worlds share this http server on other paths
@@ -1208,7 +1257,53 @@ async function startServer(opts = {}) {
     io.use(guard);
     io.of('/dm').use(guard);
 
-    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: state.permissionsOn });
+    // Under the sockets, per connection (D61). The budget above counts events, and one event can be
+    // 4 MB that the server parses before any handler sees it, from someone who never says hello:
+    //  - bytes are budgeted too. A connection that goes over is closed. Until it belongs to a member
+    //    it gets what one hello needs (an app from before D58 sends its pictures in it), then a refill
+    //    that is no use for a flood.
+    //  - an address holds PENDING_PER_ADDRESS connections that haven't become a member's. One more
+    //    closes the oldest, so the newest, the person who is signing in right now, is never the one refused.
+    const BYTE_BUDGET = 16e6;
+    const BYTE_REFILL = 1e6; // per second
+    const PENDING_BYTES = 2.5e6;
+    const PENDING_REFILL = 50e3;
+    const PENDING_PER_ADDRESS = 64;
+    const pendingConns = new Map(); // address -> Set of connections, oldest first
+    io.engine.on('connection', (conn) => {
+      const ip = addressOf(conn.request?.headers, conn.remoteAddress);
+      let waiting = pendingConns.get(ip);
+      if (!waiting) pendingConns.set(ip, (waiting = new Set()));
+      if (waiting.size >= PENDING_PER_ADDRESS) waiting.values().next().value.close();
+      waiting.add(conn);
+      const settle = () => {
+        waiting.delete(conn);
+        if (!waiting.size && pendingConns.get(ip) === waiting) pendingConns.delete(ip);
+      };
+      let member = false;
+      let bytes = PENDING_BYTES;
+      let at = Date.now();
+      conn.fsAdmit = () => {
+        if (member) return;
+        member = true;
+        bytes = BYTE_BUDGET;
+        settle();
+      };
+      conn.on('message', (data) => {
+        const now = Date.now();
+        bytes = Math.min(member ? BYTE_BUDGET : PENDING_BYTES, bytes + ((now - at) / 1000) * (member ? BYTE_REFILL : PENDING_REFILL)) - (data?.length || 0);
+        at = now;
+        if (bytes < 0) {
+          if (member) console.warn(`[socket] closed a connection from ${ip}: it sent more than the server takes`);
+          conn.close();
+        }
+      });
+      conn.once('close', settle);
+    });
+    // This socket's connection belongs to a member from here on
+    const admit = (socket) => socket.conn.fsAdmit?.();
+
+    const rolesPayload = () => ({ roles: state.roles, memberRoles: state.memberRoles, defaultPerms: state.defaultPerms, defaultGrantable: state.defaultGrantable, permissionsOn: true });
     // '' when it isn't 1 to 32 characters once control characters are gone and it's trimmed
     const cleanRoleName = (v) => {
       const n = typeof v === 'string' ? v.replace(/[\u0000-\u001f\u007f]/g, '').trim() : '';
@@ -1231,6 +1326,23 @@ async function startServer(opts = {}) {
     }
     const isColor = (v) => typeof v === 'string' && isHexColor(v);
     const roleNamed = (name, except) => state.roles.some((r) => r !== except && r.name.toLowerCase() === name.toLowerCase());
+
+    // The first person to join a server is its administrator (D63): they are given the highest role
+    // that carries `admin`, made here when there is none. false when it can't be made.
+    function makeFirstAdmin(pid) {
+      let role = state.roles.find((r) => r.perms.admin === true);
+      if (!role) {
+        if (state.roles.length >= MAX_ROLES) return false;
+        let name = 'Admin';
+        for (let i = 2; roleNamed(name); i++) name = 'Admin ' + i;
+        role = { id: id(), name, color: '#e5484d', perms: { admin: true }, grantable: [] };
+        state.roles.unshift(role);
+      }
+      state.memberRoles[pid] = [role.id];
+      permsStale();
+      save();
+      return true;
+    }
 
     // Every socket that said hello is in one of two rooms: LEAN for apps that take pictures by
     // reference and the small events (`proto: 2` in hello, D58), FULL for apps from before that.
@@ -1268,11 +1380,9 @@ async function startServer(opts = {}) {
     };
 
     // Something changed who can do or see what (roles, role holders, default or channel permissions,
-    // or the channels themselves): tell everyone, take people out of voice channels they lost, and
-    // turn permissions on the first time someone is an administrator.
+    // or the channels themselves): tell everyone, and take people out of voice channels they lost.
     function permsChanged({ roles = true } = {}) {
       permsStale();
-      if (!state.permissionsOn && (state.defaultPerms.admin || Object.keys(state.memberRoles).some(holdsAdminRole))) state.permissionsOn = true;
       save();
       if (roles) io.emit('roles', rolesPayload());
       for (const [sid, u] of users) {
@@ -1323,6 +1433,7 @@ async function startServer(opts = {}) {
     // D51). Nobody else gets a socket here. (There used to be guests, sent by a friend code;
     // D55 took them out.)
     const dm = io.of('/dm');
+    const mailSender = new WeakMap(); // a mailbox item -> the profile id that left it, since this start
     const dmOnline = () => [...new Set([...dm.sockets.values()].filter((s) => s.data.verified).map((s) => s.data.profileId))];
     dm.use((socket, next) => {
       const { profileId } = socket.handshake.auth || {};
@@ -1344,6 +1455,7 @@ async function startServer(opts = {}) {
       // mailboxes, but it isn't present, can't signal and replaces no one.
       const arrive = () => {
         socket.data.verified = true;
+        admit(socket);
         // Newest wins, like chat sessions: a reconnect replaces the stale socket
         for (const s of dm.sockets.values()) if (s !== socket && s.data.profileId === pid) s.disconnect(true);
         socket.join('p:' + pid);
@@ -1354,7 +1466,7 @@ async function startServer(opts = {}) {
       if (!pinOf(pid)) arrive();
       socket.on('signal', ({ to, data } = {}) => {
         to = str(to, 64);
-        if (socket.data.verified && to && to !== pid && data && typeof data === 'object') dm.to('p:' + to).emit('signal', { from: pid, data });
+        if (socket.data.verified && to && to !== pid && isObj(data)) dm.to('p:' + to).emit('signal', { from: pid, data });
       });
       // Mailboxes: prove who you are by signing this nonce and the host you dialed (`v: 2`; see mailAddress)
       const nonce = crypto.randomBytes(16).toString('base64url');
@@ -1370,7 +1482,15 @@ async function startServer(opts = {}) {
         // A claimed member of an invite-only server has a mailbox once the pinned key has signed
         const member = !socket.data.mustProve || socket.data.verified;
         let box = member ? mail.get(addr) : null;
-        if (member && !box && mail.size < MAX_MAILBOXES) mail.set(addr, (box = { seen: 0, items: [] }));
+        // A new mailbox is for the key the profile is pinned to. Any key can sign the challenge, so a
+        // mailbox for whatever key signs would let one member make them until none are left for the rest.
+        // (A profile with no pinned key, on a server without invites, gets one for the connection.)
+        const pin = pinOf(pid);
+        const own = pin ? s === pin : !socket.data.madeBox;
+        if (member && !box && own && mail.size < MAX_MAILBOXES) {
+          mail.set(addr, (box = { seen: 0, items: [] }));
+          socket.data.madeBox = true;
+        }
         if (box) {
           box.seen = Date.now();
           saveMail(addr);
@@ -1393,7 +1513,11 @@ async function startServer(opts = {}) {
           return ack({ ok: true });
         }
         if (box.items.length >= MAX_MAILBOX_ITEMS || box.items.reduce((n, it) => n + it.blob.length, blob.length) > MAX_MAILBOX_BYTES) return ack({ error: 'Mailbox full' });
+        // What this sender already has waiting there. Kept in memory only: on disk a mailbox doesn't say who wrote to it.
+        const mine = box.items.filter((it) => mailSender.get(it) === pid);
+        if (mine.length >= MAX_MAILBOX_ITEMS / MAILBOX_SHARE || mine.reduce((n, it) => n + it.blob.length, blob.length) > MAX_MAILBOX_BYTES / MAILBOX_SHARE) return ack({ error: 'Mailbox full' });
         const item = { id: id(), blob, ts: now };
+        mailSender.set(item, pid);
         box.items.push(item);
         saveMail(to);
         dm.to('a:' + to).emit('mail', [{ id: item.id, blob }]);
@@ -1468,6 +1592,8 @@ async function startServer(opts = {}) {
       if (hadProfile) saveProfile(profileId);
       if (hadProfile) io.emit('profile:removed', { id: profileId });
       if (hadRoles) permsChanged();
+      // Their penguin goes with them: the game has its own sockets and its own sign-in tokens
+      gameRef.current?.revoke?.(profileId).catch((err) => console.error('[game] could not sign a removed member out:', err && err.message));
     }
 
     // What people can do to the server, shared by the chat sockets below and the
@@ -1523,14 +1649,9 @@ async function startServer(opts = {}) {
         return { ok: true };
       },
 
-      // Name, icon, voice quality and the game: admin only (open mode: anyone, as before).
-      // inviteOnly (whether joining takes an invite): an admin or the dashboard, never open mode.
+      // Name, icon, voice quality, the game and inviteOnly (whether joining takes an invite): an admin or the dashboard
       updateServer(actor, { name, icon, game, audioQuality: quality, inviteOnly }) {
-        if (!isDash(actor)) {
-          const g = permsOf(actor.profileId);
-          if (!g.open && !g.admin) return noPerm('change the server settings');
-          if (inviteOnly !== undefined && !g.admin) return noPerm('change who can join');
-        }
+        if (!isDash(actor) && !permsOf(actor.profileId).admin) return noPerm('change the server settings');
         if (inviteOnly !== undefined && typeof inviteOnly !== 'boolean') return { error: 'inviteOnly must be true or false' };
         if (name !== undefined) {
           name = str(name, 40).trim();
@@ -1549,6 +1670,7 @@ async function startServer(opts = {}) {
           if (game && !gameRef.current?.available) return { error: gameInfo().reason || 'The game is not available on this server' };
           state.gameEnabled = !!game;
           if (!game) for (const u of users.values()) u.playing = false;
+          if (!game) gameRef.current?.closeAll?.(); // the worlds have their own sockets
         }
         if (inviteOnly !== undefined) state.inviteOnly = inviteOnly;
         save();
@@ -1636,11 +1758,8 @@ async function startServer(opts = {}) {
 
       // --- roles and permissions ---
 
-      // The app can only touch roles once someone is an administrator (until then they are set up in
-      // the dashboard); after that it takes manageRoles. null when allowed.
+      // Touching roles takes manageRoles (the dashboard may always). null when allowed.
       roleGate(actor) {
-        if (isDash(actor)) return null;
-        if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
         return need(actor, 'manageRoles', 'manage roles');
       },
 
@@ -1775,10 +1894,7 @@ async function startServer(opts = {}) {
 
       // What everybody gets (admin only): perms is a partial key -> bool, grantable replaces the list
       setDefaultPerms(actor, { perms, grantable } = {}) {
-        if (!isDash(actor)) {
-          if (!state.permissionsOn) return { error: OPEN_ROLES_ERROR };
-          if (!permsOf(actor.profileId).admin) return noPerm('change the default permissions');
-        }
+        if (!isDash(actor) && !permsOf(actor.profileId).admin) return noPerm('change the default permissions');
         const next = { ...state.defaultPerms };
         if (perms !== undefined) {
           if (!isObj(perms)) return { error: 'Permissions must be an object' };
@@ -1808,7 +1924,12 @@ async function startServer(opts = {}) {
         socket.on(event, (payload, ack) => {
           if (!authed()) return typeof ack === 'function' && ack({ error: 'not authenticated' });
           try {
-            fn(isObj(payload) ? payload : {}, typeof ack === 'function' ? ack : () => {});
+            // What the server refuses for lack of a permission is logged: who and which request, never its content
+            const answer = (r) => {
+              if (isObj(r) && refusals.has(r)) console.warn(`[perm] refused ${event} from ${whoIs(users.get(socket.id)?.profile)}`);
+              if (typeof ack === 'function') ack(r);
+            };
+            fn(isObj(payload) ? payload : {}, answer);
           } catch (err) {
             console.error(`[socket] ${event}:`, err);
           }
@@ -1821,6 +1942,8 @@ async function startServer(opts = {}) {
         if (typeof ack !== 'function') return;
         const { profile, invite, password, proof, uploadKey: wantsKey, proto } = isObj(payload) ? payload : {};
         const lean = Number.isInteger(proto) && proto >= 2;
+        // An id that can't be one is refused here, before it costs an invite: cleanProfile would give it a new id on every connect
+        if (isObj(profile) && profile.id !== undefined && profile.id !== '' && !isProfileId(profile.id)) return ack({ error: 'This profile’s id can’t be used on a server. Make a new profile.' });
         const p = cleanProfile(profile);
         if (banFor(p.id, clientIp(socket))) {
           console.warn(`[auth] banned ${whoIs(p)} refused`);
@@ -1840,7 +1963,7 @@ async function startServer(opts = {}) {
         let joinedWith = null;
         if (state.inviteOnly && !member) {
           const ip = clientIp(socket);
-          if (inviteBlocked(ip)) return ack({ error: 'Too many wrong invites from your address. Try again in a few minutes.', invite: true });
+          if (inviteBlocked(ip)) return ack({ error: 'Too many wrong invites from your address. Try again in a few minutes.' + (proxied(socket) ? ' (The server is behind a reverse proxy and counts everyone as one address: its host can set TRUST_PROXY=1.)' : ''), invite: true });
           joinedWith = inviteFor(invite ?? password);
           if (!joinedWith) {
             inviteFailed(ip);
@@ -1879,6 +2002,8 @@ async function startServer(opts = {}) {
           console.log(`[auth] ${whoIs(p)} joined with invite ${joinedWith.id.slice(0, 8)}`);
         } else if (!Object.hasOwn(state.profiles, p.id)) console.log(`[auth] ${whoIs(p)} joined for the first time`);
         socket.data.profileId = p.id;
+        admit(socket);
+        if (users.get(socket.id)?.voice) leaveVoice(socket); // a second hello on the same socket starts over
         // The socket id says who uploads, but every member is sent everyone's socket id. An app that asks
         // gets a secret to send along; without it, its uploads would be anyone's to make in its name.
         const uploadKey = wantsKey === true ? crypto.randomBytes(16).toString('hex') : null;
@@ -1889,6 +2014,9 @@ async function startServer(opts = {}) {
         // needs that while the person is online. The pictures already held are kept, not the copies just sent.
         const was = Object.hasOwn(state.profiles, p.id) ? state.profiles[p.id] : null;
         const changed = !was || !sameProfile(was, p);
+        // Nobody is on the server yet and nobody is its administrator: whoever the host gave the first
+        // invite to is (D63). Only with an invite: an address alone must not be enough to take a server.
+        const first = !!joinedWith && !Object.keys(state.profiles).length && !hasAdmin();
         if (changed) {
           state.profiles[p.id] = storedProfile(p);
           saveProfile(p.id);
@@ -1897,6 +2025,7 @@ async function startServer(opts = {}) {
           was.seen = Date.now();
           saveSeen();
         }
+        if (first && makeFirstAdmin(p.id)) console.log(`[auth] ${whoIs(p)} is the first to join and is now the administrator`);
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
         ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined });
@@ -1950,7 +2079,8 @@ async function startServer(opts = {}) {
         if (!list) return ack({ error: 'no such channel' });
         if (!inChannel(channelId).send) return ack(noPerm('send messages here'));
         text = cleanText(text);
-        const g = gif && isGiphy(gif.url) && gif.url.length <= 500 ? { url: gif.url, w: +gif.w || 200, h: +gif.h || 200, title: str(gif.title, 200) } : null;
+        const side = (v) => (Number.isFinite(+v) && +v >= 1 ? Math.min(Math.round(+v), 4096) : 200);
+        const g = gif && isGiphy(gif.url) && gif.url.length <= 500 ? { url: gif.url, w: side(gif.w), h: side(gif.h), title: str(gif.title, 200) } : null;
         const u = users.get(socket.id);
         // Only your own fresh uploads to this channel can be attached
         const attached = (Array.isArray(files) ? files.slice(0, MAX_FILES_PER_MESSAGE) : [])
@@ -2033,9 +2163,10 @@ async function startServer(opts = {}) {
       on('msg:react', ({ channelId, messageId, emoji }, ack) => {
         const m = thread(channelId)?.find((x) => x.id === messageId);
         emoji = str(emoji, 64);
-        if (!m || !emoji) return;
+        if (!m || !emoji || emoji === '__proto__') return;
         if (!inChannel(channelId).send) return ack(noPerm('react here'));
         const pid = users.get(socket.id).profile.id;
+        if (!Object.hasOwn(m.reactions, emoji) && Object.keys(m.reactions).length >= MAX_REACTIONS) return ack({ error: `A message takes ${MAX_REACTIONS} different reactions` });
         const who = (m.reactions[emoji] ||= []);
         const i = who.indexOf(pid);
         if (i >= 0) who.splice(i, 1);
@@ -2050,7 +2181,7 @@ async function startServer(opts = {}) {
         toViewers(channelId, 'typing', { channelId, sid: socket.id, name: users.get(socket.id).profile.name }, socket.id);
       });
 
-      // --- bans, removing members, server settings: by permission (open mode: anyone, D3, D27, D43) ---
+      // --- bans, removing members, server settings: by permission (D43) ---
 
       on('ban:add', ({ profileId, ip }, ack) => {
         ack(actions.ban({ profileId: myId() }, { profileId, ip, by: users.get(socket.id).profile.name, selfIp: clientIp(socket) }));
@@ -2101,9 +2232,10 @@ async function startServer(opts = {}) {
       on('channel:create', ({ name, type }, ack) => {
         if (!permsOf(myId()).manageChannels) return ack(noPerm('create channels'));
         type = type === 'voice' ? 'voice' : 'text';
-        name = str(name, MAX_CHANNEL_NAME).trim();
+        name = cleanChannelName(name);
         if (type === 'text') name = name.toLowerCase().replace(/\s+/g, '-');
         if (!name) return ack({ error: 'name required' });
+        if (state.channels.length >= MAX_CHANNELS) return ack({ error: `A server has at most ${MAX_CHANNELS} channels` });
         const ch = { id: id(), name, type };
         state.channels.push(ch);
         indexChannels();
@@ -2114,7 +2246,7 @@ async function startServer(opts = {}) {
 
       on('channel:rename', ({ id: cid, name }, ack) => {
         const ch = channel(cid);
-        name = str(name, MAX_CHANNEL_NAME).trim();
+        name = cleanChannelName(name);
         if (!ch || !name) return ack({ error: 'no such channel' });
         if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
         const was = ch.name;
@@ -2202,6 +2334,7 @@ async function startServer(opts = {}) {
 
       on('emoji:remove', ({ name }, ack) => {
         if (!permsOf(myId()).manageEmojis) return ack(noPerm('remove emojis'));
+        if (typeof name !== 'string' || !state.emojis.some((e) => e.name === name)) return ack({ error: 'No such emoji' });
         state.emojis = state.emojis.filter((e) => e.name !== name);
         saveEmojis();
         io.to(LEAN).emit('emoji:removed', { name });
@@ -2222,7 +2355,8 @@ async function startServer(opts = {}) {
           const j = await r.json();
           ack({ data: j.data || [] });
         } catch (e) {
-          ack({ error: String(e.message || e) });
+          console.warn('[gif] search failed:', e && e.message);
+          ack({ error: 'GIF search failed. Try again.' });
         }
       });
 
@@ -2306,7 +2440,7 @@ async function startServer(opts = {}) {
       on('rtc:signal', ({ to, data }) => {
         const me = users.get(socket.id);
         const peer = users.get(to);
-        if (!peer || !me.voice || peer.voice !== me.voice) return;
+        if (!peer || !me.voice || peer.voice !== me.voice || !isObj(data)) return;
         io.to(to).emit('rtc:signal', { from: socket.id, data });
       });
 
@@ -2322,12 +2456,22 @@ async function startServer(opts = {}) {
           ack({ ok: true, ...(await game.login(users.get(socket.id).profile)) });
         } catch (err) {
           console.error('[game] login', err);
-          ack({ error: 'Could not create your penguin: ' + err.message });
+          ack({ error: 'Could not create your penguin. The server’s log says why.' });
         }
       });
 
       on('game:state', ({ playing }) => {
         users.get(socket.id).playing = !!playing && gameInfo().enabled;
+        broadcastUsers();
+      });
+
+      // What the person is playing outside friendspeak (a Steam game's name, D59); '' for nothing.
+      // Their app says so, and nothing checks it: it is a line of text, like a status.
+      on('activity', ({ game }) => {
+        const u = users.get(socket.id);
+        const name = str(game, 64).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+        if ((u.game || '') === name) return;
+        u.game = name;
         broadcastUsers();
       });
 
@@ -2359,7 +2503,7 @@ async function startServer(opts = {}) {
   const game =
     opts.game === false
       ? { available: false, reason: 'The game is turned off by the server host.' }
-      : await startGame({ app, httpServer: server, dataDir: DATA_DIR, express, assetsDir: opts.gameAssetsDir }).catch((err) => {
+      : await startGame({ app, httpServer: server, dataDir: DATA_DIR, express, assetsDir: opts.gameAssetsDir, enabled: () => state.gameEnabled !== false }).catch((err) => {
           console.error('[game] failed to start:', err);
           return { available: false, reason: 'The game server failed to start: ' + err.message };
         });
@@ -2381,7 +2525,9 @@ async function startServer(opts = {}) {
         gameOff: opts.game === false, // GAME=off
         users,
         lastIp,
+        addressOf,
         actions,
+        hasAdmin,
         usage,
         gameInfo,
         audioQuality,
@@ -2392,7 +2538,8 @@ async function startServer(opts = {}) {
         },
         logs: logs || { lines: () => ({ lines: [], more: false }), query: async () => ({ lines: [], more: false }), info: () => ({ persisted: false, bytes: 0, files: 0, oldest: null, retentionDays: 0, maxBytes: 0 }), on: () => () => {}, scrub: (t) => String(t) },
         crashes,
-        options: { local: opts.admin?.local, key: opts.admin?.key, mfa: opts.admin?.mfa, path: opts.admin?.path },
+        // proxy: the host said a reverse proxy is in front (TRUST_PROXY, or PUBLIC_URL from the CLI), so its X-Forwarded-Proto counts
+        options: { local: opts.admin?.local, key: opts.admin?.key, mfa: opts.admin?.mfa, path: opts.admin?.path, proxy: TRUST_PROXY || opts.admin?.proxy === true },
       }))
     : null;
   unsubCrashes = admin ? crashes.on(() => admin.notify('crashes')) : null;
@@ -2410,6 +2557,8 @@ async function startServer(opts = {}) {
   });
   updater.start();
   const port = server.address().port;
+  // The first to join is the administrator (D63). A server from before that with members and no administrator has to be given one.
+  if (Object.keys(state.profiles).length && !hasAdmin()) console.warn('[server] nobody on this server is an administrator, so nobody in the app can moderate or manage it: give someone a role with Administrator in the admin dashboard (Roles)');
   console.log(`[server] version ${VERSION} listening on port ${port}`);
   return {
     port,
@@ -2422,7 +2571,8 @@ async function startServer(opts = {}) {
     get inviteOnly() {
       return state.inviteOnly;
     },
-    admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false, path: admin ? admin.path : null, mfa: !!admin?.mfa },
+    // localQuery: what makes the dashboard's address the local link (D61); '' when the local rule is off. Never logged.
+    admin: { enabled: adminOn, local: adminOn && opts.admin?.local !== false, path: admin ? admin.path : null, localQuery: admin ? admin.localQuery : '', mfa: !!admin?.mfa },
     game,
     get gameEnabled() {
       return gameInfo().enabled;
@@ -2501,8 +2651,9 @@ if (require.main === module) {
     logs: { retentionDays: /^\s*\d+\s*$/.test(env.LOG_RETENTION_DAYS || '') ? Number(env.LOG_RETENTION_DAYS) : 14, maxBytes: parseSize(env.LOG_MAX_SIZE, 50 * 1024 ** 2) },
     crashReports: true,
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
+    trustProxy: /^(1|true|on|yes)$/i.test(env.TRUST_PROXY || ''),
     // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
-    admin: { enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
+    admin: { proxy: !!publicOrigin(env.PUBLIC_URL), enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
     update: {
       mode: (env.AUTO_UPDATE || 'off').toLowerCase(),
       repo: env.UPDATE_REPO || 'nickolaiposs/friendspeak',
@@ -2525,7 +2676,7 @@ if (require.main === module) {
     if (publicUrl) console.log(`  Friends connect:   ${publicUrl}`);
     else for (const ip of lanAddresses()) console.log(`  Friends connect:   ${s.https ? '' : 'http://'}${ip}:${s.port}`);
     if (s.fingerprint) console.log(`  Certificate:       ${s.fingerprint}`);
-    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${publicUrl || `${scheme}://localhost:${s.port}`}${s.admin.path}  (${s.admin.local ? 'no key needed from this machine' : 'admin key' + (s.admin.mfa ? ' and authenticator code' : '') + ' required'})`}`);
+    console.log(`  Admin dashboard:   ${!s.admin.enabled ? 'off (ADMIN=off)' : `${publicUrl || `${scheme}://localhost:${s.port}`}${s.admin.path}  (${'admin key' + (s.admin.mfa ? ' and authenticator code' : '') + ' required' + (s.admin.local ? ', or the local link below' : '')})`}`);
     console.log(`  Joining:           ${s.inviteOnly ? 'needs an invite (make them in Server settings or the admin dashboard)' : 'open to anyone with the address (invites are off)'}`);
     if (env.PASSWORD) console.warn('  PASSWORD is no longer used: people join with invites, and everyone already on the server stays');
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');
@@ -2533,7 +2684,12 @@ if (require.main === module) {
     console.log(`  File storage:      ${fmtBytes(s.storage.used)} of ${fmtBytes(s.storage.max)} used`);
     console.log(`  Penguin game:      ${env.GAME && /^(off|0|false|no)$/i.test(env.GAME) ? 'off (GAME=off)' : !s.game.available ? s.game.reason : s.gameEnabled ? 'ready (' + s.game.worldName + ')' : 'turned off (Settings → Server)'}`);
     console.log('');
-    // stdout, not console: the token must never enter the log the dashboard shows
+    // stdout, not console: these must never enter the log the dashboard shows
+    if (s.admin.localQuery) {
+      process.stdout.write(
+        `  Local link (the dashboard without a key, from this computer only, until the server stops):\n\n    ${scheme}://localhost:${s.port}${s.admin.path}${s.admin.localQuery}\n\n`
+      );
+    }
     if (s.firstInvite) {
       process.stdout.write(
         `  Invite (never expires; made on the first start):\n\n    ${s.firstInvite}\n\n` +

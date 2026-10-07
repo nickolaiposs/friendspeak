@@ -1,6 +1,6 @@
 {
   "name": "friendspeak",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "Self-hosted Discord/TeamSpeak-style chat for friends with voice, GIFs, emojis, soundboards and an optional virtual penguin world (Yukon, assets not included). No accounts.",
   "main": "desktop/main.js",
   "scripts": {
@@ -48,7 +48,7 @@
     "babel-plugin-module-resolver": "^5.0.3",
     "core-js": "^3.50.0",
     "css-loader": "^7.1.5",
-    "electron": "^44.5.0",
+    "electron": "^44.6.0",
     "electron-builder": "^26.15.3",
     "howler": "^2.2.4",
     "html-webpack-plugin": "^5.6.8",
@@ -152,6 +152,13 @@
       "syncDesktopName": true
     },
     "copyright": "friendspeak contributors",
+    "electronFuses": {
+      "runAsNode": false,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": false
+    },
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "publish": {
       "provider": "github",

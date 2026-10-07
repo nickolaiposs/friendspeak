@@ -43,7 +43,8 @@ const has = (cmd) => spawnSync(cmd, ['--version'], { stdio: 'ignore', shell: pro
 if (!has('cargo')) skip('Rust (cargo) is not installed: https://rustup.rs.');
 
 const exe = 'friendspeak-media' + (process.platform === 'win32' ? '.exe' : '');
-const installed = has('rustup') ? String(execFileSync('rustup', ['target', 'list', '--installed'], { shell: process.platform === 'win32' })) : '';
+// In the crate's directory: its rust-toolchain.toml picks the toolchain, and the targets are per toolchain
+const installed = has('rustup') ? String(execFileSync('rustup', ['target', 'list', '--installed'], { cwd: crate, shell: process.platform === 'win32' })) : '';
 let built = 0;
 for (const [name, target] of TARGETS) {
   if (installed && !installed.includes(target)) {

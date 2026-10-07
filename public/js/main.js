@@ -1,6 +1,6 @@
 import { log } from './log.js'; // first, so errors while the rest loads are caught
 import '/vendor/emoji-picker-element/index.js';
-import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, mediaResolver, comboFromEvent, normalizeAddress, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
+import { $, $$, h, uid, formatText, fmtBytes, fmtTime, shortTime, fileToDataUrl, avatarEl, channelNameEl, isImage, mediaResolver, comboFromEvent, normalizeAddress, isUnencrypted, findMentions, mentionTag, messageLink, snippetAround, parseSearch, SEARCH_FILTERS, SEARCH_HAS, debounce, inviteInfo, inviteStatus, INVITE_TYPES, INVITE_DURATIONS } from './util.js';
 import { profiles, servers, settings, sounds, identities, mentionUnread, exportProfile, importProfile, randomColor } from './store.js';
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
@@ -69,6 +69,8 @@ const S = {
 
 // Present when running inside the desktop app (see desktop/preload.js)
 const desktop = window.friendspeakDesktop || null;
+// What a plain http server means, where the address is typed and on the mark in the server's header
+const UNENCRYPTED = 'Not encrypted: this server uses plain http, so anyone on the network between you and it can read and change what you send, your invite included. Fine on a network you trust; over the internet, ask the host to turn on HTTPS.';
 // Name a bookmark by the server's own name (set in Server settings)
 const serverLabel = (s) => s.serverName || s.address.replace(/^https?:\/\//, '');
 const initials = (label) =>
@@ -103,7 +105,9 @@ function chatById(id) {
 }
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
 // What of a `users` entry a member row shows, and a row in the channel list (voice, game)
-const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing'];
+const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing', 'game'];
+// The Steam game someone is playing (D59), as the member list and DMs word it
+const playingText = (game) => (game && typeof game === 'string' ? '🎮 ' + game : '');
 const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
 const sameUsers = (a, b, fields) => a.length === b.length && a.every((u, i) => fields.every((f) => u[f] === b[i][f]));
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
@@ -171,6 +175,7 @@ const I = {
   headOff: '<svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0-9 9v7a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2H5v-1a7 7 0 0 1 14 0v1h-2a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2v-7a9 9 0 0 0-9-9z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.4"/></svg>',
   gear: '<svg viewBox="0 0 24 24"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54A.5.5 0 0 0 13.9 2.4h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>',
   hash: '<svg viewBox="0 0 24 24"><path d="M5.88 21 6.6 17H3l.35-2h3.6l1.06-6H4.4l.35-2h3.6l.72-4h2l-.72 4h6l.72-4h2l-.72 4H22l-.35 2h-3.6l-1.06 6h3.61l-.35 2h-3.6l-.72 4h-2l.72-4h-6l-.72 4h-2zm4.13-12-1.06 6h6l1.06-6h-6z"/></svg>',
+  unlock: '<svg viewBox="0 0 24 24"><path d="M12 17a2 2 0 1 0 0-4 2 2 0 0 0 0 4zm6-9h-1V6a5 5 0 0 0-9.9-1h2.06A3.1 3.1 0 0 1 15.1 6v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm0 12H6V10h12v10z"/></svg>',
   lock: '<svg viewBox="0 0 24 24"><path d="M18 8h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z"/></svg>',
   speakerOff: '<svg viewBox="0 0 24 24"><path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z"/></svg>',
   speaker: '<svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.47 4.47 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23z"/></svg>',
@@ -377,6 +382,23 @@ function pruneMentions(c) {
   for (const id of Object.keys(mentionUnread.all()[c.entry.id] || {})) if (!ids.has(id)) mentionUnread.clear(c.entry.id, id);
 }
 
+// ---------------------------------------------------------------- Steam: the game that is running shows next to our name (D59)
+
+// The desktop app reads it from Steam on this computer. Servers get it as `activity`, DM peers in `hello`.
+const STEAM_POLL = 15e3;
+let steamName = '';
+const sendActivity = (c) => c.connected && c.socket.emit('activity', { game: steamName });
+async function pollSteam() {
+  if (!desktop?.steamGame) return;
+  let name = settings.get().steamPlaying ? (await desktop.steamGame().catch(() => null))?.name || '' : '';
+  if (!settings.get().steamPlaying) name = ''; // turned off while we asked
+  if (name === steamName) return;
+  steamName = name;
+  for (const c of conns()) sendActivity(c);
+  DM.setGame(name);
+}
+if (desktop?.steamGame) (setInterval(pollSteam, STEAM_POLL), pollSteam());
+
 // ---------------------------------------------------------------- direct messages (peer to peer, dm.js)
 
 const DM = new DirectMessages({
@@ -544,6 +566,41 @@ const micOff = () => S.muted || audio.micTest || forcedMute();
 // A watched stream's sound plays through its <video>, outside the audio graph
 // (audio.js), so the master volume and the output device are set on each one.
 const streamVolume = (v) => v * settings.get().masterVolume;
+
+// A stream's sound, on its tile: the speaker mutes and unmutes it, the slider
+// sets its volume. The slider keeps its place while muted, so unmuting brings
+// back the volume from before; moving it unmutes. get() answers
+// { volume, muted }, set() stores what changed and syncs the tiles.
+function streamSound(video, get, set) {
+  const btn = h('button', { onclick: () => (set({ muted: !get().muted }), show()) });
+  const el = h(
+    'div',
+    { class: 'stream-volume' },
+    btn,
+    h('input', {
+      type: 'range',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      value: get().volume,
+      title: 'Stream volume',
+      oninput: (e) => {
+        const volume = +e.target.value;
+        video.volume = streamVolume(volume);
+        set(get().muted ? { volume, muted: false } : { volume });
+        show();
+      },
+    })
+  );
+  const show = () => {
+    const { muted } = get();
+    btn.title = muted ? 'Unmute stream' : 'Mute stream';
+    btn.replaceChildren(icon(muted ? 'speakerOff' : 'speaker'));
+    el.classList.toggle('muted', muted);
+  };
+  show();
+  return el;
+}
 function applyOutputDevice(deviceId) {
   audio.setOutputDevice(deviceId);
   for (const t of [...(S.stage?.tiles.values() || []), ...dmCallUi.tiles.values()]) if (t.kind === 'screen') t.video?.setSinkId?.(deviceId || '').catch(() => {});
@@ -621,7 +678,7 @@ function dmCallButtons(c, compact) {
 // The call's view sits on top of the conversation with that person, so it only
 // shows (and video is only received at full size) while that DM is open. The
 // sidebar panel and the incoming-call card show wherever you are.
-const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, ringing: null, ringTimer: null };
+const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, muted: false, ringing: null, ringTimer: null };
 
 function renderDmCall() {
   const c = DMCALL.cur;
@@ -692,7 +749,7 @@ function renderDmCall() {
     for (const key of [...ui.tiles.keys()]) dropDmCallTile(key);
     ui.ro?.disconnect();
     ui.el?.remove();
-    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1 });
+    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1, muted: false });
     if (c) {
       ui.main = h('div', { class: 'stage-main' });
       ui.grid = h('div', { class: 'stage-grid' });
@@ -752,7 +809,7 @@ function renderDmCall() {
     if (src && head && t.video.paused) t.video.play().catch(() => {});
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = !theirs || S.deafened || audio.micTest;
+      t.video.muted = !theirs || S.deafened || audio.micTest || ui.muted;
       t.video.volume = streamVolume(ui.volume);
     }
     t.report?.();
@@ -804,12 +861,7 @@ function dmCallTile(key, who, kind) {
     controls = h(
       'div',
       { class: 'tile-controls', onclick: stop, ondblclick: stop },
-      h(
-        'label',
-        { class: 'stream-volume', title: 'Stream volume' },
-        icon('speaker'),
-        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => ((ui.volume = +e.target.value), (video.volume = streamVolume(ui.volume))) })
-      )
+      streamSound(video, () => ui, (o) => (Object.assign(ui, o), renderDmCall()))
     );
   }
   tile.el = h('div', attrs, video, tile.status, label, controls);
@@ -1132,11 +1184,10 @@ function roleTag(r) {
 function profilePopover(anchor, u, align = 'right') {
   const p = fullProfile(u);
   const live = S.users.find((x) => x.id === p.id);
+  const game = playingText(live?.game || DM.gameOf(p.id)); // a DM contact may not be on the server in view
   const doing = live
-    ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ')
-    : p.seen && p.id !== me()?.id
-      ? 'Last seen ' + fmtTime(p.seen)
-      : '';
+    ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin', game].filter(Boolean).join(' · ')
+    : game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '');
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
   const roles = rolesOf(p.id);
   const pop = popover(
@@ -1318,7 +1369,7 @@ function renderRail() {
             'button',
             {
               class: 'rail-server rail-dm' + (S.channelId === 'dm:' + c.id ? ' active' : '') + (userMuted(c.id) ? ' silenced' : ''),
-              title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (userMuted(c.id) ? '\nNotifications muted' : ''),
+              title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
               onclick: () => selectChannel('dm:' + c.id),
               oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
             },
@@ -1340,7 +1391,7 @@ function renderRail() {
         'button',
         {
           class: 'rail-server' + (muted ? ' silenced' : '') + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : ''),
-          title: `${label}\n${s.address}` + (calling ? '\nYou’re in voice here' : '') + (muted ? '\nNotifications muted' : '') + (mentions ? `\n${mentions} unread mention${mentions > 1 ? 's' : ''}` : ''),
+          title: `${label}\n${s.address}` + (isUnencrypted(s.address) ? '\nNot encrypted' : '') + (calling ? '\nYou’re in voice here' : '') + (muted ? '\nNotifications muted' : '') + (mentions ? `\n${mentions} unread mention${mentions > 1 ? 's' : ''}` : ''),
           onclick: () => connectTo(s),
           oncontextmenu: (e) =>
             contextMenu(e, [
@@ -1368,6 +1419,15 @@ function serverDialog(existing) {
   const addr = h('input', { placeholder: '192.168.1.20:3000', value: existing?.address?.replace(/^https:\/\/(?=[^/]+:\d+$)/, '') || '' });
   // The bookmark's `password` holds the invite (D51) until it has been used, or an older server's password
   const pass = h('input', { placeholder: 'XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', spellcheck: 'false', value: existing?.password || '' });
+  // A typed "http://": say what that means before the invite is sent over it
+  const plain = h('p', { class: 'field-warn', hidden: true }, icon('unlock'), h('span', {}, UNENCRYPTED));
+  const button = h('button', { class: 'btn' });
+  const sync = () => {
+    plain.hidden = !isUnencrypted(normalizeAddress(addr.value));
+    button.textContent = !plain.hidden ? 'Connect without encryption' : existing ? 'Save & connect' : 'Connect';
+  };
+  addr.oninput = sync;
+  sync();
   const save = (close) => {
     const address = normalizeAddress(addr.value);
     if (!address) return toast('Enter an IP or hostname', 'error');
@@ -1383,9 +1443,10 @@ function serverDialog(existing) {
       'div',
       { onkeydown: (e) => e.key === 'Enter' && save(close) },
       h('label', { class: 'field' }, h('span', {}, 'Server IP / address'), addr),
+      plain,
       h('label', { class: 'field' }, h('span', {}, 'Invite'), pass)
     ),
-    { actions: [(c) => h('button', { class: 'btn', onclick: () => save(c) }, existing ? 'Save & connect' : 'Connect')] }
+    { actions: [(c) => ((button.onclick = () => save(c)), button)] }
   );
 }
 
@@ -1560,6 +1621,7 @@ function openSocket(entry, rejoinVoice = null) {
     Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
     log.info(`connected to ${host}`);
+    if (steamName) sendActivity(c);
     rememberServerLook(c);
     pruneMentions(c);
     if (viewed()) showServer(c);
@@ -1970,8 +2032,13 @@ setInterval(() => {
 
 // ---------------------------------------------------------------- sidebar
 
+// Under the header of a server reached over plain http, for as long as it is in view
+const plainHttp = h('div', { class: 'plain-http', title: UNENCRYPTED, hidden: true }, icon('unlock'), 'Not encrypted');
+
 function renderHeader() {
   const hd = $('#server-header');
+  if (!plainHttp.isConnected) hd.after(plainHttp);
+  plainHttp.hidden = inDmView() || !S.entry || !isUnencrypted(S.entry.address);
   if (inDmView()) return hd.replaceChildren(h('span', { class: 'server-title' }, h('span', {}, 'Direct messages')));
   if (!S.entry) return hd.replaceChildren(h('span', {}, 'friendspeak'));
   hd.replaceChildren(
@@ -2101,7 +2168,7 @@ function dmSidebar() {
         'div',
         {
           class: 'channel dm' + ('dm:' + c.id === S.channelId ? ' active' : '') + (c.unread ? ' unread' : ''),
-          title: c.name + (userMuted(c.id) ? '\nNotifications muted' : ''),
+          title: c.name + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
           onclick: () => selectChannel('dm:' + c.id),
           oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
         },
@@ -2623,7 +2690,7 @@ function renderMembers() {
         h(
           'div',
           { class: 'member-status' },
-          [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin'].filter(Boolean).join(' · ') || u.status || ''
+          [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin', playingText(u.game)].filter(Boolean).join(' · ') || u.status || ''
         ),
         roles.length
           ? h(
@@ -2794,7 +2861,7 @@ function syncComposer() {
 // Whether a DM can be delivered right now
 const dmStatus = (peerId) =>
   DM.connected(peerId)
-    ? 'connected'
+    ? ['connected', playingText(DM.gameOf(peerId))].filter(Boolean).join(' · ')
     : DM.online(peerId)
       ? 'connecting…'
       : DM.canMail(peerId)
@@ -4988,7 +5055,7 @@ function openStage({ screen } = {}) {
     const toggleFullscreen = () => (body.ownerDocument.fullscreenElement ? body.ownerDocument.exitFullscreen() : body.requestFullscreen?.().catch(() => {}));
     // tiles: key ("screen:<sid>", "camera:<sid>", "user:<sid>") -> tile; watching: sids of screens we receive;
     // pop: the window the stage is in, when it isn't in the app ({ win, name, ready, onTop })
-    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
+    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), muted: new Set(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
     // Resolution, real frame rate and codec of the focused (or first) screen
@@ -5147,18 +5214,14 @@ function stageTile(key, sid, kind, live) {
       h(
         'div',
         { class: 'tile-controls', onclick: stop, ondblclick: stop },
-        h(
-          'label',
-          { class: 'stream-volume', title: 'Stream volume' },
-          icon('speaker'),
-          h('input', {
-            type: 'range',
-            min: 0,
-            max: 1,
-            step: 0.01,
-            value: S.stage.volumes.get(sid) ?? 1,
-            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = streamVolume(+e.target.value))),
-          })
+        streamSound(
+          video,
+          () => ({ volume: S.stage.volumes.get(sid) ?? 1, muted: S.stage.muted.has(sid) }),
+          (o) => {
+            if (o.volume != null) S.stage.volumes.set(sid, o.volume);
+            if (o.muted != null) S.stage.muted[o.muted ? 'add' : 'delete'](sid);
+            syncStage();
+          }
         ),
         h('button', { class: 'btn small ghost', onclick: () => watchScreen(sid, false) }, 'Stop watching')
       )
@@ -5353,7 +5416,7 @@ function syncStage() {
     }
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = t.sid === c.sid || S.deafened || audio.micTest;
+      t.video.muted = t.sid === c.sid || S.deafened || audio.micTest || st.muted.has(t.sid);
       t.video.volume = streamVolume(st.volumes.get(t.sid) ?? 1);
     }
   }
@@ -5568,10 +5631,11 @@ function popOutGame() {
   if (!src) return;
   // The login token was consumed by the embedded copy, so log in afresh
   closeGame();
-  S.socket.emitWithAck('game:login', {}).then((res) => {
+  S.socket.emitWithAck('game:login', {}).then(async (res) => {
     if (res.error) return toast(res.error, 'error');
     const url = new URL(res.path, S.entry.address);
     url.hash = new URLSearchParams({ u: res.username, t: res.token }).toString();
+    await desktop?.allowGameWindow?.(url.origin); // the app opens this window only for the server it was told (desktop/main.js)
     const win = window.open(url.href, 'friendspeak-game', 'width=1280,height=840');
     if (!win) return toast('Pop-up blocked', 'error');
     S.game.popout = win;
@@ -6345,6 +6409,14 @@ function settingsIntegrations(body) {
       'GIF search uses GIPHY. Create a free API key at developers.giphy.com and paste it here. It is stored only on this device. If you leave it empty, the server host’s key (GIPHY_API_KEY) is used if they set one.'
     ),
     h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
+    h('h3', {}, 'Steam'),
+    h(
+      'label',
+      { class: 'check-row' + (desktop?.steamGame ? '' : ' disabled') },
+      h('input', { type: 'checkbox', checked: st.steamPlaying, disabled: !desktop?.steamGame, onchange: (e) => (settings.set({ steamPlaying: e.target.checked }), pollSteam()) }),
+      h('span', {}, 'Show the Steam game I’m playing'),
+      h('span', { class: 'muted small' }, 'While a Steam game runs on this computer, its name shows next to yours on your servers and in your DMs. It is read from Steam here: no Steam sign-in.')
+    ),
     h('h3', {}, 'Links'),
     h(
       'label',
@@ -6736,7 +6808,7 @@ function serverOverview(body) {
     h(
       'p',
       { class: 'muted small' },
-      ro ? 'The server’s name, icon, voice quality and games can only be changed by an administrator. ' : 'The server’s name and icon are shown to everyone on it. The icon can be any image (it’s resized for you), an animated GIF, or a link. ',
+      ro ? 'The server’s name, icon, voice quality and games can only be changed by an administrator. ' : 'The server’s name and icon are shown to everyone on it. The icon can be any image (it’s resized for you) or an animated GIF. An administrator can also set a link. ',
       h('span', {}, S.entry.address)
     ),
     h(
