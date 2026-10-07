@@ -68,9 +68,11 @@ function showLogin() {
   if (!s.canLogin) {
     card.append(
       h('p', {}, 'Admin access from another machine needs an encrypted connection. Start the server with ', h('code', {}, 'HTTPS=1'), ', or put it behind a TLS reverse proxy.'),
-      h('p', { class: 'muted' }, 'On the server’s own machine, use ', h('code', {}, `http://localhost:${location.port || 80}/admin`), '.'));
+      h('p', { class: 'muted' }, 'On the server’s own machine, open the local link the server prints when it starts.'));
   } else {
     card.append(loginForm(s));
+    // This machine gets in without a key through the link the server printed, not by its address alone (D61)
+    if (s.localLink) card.append(h('p', { class: 'muted small' }, 'On the server’s own computer? The server prints a local link when it starts. It opens the dashboard without a key.'));
   }
   if (s.fingerprint) {
     card.append(h('div', { class: 'field' },
@@ -172,7 +174,7 @@ function showApp() {
     groups.flatMap(([name, vs]) => [h('div', { class: 'nav-h' }, name), vs.map((v) => h('a', { href: `#/${v.id}`, 'data-id': v.id }, v.title))].flat()));
   const foot = h('div', { class: 'side-foot' },
     state, retry,
-    s.local ? h('div', { class: 'local-badge' }, 'Local access: no key needed from this machine')
+    s.local ? h('div', { class: 'local-badge' }, 'Local access: opened with the server’s local link')
       : [h('div', { class: 'small muted who' }, 'Signed in as ', h('strong', {}, s.actor || '?')),
         h('button', { class: 'btn small ghost', onClick: async () => { try { await api.post('logout'); } catch {} start(); } }, 'Sign out')]);
   const title = h('h1', {});

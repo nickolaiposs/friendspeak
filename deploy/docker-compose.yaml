@@ -31,6 +31,9 @@ services:
     environment:
       # Plain HTTP inside the stack; Caddy does TLS
       HTTPS: "0"
+      # Caddy is the only thing that reaches this container, and it says who is calling
+      # (X-Forwarded-For): bans, sign-in limits and the audit log see people, not Caddy (D61)
+      TRUST_PROXY: "1"
       # The address the log prints for friends and for the dashboard
       PUBLIC_URL: https://${DOMAIN:?Set DOMAIN in .env to the domain that points at this machine, e.g. chat.example.com}
       SERVER_NAME: ${SERVER_NAME:-friendspeak}

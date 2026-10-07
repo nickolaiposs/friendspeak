@@ -46,6 +46,9 @@ services:
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-50MB}
       # off = only members can pass direct messages through this server
       HTTPS: ${HTTPS:-1}
+      # 1 = believe the reverse proxy in front about who is calling (the last address in
+      # X-Forwarded-For). Only when nothing but that proxy can reach this port (D61)
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # Optional key for the admin dashboard (16+ characters). If empty, a key is generated
       # and printed once in the container log on first start (docker logs friendspeak).
       ADMIN_KEY: ${ADMIN_KEY:-}

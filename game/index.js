@@ -62,7 +62,8 @@ function loadSecret(dataDir) {
   }
 }
 
-async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
+// enabled(): whether the game is switched on right now (Settings → Server); the worlds refuse connections while it isn't
+async function startGame({ app, express, httpServer, dataDir, assetsDir, enabled = () => true }) {
   extraAssetsDir = assetsDir || null;
   const worldName = (process.env.GAME_WORLD || 'Blizzard').replace(/[^\w -]/g, '').slice(0, 20) || 'Blizzard';
   const worldPath = '/world/' + worldName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -118,6 +119,9 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
   };
   const { db, worlds } = await startWorlds(config);
   const bcrypt = require('bcryptjs');
+  // The worlds are socket.io servers of their own on friendspeak's port: nothing friendspeak
+  // decides reaches them unless it is done here.
+  for (const world of Object.values(worlds)) world.server.use((_socket, next) => (enabled() ? next() : next(new Error('The game is turned off on this server'))));
 
   await db.sequelize.query(
     'CREATE TABLE IF NOT EXISTS friendspeak_accounts (profileId TEXT PRIMARY KEY, userId INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE, baseName TEXT)'
@@ -189,10 +193,26 @@ async function startGame({ app, express, httpServer, dataDir, assetsDir }) {
     return { username: user.username, token: `${selector}:${validator}`, path: '/game/' };
   }
 
+  // Someone stopped being a member (removed, banned or left): their sign-in tokens go and their
+  // penguin is disconnected. The penguin itself stays, for when they are let back in.
+  async function revoke(profileId) {
+    const [rows] = await db.sequelize.query('SELECT userId FROM friendspeak_accounts WHERE profileId = ?', { replacements: [profileId] });
+    if (!rows[0]) return;
+    const userId = rows[0].userId;
+    await db.authTokens.destroy({ where: { userId } });
+    await db.users.update({ loginKey: null }, { where: { id: userId } });
+    for (const world of Object.values(worlds)) for (const user of Object.values(world.users)) if (user.id === userId) user.close();
+  }
+
+  // The game was switched off: everyone in the worlds is disconnected
+  function closeAll() {
+    for (const world of Object.values(worlds)) for (const user of Object.values(world.users)) user.close();
+  }
+
   // Everyone connected to the game world (not the login world), for the admin dashboard
   const maxUsers = config.worlds[worldName].maxUsers;
   const players = () => Object.keys(worlds[worldName].users).length;
-  return { available: true, worldName, login, players, maxUsers };
+  return { available: true, worldName, login, revoke, closeAll, players, maxUsers };
 }
 
 module.exports = { startGame };
