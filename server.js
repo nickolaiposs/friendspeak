@@ -1113,6 +1113,7 @@ async function startServer(opts = {}) {
         sharing: u.sharing,
         camera: u.camera,
         playing: u.playing,
+        game: u.game || '',
       };
     });
   }
@@ -2328,6 +2329,16 @@ async function startServer(opts = {}) {
 
       on('game:state', ({ playing }) => {
         users.get(socket.id).playing = !!playing && gameInfo().enabled;
+        broadcastUsers();
+      });
+
+      // What the person is playing outside friendspeak (a Steam game's name, D59); '' for nothing.
+      // Their app says so, and nothing checks it: it is a line of text, like a status.
+      on('activity', ({ game }) => {
+        const u = users.get(socket.id);
+        const name = str(game, 64).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+        if ((u.game || '') === name) return;
+        u.game = name;
         broadcastUsers();
       });
 
