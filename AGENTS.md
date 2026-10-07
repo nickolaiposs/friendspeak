@@ -81,13 +81,13 @@ scripts/build-game.js  builds both vendored projects
 scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
 scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.patch (our changes to upstream), Cargo.lock
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows)
+.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows); image-scan.yml (known vulnerabilities in the server image, D65)
 .github/dependabot.yml weekly PRs into dev for actions, the base image, the Rust toolchain, npm and cargo (D64)
 SECURITY.md            how to report a vulnerability, and how to check a download's provenance
 data/                  (gitignored) server state when run via `npm start` (state.json, profiles/, messages/, mail/, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
-Dockerfile, docker-compose.yaml, docker/   production server image and stack (D21)
+Dockerfile, docker-compose.yaml, docker/   production server image and stack (D21); every service runs with a read-only root, no capabilities it doesn't need, and memory and process ceilings (D65). Keep that on a service you add
 deploy/                the stack for a domain (D53): docker-compose.yaml (friendspeak behind Caddy, real HTTPS), Caddyfile, .env.example, install.sh. A server variable Docker hosts need goes in both compose files and both .env.example files
 ```
 
