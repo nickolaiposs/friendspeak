@@ -81,7 +81,9 @@ scripts/build-game.js  builds both vendored projects
 scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
 scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.patch (our changes to upstream), Cargo.lock
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29)
+.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows)
+.github/dependabot.yml weekly PRs into dev for actions, the base image, the Rust toolchain, npm and cargo (D64)
+SECURITY.md            how to report a vulnerability, and how to check a download's provenance
 data/                  (gitignored) server state when run via `npm start` (state.json, profiles/, messages/, mail/, files/, …)
 release/               (gitignored) electron-builder output
 build/                 electron-builder resources: icon.png, entitlements.mac.plist
@@ -143,6 +145,7 @@ Always syntax-check after edits, rebuild the game after touching `game/*/src`, a
 - To release: bump `version` in package.json, add a `## <version> - <date>` section to `CHANGELOG.md`, merge `dev` → `prod`. The workflow refuses a version that's already released, and `ci.yml` checks this on PRs into `prod`.
 - Keep the socket protocol tolerant of version skew: a server may update while clients are older, and vice versa. Add optional fields; don't change the meaning of existing ones.
 - Don't push to `prod`, tag, or publish a release unless asked.
+- The release workflow is what apps and servers trust (D64). Keep its rules when changing it: actions pinned to a commit, no `cache` in any release job, no write permission in a job that runs repo or dependency code, and every published file attested. `gh attestation verify <file> --repo nickolaiposs/friendspeak` checks a release.
 
 ## Finishing a feature
 
@@ -167,6 +170,7 @@ Run the two builds in parallel. Both are slow (minutes). Check that both exit 0 
 - **`overrides` in `package.json` replace deprecated packages that our dependencies still ask for** (issue #86): `uuid` 8 in Sequelize 6, `glob` 7 and `chokidar` 3 in `@babel/cli` 7, `global-agent` 3 in electron-builder. Drop an entry once its parent no longer needs it (Babel 8 needs Node ≥ 22.18; electron-builder 27). What is left (`dottie`, `lodash.isequal`, `glob` 7 and 9, `inflight`, `rimraf` 2) has no fix upstream yet: `glob` ≥ 10 has no default export, which `babel-plugin-module-resolver` needs.
 - **A compiled `WebAssembly.Module` can't be posted to an AudioWorklet's port** (the worklet gets `messageerror`); it travels in `processorOptions`. The audio thread also has no `TextDecoder`, `performance` or `URL`.
 - **Test instances outlive a failed script.** A puppeteer script that throws before closing leaves its Electron running on its debugging port, and the next run connects to that old one. Kill it first.
+- **The sidecar's compiler is pinned in `native/rust-toolchain.toml`** (D64), and Rust targets are per toolchain: run `rustup target add …` inside `native/`, or `build-media.js` skips that target. The base image in the `Dockerfile` is pinned by digest on all three `FROM` lines; change them together.
 - **The media sidecar needs only the Command Line Tools on macOS, not Xcode.** Its Apple bindings are the `objc2` crates for that reason; `cidre` (and `scap`, which uses it) run `xcodebuild` in their build scripts.
 - **str0m's rule:** every change to an `Rtc` (input, write, SDP, candidate) is followed by polling it until it returns a timeout (`drain` in `native/src/engine.rs`). Two changes in a row without that leave it inconsistent.
 - **NVIDIA's Media Foundation encoder says yes to a new rate control buffer size while streaming and ignores it** (D56). A buffer smaller than two frames at the current bitrate holds the encoder well under its target without any error.

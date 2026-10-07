@@ -1,0 +1,6 @@
+# The compiler the media sidecar is built with, here and in CI and releases (D64): the same
+# source gives the same program whatever a build machine came with. rustup installs it on the
+# first build. Dependabot opens a PR for a newer one (.github/dependabot.yml).
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
