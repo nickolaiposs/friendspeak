@@ -45,7 +45,11 @@ The server only hosts: it has no chat web UI. Everyone, including the host, uses
 ```
   Local address:     http://localhost:3000  (connect with the desktop app)
   Friends connect:   http://192.168.1.20:3000
-  Admin dashboard:   http://localhost:3000/admin-5c1e…  (no key needed from this machine)
+  Admin dashboard:   http://localhost:3000/admin-5c1e…  (admin key and authenticator code required, or the local link below)
+
+  Local link (the dashboard without a key, from this computer only, until the server stops):
+
+    http://localhost:3000/admin-5c1e…/?local=…
 ```
 
 ## Desktop app
@@ -143,7 +147,8 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 | `MAINTENANCE_WARN` | `24h`      | How long before the window users see the warning (`90m`, `2d`, …) |
 | `GITHUB_TOKEN`  | none          | Lets the server read releases while the GitHub repo is private |
 | `ADMIN_KEY`     | generated     | Admin key for the [admin dashboard](#admin-dashboard) (16+ characters). If unset, a key is generated and printed once on first start |
-| `ADMIN_LOCAL`   | on (off in Docker, and when `PUBLIC_URL` is set) | `off` = even a request from the server's own machine needs a key |
+| `ADMIN_LOCAL`   | on (off in Docker, and when `PUBLIC_URL` is set) | `off` = no local link: even the server's own machine needs a key |
+| `TRUST_PROXY`   | off (on in the [domain stack](#deploy-on-a-domain-docker--caddy)) | `1` = behind a reverse proxy, take each person's address from the proxy (the last address in `X-Forwarded-For`) for bans, sign-in limits and the audit log. Only when nothing but the proxy can reach friendspeak's port: anyone who can reach it directly could claim any address |
 | `ADMIN_MFA`     | on            | `off` = an admin key alone signs in, with no code from an authenticator app |
 | `ADMIN_PATH`    | generated     | The dashboard's path. If unset, a random one (`/admin-…`) is made on the first start and printed at every start. `off` = the plain `/admin`; or a path of your own, such as `/backoffice` |
 | `ADMIN`         | on            | `off` = no admin dashboard at all |
@@ -192,11 +197,11 @@ The server hosts a small web dashboard on the same port, at a random path it mak
 
 | Where the server runs | Open | Key |
 |---|---|---|
-| `npm start` on your own machine | `http://localhost:3000/admin` (it forwards to the real path) | not needed from that machine. From another machine it needs HTTPS, a key and its code |
+| `npm start` on your own machine | the **Local link** the server prints when it starts | not needed with that link. From another machine it needs HTTPS, a key and its code |
 | Docker / Portainer on a LAN | `https://<lan-ip>:3000/admin-…` | key and code |
 | A public host | `https://your.domain/admin-…` | key and code, with a real certificate |
 
-**1. `npm start` on your own machine.** Open `http://localhost:3000/admin`, which forwards your own machine to the real path. A request counts as coming from your own machine when it arrives over loopback, to `localhost`, with no proxy headers. Any program or user on that machine gets in the same way. If that isn't what you want, start with `ADMIN_LOCAL=off`. From another machine, use `https://` (`npm run start:https`) and a key.
+**1. `npm start` on your own machine.** Open the **Local link** from the server's output. It carries a token made for that run of the server, and it works only from the machine itself: over loopback, to `localhost`, with no proxy headers. It signs that browser in without a key until the server stops; the next start prints a new link. The address alone is not enough, because a tunnel running on the machine (`ssh -R`, ngrok, playit and the like) reaches the server over loopback too. Any program or user on the machine that can read the server's output gets in the same way. If that isn't what you want, start with `ADMIN_LOCAL=off`. Without the link, `localhost` asks for a key like anywhere else. From another machine, use `https://` (`npm run start:https`) and a key.
 
 **2. Docker / Portainer on a LAN.** Open `https://<lan-ip>:3000` followed by the path from the container log. The image always asks for a key (`ADMIN_LOCAL=off`). On the first start the server generates one and prints it once in the container log (`docker logs friendspeak`, or Portainer's log view). Copy it then: only its hash is stored. Or set `ADMIN_KEY` (16+ characters) in the stack's environment instead. The certificate is self-signed, so the browser shows a warning. To check you are talking to your own server, compare the fingerprint shown on the login page with the `Certificate:` line in the log before you click through. A key is never accepted over plain HTTP from another machine.
 
@@ -209,15 +214,15 @@ your.domain {
 ```
 
 - The proxy must pass the original `Host` header, or the app can't sign in ("Could not verify your profile key") and the dashboard refuses changes with a "Cross-origin request refused" error. Caddy does this by default. In nginx add `proxy_set_header Host $host;`. It must also set `X-Forwarded-Proto: https` (nginx: `proxy_set_header X-Forwarded-Proto $scheme;`; Caddy does it by default), or the server thinks the key would travel in clear text and doesn't offer sign-in.
-- Leave `ADMIN_LOCAL` off here (it is off in the image, and `PUBLIC_URL` turns it off). Behind a proxy every request comes from the proxy's address, and friendspeak never trusts `X-Forwarded-For`. Without Docker, set `ADMIN_LOCAL=off` yourself if the proxy runs on the same machine: one that rewrites `Host` and adds no forwarding header would otherwise look like your own browser.
-- For the same reason, sign-in lockouts are shared by everyone behind the proxy, and the audit log shows the proxy's address. Rate-limit the dashboard's path at the proxy if you want per-visitor limits.
-- Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of the dashboard's path; set `ADMIN_PATH` to one you can write in a rule), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel counts as local: open `http://localhost:3000/admin`, no key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000` and the dashboard's path.
+- Leave `ADMIN_LOCAL` off here (it is off in the image, and `PUBLIC_URL` turns it off): behind a proxy there is no browser of your own on the server's machine to give a local link to.
+- Behind a proxy every request comes from the proxy's address. Unless told otherwise friendspeak doesn't believe `X-Forwarded-For`, so wrong-invite and sign-in lockouts are shared by everyone, the audit log shows the proxy's address and an IP ban only bans the profile. Set `TRUST_PROXY=1` to take addresses from the proxy instead, but only if the proxy is the only thing that can reach friendspeak's port (not published, or firewalled), and it adds the caller's address at the end of `X-Forwarded-For` (Caddy and nginx's `$proxy_add_x_forwarded_for` do). Otherwise anyone could claim any address.
+- Optional extra layers that need no code: [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) (an email allowlist in front of the dashboard's path; set `ADMIN_PATH` to one you can write in a rule), [Tailscale](https://tailscale.com/) so the dashboard is only reachable on your private network, or an SSH tunnel: `ssh -L 3000:localhost:3000 host`. To a plain `npm start` on that host the tunnel looks local, so the server's local link works through it; without the link it asks for a key. To a container it doesn't (the request reaches the server from Docker's network), so the key is still needed and so is TLS: with `HTTPS=1`, open `https://localhost:3000` and the dashboard's path.
 
 ### Managing keys
 
 - Make one key per admin in **Admin keys** and revoke it there when someone leaves. A revoked key's sessions end at once. A new key is shown once, so copy it.
 - Signing in lasts up to 12 hours, or 1 hour without activity. Restarting the server signs everyone out.
-- If an admin loses the phone with their authenticator app, another admin clicks **Reset 2-step** next to their key, and the key sets it up again at its next sign-in. If it was the only key: on the server's own machine `http://localhost:3000/admin` needs no key (`npm start`), a changed `ADMIN_KEY` counts as a new key, and deleting `admin.json` starts over with a new key and a new path.
+- If an admin loses the phone with their authenticator app, another admin clicks **Reset 2-step** next to their key, and the key sets it up again at its next sign-in. If it was the only key: on the server's own machine the local link from the server's output needs no key (`npm start`), a changed `ADMIN_KEY` counts as a new key, and deleting `admin.json` starts over with a new key and a new path.
 - If you lose every key, set `ADMIN_KEY` and restart, or delete `admin.json` in the data folder and restart to get a new first-boot key in the log.
 - Failed sign-ins are rate limited per address: five are free, then the wait grows up to an hour. Wrong codes are also counted per key.
 - The audit log is also a file, `admin-audit.log` in the data folder (it rotates at 5 MB).
@@ -303,7 +308,7 @@ Run these in the stack's folder (`/opt/friendspeak`):
 
 **Coming from the self-signed stack on the same machine?** Both stacks are named `friendspeak` and use the same data volume, so nothing is lost: `docker compose down` the old one, then run the installer. Friends add the server again under its new `https://` address and stay members, because the server knows them by their key.
 
-**The admin dashboard behind the proxy.** Sign-in works as it is: Caddy passes the original `Host` header and `X-Forwarded-Proto`. Every request reaches friendspeak from Caddy's address, and friendspeak never trusts `X-Forwarded-For`, so the audit log and the user list show Caddy's address, sign-in lockouts are shared by everyone, and an IP ban only bans the profile. See [A public host](#admin-dashboard) for more layers.
+**The admin dashboard behind the proxy.** Sign-in works as it is: Caddy passes the original `Host` header and `X-Forwarded-Proto`. Every request reaches friendspeak from Caddy's address, so the stack sets `TRUST_PROXY=1`: friendspeak takes each person's address from what Caddy reports, for the audit log, the user list, sign-in and wrong-invite lockouts and IP bans. A stack installed before this needs that line added to its `docker-compose.yaml` (under `HTTPS: "0"`); until then everyone counts as one address. See [A public host](#admin-dashboard) for more layers.
 
 ## Docker / Portainer
 

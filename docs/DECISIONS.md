@@ -343,7 +343,7 @@ Without a mic, users join **listen-only** instead of failing.
 
 **Alternatives:** renegotiating media onto the DM peer connection (one connection, but DM reconnects would kill calls and its negotiation is deliberately one-shot); relaying call signaling through `/dm` on the server (works without the data channel, but adds server protocol and lets the server see and forge the handshake, which sealing now rules out); a temporary private voice channel on a shared server (reuses everything, but ties a call to one server and shows it to the host).
 
-## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52)
+## D34: The server hosts an admin dashboard at /admin, gated by admin keys · Active (roles as labels superseded by D43; the path and 2-step sign-in amended by D52; the local rule and forwarded addresses by D61)
 **Context:** hosts want to see health and logs (and, later, manage users) without shell access to the machine. D26 said the server has no UI. The dashboard shows IPs and the server log, so whoever can open it effectively controls the server. Profile ids are spoofable (D3), so admin rights can't hang on a profile.
 **Decision:**
 - **Where:** a web UI at `/admin` on the one port (D2). It is plain ES modules with no build step (D1), in `admin-ui/`, not `public/`, because `public/` ships only in the desktop app (D26). The one shared file is `public/js/util.js`, served as `/admin/js/util.js`. Every `/admin` response carries a strict CSP (`default-src 'self'`, no inline scripts or styles), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `no-store`.
@@ -710,7 +710,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** the old list only for the active profile (the other profiles would lose servers they use); one stored object keyed by profile id (every write rewrites every profile's list); per-profile settings as well (a second profile would start without its audio devices and theme; a split into device and account settings is possible later); server lists in the profile export (the file would carry server passwords).
 
-## D51: People join with invites; a member is then known by their key · Active
+## D51: People join with invites; a member is then known by their key · Active (the address wrong invites are counted for: D61)
 
 **Context:** access was one shared `PASSWORD` from the environment, compared in plaintext on every `hello`. Everyone knew it, it couldn't be taken back from one person, and nothing said who let whom in.
 
@@ -734,7 +734,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** keeping only hashes and showing a token once (the first version, see above); a slow hash (pointless for 80 random bits); a session token per member (the pinned key already proves who comes back); invite links with a custom URL scheme (needs OS registration), or `address#invite` pasted into the address field (two ways to enter one thing; the invite goes in its own field).
 
-## D52: The dashboard is at a random path and keys need an authenticator code; both can be switched off · Active
+## D52: The dashboard is at a random path and keys need an authenticator code; both can be switched off · Active (`/admin` from localhost and local requests amended by D61)
 **Context:** issue #82. The dashboard is full control of the server (D34), and it sat at a path anyone could guess, behind one secret: a key that is pasted around, kept in password managers and compose files, and printed in a container log.
 
 **Decision:**
@@ -757,7 +757,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 
 **Alternatives:** WebAuthn/passkeys (need a stable HTTPS origin, which a self-signed LAN server on an IP doesn't have); one TOTP secret for the whole server (can't reset one admin); printing the secret in the server output at first boot (ties setup to shell access and puts a lasting secret in `docker logs`); requiring both with no switch (breaks hosts behind an access proxy with path rules, and automation); a QR library (a dependency and a vendored file for one screen); recovery codes (another secret to store; the reset and the host's own access cover it).
 
-## D53: A second compose stack puts Caddy in front, for hosts with a domain · Active
+## D53: A second compose stack puts Caddy in front, for hosts with a domain · Active (the stack now sets `TRUST_PROXY`, D61)
 **Context:** issue #83. D20/D21 cover a host without a domain: a self-signed certificate that the app pins. A host on a rented server with a domain had to put a proxy together from a paragraph in the README, and the admin dashboard is the part that most needs a real certificate: it is opened in a browser, where a self-signed one is a warning to click through.
 
 **Decision:**
@@ -938,3 +938,39 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - The View menu keeps its developer tools item, and updates on Windows and Linux are still unsigned (D29).
 
 **Alternatives:** HTTPS only, with the server defaulting to a self-signed certificate (D20) and the app refusing `http://` except on this computer. It would pass the checklist outright, but every saved `http://` server would stop working at the update. Checking the pop-out's address against a list of servers kept in the main process (the page would have to keep it in step).
+
+## D61: A security review by STRIDE: a local link, addresses from a trusted proxy, and limits where there were none · Active
+**Context:** a review of the whole app by threat category (spoofing, tampering, repudiation, information disclosure, denial of service, elevation of privilege). Most of it held. What didn't:
+- D34's local rule gave the dashboard to any request from loopback with `Host: localhost` and no proxy headers. A tunnel on the host's machine (`ssh -R`, ngrok, playit, frp) delivers exactly that from anywhere, and `/admin` then also told it the random path.
+- Behind a proxy every address is the proxy's (D34, D53), so ten wrong invites from anyone kept everyone from joining (D51), for as long as someone kept sending them.
+- The per-socket budget counted events, not bytes, and applied before `hello` too: a socket that never signed in could send 4 MB packets, 40 a second, for the server to parse.
+- A message took any number of different reactions, a server any number of channels, one member could make mailboxes until the 5000 were used up, and could fill someone else's.
+- Removing or banning someone, or switching the game off, didn't reach the game's worlds: they are socket.io servers of their own with their own sign-in tokens.
+- The uploads folder was made with the default mode, unlike the rest of the data folder.
+
+**Decision:**
+- **A local link instead of the local rule.** Looking local (D34's test, unchanged) no longer opens the dashboard. At every start the server makes a token (32 random bytes, memory only, known to the log scrubber) and the CLI prints `http://localhost:<port><path>/?local=<token>` on stdout. Opened from a request that looks local, it starts a session that lasts until the server stops, and whose cookie only counts on requests that look local. `/admin` from localhost no longer forwards: it says the address is in the server's output. `ADMIN_LOCAL=off` means no link, as before it meant no rule.
+- **`TRUST_PROXY=1`, off by default, set by the `deploy/` stack.** With it, the address of a socket or a dashboard request is the last one in `X-Forwarded-For`: the one the proxy next to the server wrote, whatever a client put in front. It is used for bans, the wrong-invite and sign-in limits, the user list and the audit log. The local rule never uses it. In `deploy/` only Caddy reaches the container, so the stack sets it; the root stack and `npm start` leave it to the host. Without it, a refusal for too many wrong invites that came through a proxy says what to set.
+- **Bytes are budgeted per connection, and connections that haven't signed in are counted per address** (the numbers are in ARCHITECTURE.md → Protocol). A connection gets what one `hello` needs until it is a member's. One too many from an address closes the oldest that is still waiting, not the newest, so the person signing in right now is not the one refused.
+- **Caps:** 20 different reactions on a message, 200 channels, a new mailbox only for the key the profile is pinned to, and one sender fills at most half of a mailbox.
+- **The game follows membership.** When someone stops being a member their game sign-in tokens are deleted and their penguin is disconnected; the penguin itself stays for when they are let back in. While the game is switched off the worlds refuse connections. Both are done in `game/index.js`, with nothing changed in the vendored server.
+- **The uploads folder is 0700** and new uploads 0600, like the rest of the data folder.
+- A second `hello` on one socket leaves voice first.
+
+**Consequences:**
+- Hosts who opened `http://localhost:3000/admin` now use the link from the server's output, once per start and per browser. A server started where nobody sees stdout (a service, a detached process without a log) has no local way in: it needs the admin key, as Docker always has.
+- The link is as good as a key for as long as the server runs, on that machine only. It is in the terminal's scrollback, in whatever captures stdout (a service's journal), and in the browser's history of the one request that used it. Whoever can read those on the machine could already read the data folder.
+- A tunnel on the machine still makes the sign-in page reachable for anyone who knows the path, with a key accepted over what looks like loopback (D34's TLS rule). The key and the code are the gate, as from anywhere else.
+- `TRUST_PROXY=1` on a server that people can also reach directly lets them claim any address: bans by address and the lockouts stop meaning anything. It is for a port that only the proxy reaches.
+- A `deploy/` stack installed before this has no `TRUST_PROXY` line: its compose file is the host's own and an update doesn't change it. Until the host adds the line, the shared lockouts of D53 remain.
+- Behind a proxy without `TRUST_PROXY`, the 64 waiting connections are shared by everyone as well. Members who are signed in don't count, and a waiting connection is only closed when a newer one needs its place.
+- Who left a mailbox item is known only while the server runs, so the per-sender half starts over at a restart.
+- A message that already has more than 20 different reactions keeps them; it takes no new ones until some are gone. The same goes for a server with more than 200 channels.
+- The game's own address limits still read the first address in `X-Forwarded-For` whether or not a proxy is trusted. That is upstream's behaviour in the vendored server; changing it would lump every player behind a host's own proxy together, so it is left.
+
+**Not changed, and why:**
+- Plain HTTP is still what `npm start` serves; the app marks it (D60).
+- Installers and updates are still unsigned on Windows and Linux and ad-hoc signed on macOS (D21, D29): that takes certificates, not code.
+- An app from before upload keys still uploads by its socket id (D24), which every member is sent. Refusing those would cut off apps that haven't updated.
+
+**Alternatives:** `ADMIN_LOCAL` off by default (closes the same hole, but every host on their own machine then needs a key and an authenticator app); only dropping the `/admin` forward, so that the random path is the secret (it is long-lived and D52 says it is not one); a local token kept in the data folder across restarts (a lasting secret on disk for the sake of one click per start); counting wrong invites per key instead of per address (keys are free to make); no wrong-invite limit at all (80-bit tokens can't be guessed either way, but D51's limit also keeps the log readable); a fixed list of proxy addresses to trust (a container's address changes; the stack's network is the boundary instead); refusing the newest waiting connection (the person locked out would be the one signing in); storing the sender with each mailbox item (the disk would say who wrote to whom).

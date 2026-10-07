@@ -2,9 +2,11 @@
 // itself, plus the JSON API and the event stream behind it. Its path is random,
 // made on the first start (D52); ADMIN_PATH picks another or the plain /admin.
 //
-// Access: a request from this very machine (loopback peer, localhost Host, no
-// proxy headers) needs no key. Everything else needs an admin key and TLS, and
-// a code from the authenticator app set up at the key's first sign-in (D52).
+// Access: this very machine needs no key, but it has to open the link the
+// server prints at start, which carries a token made for that run (D61): a
+// loopback peer alone proves nothing, a tunnel on the machine looks the same.
+// Everything else needs an admin key and TLS, and a code from the
+// authenticator app set up at the key's first sign-in (D52).
 // Keys are 32 random bytes, stored only as SHA-256 hashes in DATA_DIR/admin.json.
 // Sessions are opaque tokens held in memory. There are no accounts (D3): this
 // is the one place that is gated, because it shows IPs and logs.
@@ -15,6 +17,7 @@ const crypto = require('crypto');
 const COOKIE = 'fs_admin';
 const SESSION_MAX = 12 * 3600e3; // absolute
 const SESSION_IDLE = 3600e3; // sliding
+const LOCAL_COOKIE_AGE = 30 * 86400; // seconds; a local session ends with the server run anyway
 const AUDIT_MAX = 5 * 1024 * 1024;
 const MAX_KEYS = 50;
 const MAX_TRACKED_IPS = 10000;
@@ -105,7 +108,12 @@ function createAdmin(ctx) {
   const KEYS_FILE = path.join(dataDir, 'admin.json');
   const AUDIT_FILE = path.join(dataDir, 'admin-audit.log');
   const UI_DIR = path.join(__dirname, 'admin-ui');
+  // Who is calling, for lockouts and the audit log: the peer, or what a trusted proxy says (TRUST_PROXY, D61)
+  const addrOf = (req) => (ctx.addressOf ? ctx.addressOf(req.headers, req.socket.remoteAddress) : peerOf(req));
   const localAllowed = options.local !== false;
+  // What the link printed at start carries (D61). Made for this run only, kept in memory, never logged.
+  const localToken = localAllowed ? crypto.randomBytes(32).toString('base64url') : null;
+  if (localToken) logs.redact?.(localToken);
   const mfaOn = options.mfa !== false;
 
   // ---------- keys ----------
@@ -227,9 +235,12 @@ function createAdmin(ctx) {
   const hasProxyHeaders = (req) => req.httpVersion === '1.0' || PROXY_HEADERS.some((h) => req.headers[h] !== undefined);
   const hostIsLocal = (req) => ['localhost', '127.0.0.1', '[::1]'].includes(hostnameOf(req.headers.host));
   const isTls = (req) => req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+  // `local`: the request could be this machine's own browser. That alone opens nothing (D61):
+  // it is what the local link and a local session need on top of their secret.
   function classify(req) {
-    const ip = peerOf(req);
-    const direct = isLoopbackAddr(ip) && hostIsLocal(req);
+    const ip = addrOf(req);
+    // Always the peer itself: with TRUST_PROXY the address above is what a proxy reported
+    const direct = isLoopbackAddr(peerOf(req)) && hostIsLocal(req);
     const local = localAllowed && direct && !hasProxyHeaders(req);
     const tls = isTls(req);
     // A key over plain HTTP is only fine when it never leaves this machine
@@ -238,7 +249,7 @@ function createAdmin(ctx) {
 
   // ---------- sessions ----------
 
-  const sessions = new Map(); // sha256(token) hex -> { keyId, actor, created, seen }
+  const sessions = new Map(); // sha256(token) hex -> { keyId, actor, created, seen }, or { local: true, actor, created, seen } from the local link
   const parseCookies = (header) => {
     const out = {};
     for (const part of String(header || '').split(';')) {
@@ -247,7 +258,8 @@ function createAdmin(ctx) {
     }
     return out;
   };
-  const sessionExpired = (s, now) => now - s.created > SESSION_MAX || now - s.seen > SESSION_IDLE || !findKey(s.keyId) || !isActive(findKey(s.keyId));
+  // A local session lasts as long as its link does: until the server stops
+  const sessionExpired = (s, now) => (s.local ? false : now - s.created > SESSION_MAX || now - s.seen > SESSION_IDLE || !findKey(s.keyId) || !isActive(findKey(s.keyId)));
   function sessionOf(req, touch) {
     const token = parseCookies(req.headers.cookie)[COOKIE];
     if (!token) return null;
@@ -270,10 +282,13 @@ function createAdmin(ctx) {
 
   // The identity behind a request: { local, actor, keyId, sk } or null
   function who(req, touch = true) {
-    if (classify(req).local) return { local: true, actor: 'local', keyId: null, sk: null };
     const s = sessionOf(req, touch);
-    return s ? { local: false, actor: s.actor, keyId: s.keyId, sk: s.sk } : null;
+    if (!s) return null;
+    // A local session's cookie is worth nothing from anywhere but this machine
+    if (s.local) return classify(req).local ? { local: true, actor: s.actor, keyId: null, sk: s.sk } : null;
+    return { local: false, actor: s.actor, keyId: s.keyId, sk: s.sk };
   }
+  const tokenMatches = (given) => !!localToken && typeof given === 'string' && crypto.timingSafeEqual(sha256(given), sha256(localToken));
 
   // ---------- rate limit ----------
 
@@ -379,11 +394,28 @@ function createAdmin(ctx) {
 
   // ---------- routes ----------
 
-  // This machine may still ask at /admin: it needs no key, so the path is no secret to it. Anyone else gets the 404 of any unknown path.
-  if (BASE !== PLAIN_PATH) app.use(PLAIN_PATH, (req, res, next) => (classify(req).local ? res.set(HEADERS).redirect(302, BASE + '/') : next()));
+  // /admin on this machine says where to look and nothing else: what looks local may be a tunnel (D61),
+  // so it is not told the path. Anyone else gets the 404 of any unknown path.
+  if (BASE !== PLAIN_PATH) app.use(PLAIN_PATH, (req, res, next) => (classify(req).local ? res.set(HEADERS).status(404).type('text/plain').send('The admin dashboard is at the address the server prints when it starts ("Admin dashboard:" and, on this computer, "Local link:").\n') : next()));
+
+  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
 
   app.use(BASE, (req, res, next) => {
     res.set(HEADERS);
+    // The local link (D61): <path>/?local=<token> from this machine starts a session without a key.
+    // Either way the token leaves the address bar.
+    if (req.path === '/' && req.method === 'GET' && req.query.local !== undefined) {
+      const c = classify(req);
+      if (c.local && tokenMatches(req.query.local)) {
+        const now = Date.now();
+        const token = crypto.randomBytes(32).toString('base64url');
+        sessions.set(sha256hex(token), { local: true, actor: 'local', created: now, seen: now });
+        res.set('Set-Cookie', cookieHeader(token, LOCAL_COOKIE_AGE, c.tls));
+        audit('local', c.ip, 'login', 'local link');
+        console.log('[admin] the local link was opened on this machine');
+      }
+      return res.redirect(302, BASE + '/');
+    }
     // <path> → <path>/ (relative URLs in the page need the slash)
     if (req.path === '/' && !req.originalUrl.split('?')[0].endsWith('/')) return res.redirect(302, BASE + '/' + (req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : ''));
     next();
@@ -415,17 +447,14 @@ function createAdmin(ctx) {
   });
   api.use(express.json({ limit: '1mb' }));
 
-  const cookieHeader = (value, maxAge, tls) => `${COOKIE}=${value}; HttpOnly; SameSite=Strict; Path=${BASE}; Max-Age=${maxAge}` + (tls ? '; Secure' : '');
-
   api.get('/session', (req, res) => {
     const c = classify(req);
     const me = who(req);
-    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, mfa: mfaOn, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
+    res.json({ authed: !!me, local: !!me?.local, actor: me ? me.actor : null, tls: c.tls, canLogin: c.canLogin, localLink: c.local && !me, mfa: mfaOn, fingerprint: ctx.fingerprint(), name: ctx.state().name, version: ctx.version });
   });
 
   api.post('/login', (req, res) => {
     const c = classify(req);
-    if (c.local) return res.json({ ok: true, actor: 'local' });
     if (!c.canLogin) return res.status(400).json({ error: 'Signing in needs HTTPS. Start the server with HTTPS=1 or put it behind a TLS reverse proxy.' });
     const now = Date.now();
     const wait = lockedFor(c.ip, now);
@@ -483,7 +512,7 @@ function createAdmin(ctx) {
     res.json({ ok: true, actor: key.name });
   });
 
-  // Everything below needs a local request or a session
+  // Everything below needs a session: from a key, or from the local link
   api.use((req, res, next) => {
     const me = who(req);
     if (!me) return res.status(401).json({ error: 'Sign in required', login: true });
@@ -582,13 +611,13 @@ function createAdmin(ctx) {
   });
   api.delete('/crashes/:id', (req, res) => {
     if (!crashes.remove(req.params.id)) return res.status(404).json({ error: 'No such crash report' });
-    audit(req.admin.actor, peerOf(req), 'crash.delete', req.params.id);
+    audit(req.admin.actor, addrOf(req), 'crash.delete', req.params.id);
     notify('crashes');
     res.json({ ok: true });
   });
   api.delete('/crashes', (req, res) => {
     const removed = crashes.clear();
-    audit(req.admin.actor, peerOf(req), 'crash.clear', `${removed} reports`);
+    audit(req.admin.actor, addrOf(req), 'crash.clear', `${removed} reports`);
     notify('crashes');
     res.json({ ok: true, removed });
   });
@@ -615,7 +644,7 @@ function createAdmin(ctx) {
     const key = { id: crypto.randomBytes(8).toString('hex'), name, hash: sha256hex(secret), created: Date.now(), lastUsed: null, bootstrap: false };
     stored.push(key);
     saveKeys();
-    audit(req.admin.actor, peerOf(req), 'key.create', name);
+    audit(req.admin.actor, addrOf(req), 'key.create', name);
     console.log(`[admin] ${req.admin.actor} created the key "${name}"`);
     notify('keys');
     res.json({ ok: true, key: keyView(key, req.admin.keyId), secret });
@@ -628,7 +657,7 @@ function createAdmin(ctx) {
     saveKeys();
     forgetMfa(k.id);
     revokeSessions(k.id);
-    audit(req.admin.actor, peerOf(req), 'key.revoke', k.name);
+    audit(req.admin.actor, addrOf(req), 'key.revoke', k.name);
     console.log(`[admin] ${req.admin.actor} revoked the key "${k.name}"`);
     notify('keys');
     res.json({ ok: true });
@@ -642,7 +671,7 @@ function createAdmin(ctx) {
     setTotp(k, null);
     saveKeys();
     forgetMfa(k.id);
-    audit(req.admin.actor, peerOf(req), 'key.mfa.reset', k.name);
+    audit(req.admin.actor, addrOf(req), 'key.mfa.reset', k.name);
     console.log(`[admin] ${req.admin.actor} reset 2-step sign-in for the key "${k.name}"`);
     notify('keys');
     res.json({ ok: true });
@@ -673,7 +702,7 @@ function createAdmin(ctx) {
   };
   const logAction = (req, action, detail) => {
     detail = String(detail).replace(/[\u0000-\u001f\u007f]/g, ' '); // names are user input
-    audit(req.admin.actor, peerOf(req), action, detail);
+    audit(req.admin.actor, addrOf(req), action, detail);
     // What the shared actions do is logged by server.js ([mod], [server]), with this actor
     if (!/^(user|ban|role|perms|server|invite)\./.test(action)) console.log(`[admin] ${req.admin.actor}: ${action} ${detail}`.trim());
   };
@@ -729,7 +758,7 @@ function createAdmin(ctx) {
     const pid = urlId(req.body?.profileId);
     const name = Object.hasOwn(ctx.state().profiles, pid) ? ctx.state().profiles[pid].name : '';
     const ip = req.body?.ip === true;
-    answer(res, actions.ban(dash(req), { profileId: pid, ip, by: BY, selfIp: peerOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
+    answer(res, actions.ban(dash(req), { profileId: pid, ip, by: BY, selfIp: addrOf(req) }), (r) => logAction(req, 'ban.add', name + (ip && !r.ipSkipped ? ' (and their IP)' : '')));
   });
 
   api.delete('/bans/:id', (req, res) => {
@@ -952,6 +981,9 @@ function createAdmin(ctx) {
 
   return {
     path: BASE,
+    // The query that makes the dashboard's address the local link (D61), or '' when the local rule is off.
+    // For the CLI to print on stdout only.
+    localQuery: localToken ? '/?local=' + localToken : '',
     mfa: mfaOn,
     notify,
     close() {
