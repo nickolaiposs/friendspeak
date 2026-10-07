@@ -544,6 +544,41 @@ const micOff = () => S.muted || audio.micTest || forcedMute();
 // A watched stream's sound plays through its <video>, outside the audio graph
 // (audio.js), so the master volume and the output device are set on each one.
 const streamVolume = (v) => v * settings.get().masterVolume;
+
+// A stream's sound, on its tile: the speaker mutes and unmutes it, the slider
+// sets its volume. The slider keeps its place while muted, so unmuting brings
+// back the volume from before; moving it unmutes. get() answers
+// { volume, muted }, set() stores what changed and syncs the tiles.
+function streamSound(video, get, set) {
+  const btn = h('button', { onclick: () => (set({ muted: !get().muted }), show()) });
+  const el = h(
+    'div',
+    { class: 'stream-volume' },
+    btn,
+    h('input', {
+      type: 'range',
+      min: 0,
+      max: 1,
+      step: 0.01,
+      value: get().volume,
+      title: 'Stream volume',
+      oninput: (e) => {
+        const volume = +e.target.value;
+        video.volume = streamVolume(volume);
+        set(get().muted ? { volume, muted: false } : { volume });
+        show();
+      },
+    })
+  );
+  const show = () => {
+    const { muted } = get();
+    btn.title = muted ? 'Unmute stream' : 'Mute stream';
+    btn.replaceChildren(icon(muted ? 'speakerOff' : 'speaker'));
+    el.classList.toggle('muted', muted);
+  };
+  show();
+  return el;
+}
 function applyOutputDevice(deviceId) {
   audio.setOutputDevice(deviceId);
   for (const t of [...(S.stage?.tiles.values() || []), ...dmCallUi.tiles.values()]) if (t.kind === 'screen') t.video?.setSinkId?.(deviceId || '').catch(() => {});
@@ -621,7 +656,7 @@ function dmCallButtons(c, compact) {
 // The call's view sits on top of the conversation with that person, so it only
 // shows (and video is only received at full size) while that DM is open. The
 // sidebar panel and the incoming-call card show wherever you are.
-const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, ringing: null, ringTimer: null };
+const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, muted: false, ringing: null, ringTimer: null };
 
 function renderDmCall() {
   const c = DMCALL.cur;
@@ -692,7 +727,7 @@ function renderDmCall() {
     for (const key of [...ui.tiles.keys()]) dropDmCallTile(key);
     ui.ro?.disconnect();
     ui.el?.remove();
-    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1 });
+    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1, muted: false });
     if (c) {
       ui.main = h('div', { class: 'stage-main' });
       ui.grid = h('div', { class: 'stage-grid' });
@@ -752,7 +787,7 @@ function renderDmCall() {
     if (src && head && t.video.paused) t.video.play().catch(() => {});
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = !theirs || S.deafened || audio.micTest;
+      t.video.muted = !theirs || S.deafened || audio.micTest || ui.muted;
       t.video.volume = streamVolume(ui.volume);
     }
     t.report?.();
@@ -804,12 +839,7 @@ function dmCallTile(key, who, kind) {
     controls = h(
       'div',
       { class: 'tile-controls', onclick: stop, ondblclick: stop },
-      h(
-        'label',
-        { class: 'stream-volume', title: 'Stream volume' },
-        icon('speaker'),
-        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: ui.volume, oninput: (e) => ((ui.volume = +e.target.value), (video.volume = streamVolume(ui.volume))) })
-      )
+      streamSound(video, () => ui, (o) => (Object.assign(ui, o), renderDmCall()))
     );
   }
   tile.el = h('div', attrs, video, tile.status, label, controls);
@@ -4988,7 +5018,7 @@ function openStage({ screen } = {}) {
     const toggleFullscreen = () => (body.ownerDocument.fullscreenElement ? body.ownerDocument.exitFullscreen() : body.requestFullscreen?.().catch(() => {}));
     // tiles: key ("screen:<sid>", "camera:<sid>", "user:<sid>") -> tile; watching: sids of screens we receive;
     // pop: the window the stage is in, when it isn't in the app ({ win, name, ready, onTop })
-    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
+    S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), muted: new Set(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
     // Resolution, real frame rate and codec of the focused (or first) screen
@@ -5147,18 +5177,14 @@ function stageTile(key, sid, kind, live) {
       h(
         'div',
         { class: 'tile-controls', onclick: stop, ondblclick: stop },
-        h(
-          'label',
-          { class: 'stream-volume', title: 'Stream volume' },
-          icon('speaker'),
-          h('input', {
-            type: 'range',
-            min: 0,
-            max: 1,
-            step: 0.01,
-            value: S.stage.volumes.get(sid) ?? 1,
-            oninput: (e) => (S.stage.volumes.set(sid, +e.target.value), (video.volume = streamVolume(+e.target.value))),
-          })
+        streamSound(
+          video,
+          () => ({ volume: S.stage.volumes.get(sid) ?? 1, muted: S.stage.muted.has(sid) }),
+          (o) => {
+            if (o.volume != null) S.stage.volumes.set(sid, o.volume);
+            if (o.muted != null) S.stage.muted[o.muted ? 'add' : 'delete'](sid);
+            syncStage();
+          }
         ),
         h('button', { class: 'btn small ghost', onclick: () => watchScreen(sid, false) }, 'Stop watching')
       )
@@ -5353,7 +5379,7 @@ function syncStage() {
     }
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
-      t.video.muted = t.sid === c.sid || S.deafened || audio.micTest;
+      t.video.muted = t.sid === c.sid || S.deafened || audio.micTest || st.muted.has(t.sid);
       t.video.volume = streamVolume(st.volumes.get(t.sid) ?? 1);
     }
   }
