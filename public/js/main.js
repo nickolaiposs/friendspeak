@@ -6808,7 +6808,7 @@ function serverOverview(body) {
     h(
       'p',
       { class: 'muted small' },
-      ro ? 'The server’s name, icon, voice quality and games can only be changed by an administrator. ' : 'The server’s name and icon are shown to everyone on it. The icon can be any image (it’s resized for you), an animated GIF, or a link. ',
+      ro ? 'The server’s name, icon, voice quality and games can only be changed by an administrator. ' : 'The server’s name and icon are shown to everyone on it. The icon can be any image (it’s resized for you) or an animated GIF. An administrator can also set a link. ',
       h('span', {}, S.entry.address)
     ),
     h(
