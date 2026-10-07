@@ -177,6 +177,10 @@ function acceptPinnedCertificates() {
 
 let win = null;
 const streamWindows = new Map(); // window name -> BrowserWindow, for the video grid in a window of its own
+// The server whose game the page is about to pop out: { origin, at }, used once. The page says so over the
+// bridge, which frames in the window (the game, link embeds) don't have, so they can't open a window by its name.
+let gameWindow = null;
+const GAME_WINDOW_MS = 10_000;
 
 // Everything the bridge in preload.js can ask for is for the app's own page, in the main frame of its own
 // window. The game's window and iframes don't get the bridge today; this holds if that ever changes.
@@ -204,8 +208,16 @@ function createWindow() {
 
   win.webContents.setWindowOpenHandler(({ url, frameName }) => {
     // The game's "Pop out" button opens it in its own window. Only that: the page names the
-    // window when it opens it, and a link in a message can't (those open in the real browser).
-    if (frameName === GAME_WINDOW && /^https?:\/\/[^/]+\/game\//.test(url)) {
+    // window when it opens it, after telling us which server's game it is (desktop:game-window).
+    // A link in a message can't (those open in the real browser), and nor can a page in a frame.
+    if (frameName === GAME_WINDOW) {
+      const allowed = gameWindow;
+      gameWindow = null;
+      let to = null;
+      try {
+        to = new URL(url);
+      } catch {}
+      if (!allowed || Date.now() - allowed.at > GAME_WINDOW_MS || !to || to.origin !== allowed.origin || !to.pathname.startsWith('/game/')) return { action: 'deny' };
       return {
         action: 'allow',
         overrideBrowserWindowOptions: {
@@ -251,7 +263,7 @@ function createWindow() {
 
   // Links clicked inside chat open in the real browser
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('friendspeak://')) {
+    if (!isApp(url)) {
       e.preventDefault();
       if (/^https?:\/\//.test(url)) shell.openExternal(url);
     }
@@ -307,11 +319,14 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",
+  "frame-ancestors 'none'", // the app's page in a frame of someone else's (the game, an embed) could be clicked through
 ].join('; ');
 
 function serveApp() {
   protocol.handle('friendspeak', async (request) => {
-    const { pathname } = new URL(request.url);
+    const { pathname, host } = new URL(request.url);
+    // One origin only: the same page under another host would be a second origin with its own storage
+    if (host !== 'app') return new Response('Not found', { status: 404 });
     const clean = decodeURIComponent(pathname);
     for (const [prefix, target] of ROUTES) {
       if (!clean.startsWith(prefix) && clean !== prefix.replace(/\/$/, '')) continue;
@@ -392,6 +407,8 @@ function allowScreenShare() {
     pickedSource = pick && typeof pick.id === 'string' ? { id: pick.id, audio: !!pick.audio, at: Date.now() } : null;
   });
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    // Only the app's own page shares the screen: a pick is not for a frame or another window to use
+    if (!win || win.isDestroyed() || request.frame !== win.webContents.mainFrame || !isApp(request.frame.url)) return callback();
     const pick = pickedSource;
     pickedSource = null;
     if (!pick || Date.now() - pick.at > 30_000) return callback({});
@@ -663,6 +680,10 @@ handle('desktop:download', (_e, url) => {
 });
 // Notification clicks bring the window back
 // The video grid's window can stay above other windows (its "Keep on top" button)
+// The game's pop-out window: allowed once, for this server, in the next few seconds (see setWindowOpenHandler)
+handle('desktop:game-window', (_e, origin) => {
+  gameWindow = typeof origin === 'string' && /^https?:\/\/[^/]+$/.test(origin) ? { origin, at: Date.now() } : null;
+});
 handle('desktop:stream-top', (_e, name, on) => {
   const w = streamWindows.get(name);
   if (w && !w.isDestroyed()) w.setAlwaysOnTop(!!on, 'floating');

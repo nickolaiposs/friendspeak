@@ -16,10 +16,8 @@
   <!-- Cameras in voice channels -->
   <key>com.apple.security.device.camera</key>
   <true/>
-  <!-- Hosting a server and connecting to others -->
+  <!-- Connecting to servers -->
   <key>com.apple.security.network.client</key>
-  <true/>
-  <key>com.apple.security.network.server</key>
   <true/>
 </dict>
 </plist>
