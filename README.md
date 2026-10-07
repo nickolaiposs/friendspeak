@@ -330,6 +330,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `COMPOSE_PROFILES` + `WATCHTOWER_TOKEN` | none | Optional. `autoupdate` + a secret (`openssl rand -hex 32`) to install updates automatically |
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
 | `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
+| `FRIENDSPEAK_MEMORY` | `1g` | Most memory the server's container may use. Past it Docker restarts the server, so raise it on a big server rather than removing it |
 | `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
 | `ADMIN_PATH` / `ADMIN_MFA` | generated / `on` | The dashboard's path (printed in the container log at every start; `off` = `/admin`) and 2-step sign-in (`off` = key only) |
 | `HTTPS` | `1` | `1` = self-signed HTTPS on the port. `0` = plain HTTP for use behind a TLS reverse proxy |
@@ -353,7 +354,7 @@ Optional. The compose file includes a second service, `watchtower` ([nickfedor/w
 
 friendspeak only schedules a window when Watchtower answers, so a missing or stopped sidecar never produces a maintenance warning that doesn't happen. It checks again every 6 hours. If your Portainer version ignores `COMPOSE_PROFILES`, delete the `profiles:` line instead.
 
-Only the watchtower container gets the Docker socket, and it only touches containers labeled `com.centurylinklabs.watchtower.enable=true` (friendspeak). While the repo is private, also set `GITHUB_TOKEN` (friendspeak reads releases) and `GHCR_USER`/`GHCR_TOKEN` (watchtower pulls the image).
+Only the watchtower container gets the Docker socket, and it only touches containers labeled `com.centurylinklabs.watchtower.enable=true` (friendspeak). The socket is root on the machine, so the container around it is kept small: pinned to a version by digest, a read-only filesystem, no Linux capabilities, and its API only answers with the token. While the repo is private, also set `GITHUB_TOKEN` (friendspeak reads releases) and `GHCR_USER`/`GHCR_TOKEN` (watchtower pulls the image).
 
 Examples: `0 4 * * *` is every day at 04:00. `30 3 * * 1-5` is weekdays at 03:30. `0 6 1 * *` is the 1st of each month.
 
