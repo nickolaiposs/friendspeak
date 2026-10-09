@@ -2257,6 +2257,25 @@ async function startServer(opts = {}) {
         ack({ ok: true });
       });
 
+      // Put a channel before another one of its type that the mover can see, or last (no `before`).
+      // The list is one array; apps show it grouped by type, so only the order within a type counts.
+      on('channel:move', ({ id: cid, before }, ack) => {
+        const ch = channel(cid);
+        if (!ch) return ack({ error: 'no such channel' });
+        if (!inChannel(cid).manage) return ack(noPerm('manage that channel'));
+        const to = before == null ? null : channel(str(before, 32));
+        if (before != null && (!to || to === ch || to.type !== ch.type || !inChannel(to.id).view)) return ack({ error: 'no such channel' });
+        const was = state.channels.indexOf(ch);
+        state.channels.splice(was, 1);
+        // Last: after every channel of the type, also the ones the mover can't see
+        state.channels.splice(to ? state.channels.indexOf(to) : state.channels.length, 0, ch);
+        if (state.channels[was] === ch) return ack({ ok: true });
+        console.log(`[mod] ${whoIs(users.get(socket.id).profile)} moved the ${ch.type} channel "${ch.name}"`);
+        save();
+        for (const [sid, u] of users) io.to(sid).emit('channels', channelsFor(permsOf(u.profile.id)));
+        ack({ ok: true });
+      });
+
       // The full new overrides object of a channel: { [roleId | 'everyone']: { view?, send?, manage? } }
       on('channel:perms', ({ id: cid, overrides }, ack) => {
         const ch = channel(cid);

@@ -150,6 +150,8 @@ body.no-members #app { grid-template-columns: 68px 248px 1fr 0; }
 .channel:hover { background: var(--bg-hover); color: var(--text); }
 .channel.active { background: var(--accent-soft); color: var(--text-strong); }
 .channel.active .icon { opacity: 1; color: var(--accent-text); }
+#channel-list .channel.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+#channel-list .channel.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
 .channel.unread { color: var(--text-strong); font-weight: 600; }
 .channel.unread::after { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; order: 9; }
 .channel.voice.connected { color: var(--green); }
@@ -836,6 +838,12 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .call-stage { flex: none; height: 230px; display: flex; flex-direction: column; background: #000; border-bottom: 1px solid var(--line); }
 .call-stage.has-video { height: 58%; min-height: 280px; }
 #main.call-max .call-stage { flex: 1; height: auto; }
+/* The call's video: in .call-stage, or in a window of its own (popout.html) */
+.call-view { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #000; }
+.call-top { flex: none; display: flex; align-items: center; gap: 10px; padding: 4px 8px; background: var(--bg-2); }
+.call-top .stream-stats { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.call-stage.popped, .call-stage.popped.has-video { height: auto; min-height: 0; }
+.call-stage.popped .call-bar { padding-top: 8px; }
 #main.call-max .messages, #main.call-max .composer-wrap { display: none; }
 .call-bar { flex: none; display: flex; align-items: center; justify-content: center; gap: 10px; padding: 0 8px 8px; }
 .call-bar .call-status { color: var(--muted); font-size: calc(13px * var(--font-scale)); min-width: 44px; text-align: right; }
