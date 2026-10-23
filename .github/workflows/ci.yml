@@ -101,6 +101,8 @@ jobs:
           BEFORE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           V=$(node -p "require('./package.json').version")
+          # A new branch's first push has no "before": compare with the parent commit
+          git cat-file -e "$BEFORE^{commit}" 2>/dev/null || BEFORE=HEAD^
           OLD=$(git show "$BEFORE:package.json" 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0)).version" 2>/dev/null || echo none)
           if [ "$V" = "$OLD" ]; then echo "The version stays $V: nothing to check"; exit 0; fi
           node scripts/release-notes.js "$V" > /dev/null
