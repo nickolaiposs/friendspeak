@@ -69,6 +69,15 @@ const S = {
 
 // Present when running inside the desktop app (see desktop/preload.js)
 const desktop = window.friendspeakDesktop || null;
+
+// The desktop app's own title bar (desktop/main.js draws the window without the system's)
+if (desktop?.titleBar) {
+  const root = document.documentElement;
+  root.classList.add('has-titlebar', 'os-' + desktop.platform);
+  root.style.setProperty('--titlebar-h', desktop.titleBar.height + 'px');
+  document.getElementById('titlebar').hidden = false;
+  desktop.titleBar.onFullscreen((on) => root.classList.toggle('fullscreen', on));
+}
 // What a plain http server means, where the address is typed and on the mark in the server's header
 const UNENCRYPTED = 'Not encrypted: this server uses plain http, so anyone on the network between you and it can read and change what you send, your invite included. Fine on a network you trust; over the internet, ask the host to turn on HTTPS.';
 // Name a bookmark by the server's own name (set in Server settings)
@@ -201,6 +210,7 @@ const I = {
   bellOff: '<svg viewBox="0 0 24 24"><path d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68c-.6.14-1.14.37-1.63.66L18 12.2V16zM4.27 3 3 4.27l3.07 3.07A5.9 5.9 0 0 0 6 11v5l-2 2v1h14.73l1 1L21 18.73 4.27 3z"/></svg>',
   search: '<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>',
   link: '<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>',
+  check: '<svg viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
 };
 const icon = (name, cls = '') => h('span', { class: 'icon ' + cls, html: I[name] });
@@ -1114,10 +1124,12 @@ let activePopover = null;
 function closePopover() {
   activePopover?.close();
 }
-function popover(anchor, content, { align = 'end', className = '', onClose } = {}) {
+// `doc`: the page it opens in, when that isn't the app's (the stage in a window of its own)
+function popover(anchor, content, { align = 'end', className = '', onClose, doc = document } = {}) {
   closePopover();
   const el = h('div', { class: 'popover ' + className }, content);
-  $('#popovers').append(el);
+  (doc === document ? $('#popovers') : doc.body).append(el);
+  const { innerWidth, innerHeight } = doc.defaultView;
   const place = () => {
     const r = anchor.getBoundingClientRect();
     const pw = el.offsetWidth;
@@ -1134,19 +1146,20 @@ function popover(anchor, content, { align = 'end', className = '', onClose } = {
   const onKey = (e) => e.key === 'Escape' && close();
   const close = () => {
     el.remove();
-    document.removeEventListener('mousedown', onDown, true);
-    document.removeEventListener('keydown', onKey);
+    doc.removeEventListener('mousedown', onDown, true);
+    doc.removeEventListener('keydown', onKey);
     if (activePopover?.el === el) activePopover = null;
     onClose?.();
   };
   setTimeout(() => {
-    document.addEventListener('mousedown', onDown, true);
-    document.addEventListener('keydown', onKey);
+    doc.addEventListener('mousedown', onDown, true);
+    doc.addEventListener('keydown', onKey);
   });
   activePopover = { el, close, place };
   return activePopover;
 }
 
+// items: { label, run, danger? }, or with `checked` a checkbox
 function contextMenu(e, items) {
   e.preventDefault();
   const anchor = { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }), contains: () => false };
@@ -1156,10 +1169,12 @@ function contextMenu(e, items) {
       'div',
       { class: 'menu' },
       items.filter(Boolean).map((it) =>
-        h('button', { class: 'menu-item' + (it.danger ? ' danger' : ''), onclick: () => (p.close(), it.run()) }, it.label)
+        'checked' in it
+          ? h('button', { class: 'menu-item', role: 'menuitemcheckbox', 'aria-checked': String(!!it.checked), onclick: () => (p.close(), it.run()) }, h('span', { class: 'menu-check', html: it.checked ? I.check : '' }), it.label)
+          : h('button', { class: 'menu-item' + (it.danger ? ' danger' : ''), onclick: () => (p.close(), it.run()) }, it.label)
       )
     ),
-    { align: 'start' }
+    { align: 'start', doc: e.target.ownerDocument || document }
   );
 }
 
@@ -1376,6 +1391,7 @@ function saveProfile(save) {
 }
 
 function welcome() {
+  $('#main').replaceChildren(); // the start-up spinner
   const { el, draft } = profileEditor({ name: '', color: randomColor(), avatar: '', status: '' });
   const importInput = h('input', {
     type: 'file',
@@ -1479,7 +1495,7 @@ function renderRail() {
       return h(
         'button',
         {
-          class: 'rail-server' + (muted ? ' silenced' : '') + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : ''),
+          class: 'rail-server' + (muted ? ' silenced' : '') + (active && !inDmView() ? ' active' : '') + (active && inDmView() ? ' current' : '') + (active && !S.connected ? ' offline' : '') + (active && !S.connected && S.conn?.socket.active ? ' connecting' : ''),
           title: `${label}\n${s.address}` + (isUnencrypted(s.address) ? '\nNot encrypted' : '') + (calling ? '\nYou’re in voice here' : '') + (muted ? '\nNotifications muted' : '') + (mentions ? `\n${mentions} unread mention${mentions > 1 ? 's' : ''}` : ''),
           onclick: () => connectTo(s),
           oncontextmenu: (e) =>
@@ -1694,6 +1710,7 @@ function openSocket(entry, rejoinVoice = null) {
       if (calling()) (endCall(), renderVoicePanel(), renderRail()); // also closes a background connection
       if (!viewed()) return;
       socket.disconnect();
+      renderRail();
       renderMain(res.error);
       if (res.invite || /password/i.test(res.error)) serverDialog(entry);
       return;
@@ -2142,7 +2159,7 @@ function renderHeader() {
       S.server?.icon ? h('img', { class: 'header-icon', src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : null,
       h('span', {}, S.server?.name || S.entry.serverName || S.entry.address)
     ),
-    S.connected && S.server?.storage ? h('button', { class: 'icon-btn tiny', title: 'Server files', onclick: () => openFileBrowser() }, icon('folder')) : null,
+    S.connected && S.server?.storage ? h('button', { class: 'icon-btn tiny', title: 'Server files', onclick: () => openFileBrowser() }, icon('folder')) : '', // not null: replaceChildren() would print it
     h('span', { class: 'conn-dot ' + (S.connected ? 'on' : 'off'), title: S.connected ? 'Connected' : 'Offline' })
   );
 }
@@ -2868,6 +2885,9 @@ function renderMembers() {
 
 // ---------------------------------------------------------------- main / chat
 
+// A small spinning ring for things on their way: the app, a server, messages
+const spinner = (big = false) => h('span', { class: 'spinner' + (big ? ' big' : ''), role: 'status', 'aria-label': 'Loading' });
+
 function renderMain(error) {
   const main = $('#main');
   mentionMenu = null; // its element goes with the composer
@@ -2879,6 +2899,7 @@ function renderMain(error) {
         'div',
         { class: 'home' },
         h('div', { class: 'home-logo' }, 'friendspeak'),
+        S.entry && !error ? h('div', { class: 'home-loading' }, spinner(true)) : null,
         S.entry
           ? h('p', { class: error ? 'error-text' : 'muted' }, error || `Connecting to ${S.entry.address}…`)
           : h('p', { class: 'muted' }, 'Text, voice, GIFs and soundboards with your friends. Connect to a server by IP.'),
@@ -3057,17 +3078,18 @@ async function selectChannel(id) {
     return renderAll();
   }
   settings.set({ lastChannel: { ...settings.get().lastChannel, [S.entry.id]: id } });
-  if (!S.messages.has(id) && S.connected) {
-    const res = await S.socket.emitWithAck('msg:history', { channelId: id });
-    S.messages.set(id, res.messages || []);
-    S.hasMore.set(id, (res.messages || []).length >= 50);
-  }
-  if (S.channelId !== id) return;
+  // Draw the channel at once; its messages show a spinner until the history is here
+  const fetching = !S.messages.has(id) && S.connected;
   renderRail();
   renderHeader();
   renderChannels();
   renderMembers();
   renderMain();
+  if (!fetching) return;
+  const res = await S.socket.emitWithAck('msg:history', { channelId: id });
+  S.messages.set(id, res.messages || []);
+  S.hasMore.set(id, (res.messages || []).length >= 50);
+  if (S.channelId === id) renderMessages();
 }
 
 function isGrouped(m, prev) {
@@ -3198,6 +3220,7 @@ function messageEl(m, prev) {
 function renderMessages(keepScroll = false) {
   const box = $('#messages');
   if (!box) return;
+  if (!S.messages.has(S.channelId) && !isDm(S.channelId) && S.connected) return box.replaceChildren(h('div', { class: 'messages-loading' }, spinner(true)));
   const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
   const prevTop = box.scrollTop;
   const list = S.messages.get(S.channelId) || [];
@@ -3278,8 +3301,11 @@ async function onMessagesScroll(e) {
   if (!list?.length) return;
   loadingOlder = true;
   const cid = S.channelId;
+  const more = h('div', { class: 'older-loading' }, spinner());
+  box.prepend(more);
   const res = await S.socket.emitWithAck('msg:history', { channelId: cid, before: list[0].id });
   loadingOlder = false;
+  more.remove();
   if (cid !== S.channelId) return;
   const older = res.messages || [];
   S.hasMore.set(cid, older.length >= 50);
@@ -5194,7 +5220,7 @@ function openStage({ screen } = {}) {
     const controls = h('div', { class: 'stage-controls' });
     const main = h('div', { class: 'stage-main' });
     const grid = h('div', { class: 'stage-grid' });
-    const body = h('div', { class: 'stage' }, main, grid);
+    const body = h('div', { class: 'stage', oncontextmenu: stageMenu }, main, grid);
     const popBtns = h('div', { class: 'stage-controls' });
     // The stage can be in a window of its own (popOutStage), so ask the page it is in
     const toggleFullscreen = () => (body.ownerDocument.fullscreenElement ? body.ownerDocument.exitFullscreen() : body.requestFullscreen?.().catch(() => {}));
@@ -5523,6 +5549,16 @@ function statsView(tile, info, nameOf) {
   );
 }
 
+// Right-click on the video grid: who gets a tile
+function stageMenu(e) {
+  const st = settings.get();
+  const flip = (key) => () => (settings.set({ [key]: !settings.get()[key] }), syncStage());
+  contextMenu(e, [
+    { label: 'Show non-video participants', checked: st.stageNonVideo, run: flip('stageNonVideo') },
+    { label: 'Show my own video', checked: st.stageOwnVideo, run: flip('stageOwnVideo') },
+  ]);
+}
+
 // Reconcile the stage with who is in the channel, sharing, or on camera.
 function syncStage() {
   const st = S.stage;
@@ -5541,10 +5577,14 @@ function syncStage() {
   }
   if (!inChannel.some((u) => u.sharing || u.camera)) return closeStage();
 
-  // Screens first, then everyone in the channel (camera or avatar)
+  // Screens first, then everyone in the channel (camera or avatar). The grid's right-click menu
+  // can leave out those without video, and your own camera and screen share.
+  const { stageNonVideo, stageOwnVideo } = settings.get();
   const want = [
-    ...inChannel.filter((u) => u.sharing).map((u) => ({ key: 'screen:' + u.sid, sid: u.sid, kind: 'screen', live: u.sid === c.sid || st.watching.has(u.sid) })),
-    ...inChannel.map((u) => ({ key: (u.camera ? 'camera:' : 'user:') + u.sid, sid: u.sid, kind: u.camera ? 'camera' : 'user', live: true })),
+    ...inChannel.filter((u) => u.sharing && (stageOwnVideo || u.sid !== c.sid)).map((u) => ({ key: 'screen:' + u.sid, sid: u.sid, kind: 'screen', live: u.sid === c.sid || st.watching.has(u.sid) })),
+    ...inChannel
+      .filter((u) => (u.camera ? stageOwnVideo || u.sid !== c.sid : stageNonVideo))
+      .map((u) => ({ key: (u.camera ? 'camera:' : 'user:') + u.sid, sid: u.sid, kind: u.camera ? 'camera' : 'user', live: true })),
   ];
   const wanted = new Map(want.map((w) => [w.key, w]));
   for (const [key, tile] of st.tiles) if (wanted.get(key)?.live !== tile.live) dropTile(key);
@@ -5556,6 +5596,8 @@ function syncStage() {
   if (focused && st.main.firstChild !== focused.el) st.main.replaceChildren(focused.el);
   if (!focused) st.main.replaceChildren();
   const rest = want.filter((w) => w.key !== st.focus).map((w) => st.tiles.get(w.key).el);
+  // Everything left out by the right-click menu: say so, rather than an empty grid
+  if (!want.length) rest.push((st.empty ||= h('div', { class: 'stage-empty muted' }, 'No video to show. Right-click to show everyone.')));
   if (rest.length !== st.grid.children.length || rest.some((el, i) => st.grid.children[i] !== el)) st.grid.replaceChildren(...rest);
   st.body.classList.toggle('focused', !!focused);
   for (const t of st.tiles.values()) t.el.classList.toggle('focus', t === focused);

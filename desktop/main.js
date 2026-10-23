@@ -188,8 +188,21 @@ const ownPage = (e) => !!e.senderFrame && !!win && e.sender === win.webContents 
 const handle = (channel, fn) => ipcMain.handle(channel, (e, ...a) => (ownPage(e) ? fn(e, ...a) : undefined));
 const listen = (channel, fn) => ipcMain.on(channel, (e, ...a) => ownPage(e) && fn(e, ...a));
 
+// The app draws its own title bar (#titlebar in index.html), in the theme's colors, like Discord.
+// Windows and Linux keep the system's window buttons, drawn over its right end in matching colors
+// (snap layouts still work); macOS keeps its traffic lights. Height in window pixels, at any zoom.
+// The buttons' strip is a pixel shorter than the page's bar: at fractional display scales the two
+// round differently, and the strip would otherwise hang a row below the bar.
+const TITLEBAR_HEIGHT = 30;
+const OVERLAY_HEIGHT = TITLEBAR_HEIGHT - 1;
+const titleBar =
+  process.platform === 'darwin'
+    ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 12, y: 8 } }
+    : { titleBarStyle: 'hidden', titleBarOverlay: { color: '#0c0d10', symbolColor: '#8a909c', height: OVERLAY_HEIGHT } };
+
 function createWindow() {
   win = new BrowserWindow({
+    ...titleBar,
     width: 1360,
     height: 860,
     minWidth: 940,
@@ -299,6 +312,8 @@ function createWindow() {
   win.webContents.on('did-start-navigation', (e) => e.isMainFrame && !e.isSameDocument && stopShares());
 
   win.loadURL('friendspeak://app/index.html');
+  // Full screen has no title bar: the page hides its own
+  for (const [ev, on] of [['enter-full-screen', true], ['leave-full-screen', false]]) win.on(ev, () => win.webContents.send('desktop:fullscreen', on));
   win.on('closed', () => {
     win = null;
     stopShares();
@@ -698,6 +713,13 @@ handle('desktop:game-window', (_e, origin) => {
 handle('desktop:stream-top', (_e, name, on) => {
   const w = streamWindows.get(name);
   if (w && !w.isDestroyed()) w.setAlwaysOnTop(!!on, 'floating');
+});
+
+// The window buttons in the theme's colors (Windows and Linux; the page sends them whenever the theme changes)
+handle('desktop:titlebar', (_e, color, symbol) => {
+  const hex = (v) => typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v);
+  if (!win || win.isDestroyed() || process.platform === 'darwin' || !hex(color) || !hex(symbol)) return;
+  win.setTitleBarOverlay({ color, symbolColor: symbol, height: OVERLAY_HEIGHT });
 });
 
 handle('desktop:focus', () => {

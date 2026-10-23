@@ -21,6 +21,9 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   setZoom: (factor) => Number.isFinite(factor) && webFrame.setZoomFactor(Math.min(2, Math.max(0.5, factor))),
   onZoom: (cb) => ipcRenderer.on('desktop:zoom', (_e, step) => cb(step)),
 
+  // The app's own title bar: its height in window pixels, the window buttons' colors, and full screen (no title bar)
+  titleBar: { height: 30, setColors: (color, symbol) => ipcRenderer.invoke('desktop:titlebar', color, symbol), onFullscreen: (cb) => ipcRenderer.on('desktop:fullscreen', (_e, on) => cb(!!on)) },
+
   // Notifications: bring the window forward, and show an unread count on the app icon
   focus: () => ipcRenderer.invoke('desktop:focus'),
   setBadge: (n) => ipcRenderer.invoke('desktop:badge', n),

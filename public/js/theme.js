@@ -167,4 +167,6 @@ export function applyAppearance(st = settings.get()) {
   root.style.setProperty('--font', fontStack(st));
   root.style.setProperty('--density', (DENSITIES[st.density] || DENSITIES.cozy)[1]);
   window.friendspeakDesktop?.setZoom(uiScaleOf(st) / 100);
+  root.style.setProperty('--ui-zoom', uiScaleOf(st) / 100); // the title bar stays the same size at any zoom
+  window.friendspeakDesktop?.titleBar?.setColors(colors['bg-0'], colors.muted);
 }

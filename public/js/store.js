@@ -132,6 +132,8 @@ const DEFAULT_SETTINGS = {
   deafenHotkey: '',
   lastChannel: {}, // serverId -> channelId
   showMembers: true,
+  stageNonVideo: true, // the video grid shows everyone in the channel, with or without video (right-click the grid)
+  stageOwnVideo: true, // and your own camera
   shareTier: 'auto', // screen share quality ceiling: a key of TIERS (voice.js)
   shareMode: 'smooth', // 'smooth' (games, video) | 'sharp' (text, code)
   nativeStreaming: true, // desktop app: shares go through the native media sidecar when it can carry them (D45)
