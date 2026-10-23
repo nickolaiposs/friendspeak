@@ -1,4 +1,5 @@
-# Every push to `prod` releases the version in package.json (D29):
+# Started by hand from `main` (Actions → Release → Run workflow), it releases the version in
+# package.json (D29, D68):
 #   1. a draft GitHub Release v<version> with the CHANGELOG.md section as notes
 #   2. desktop installers for macOS, Windows and Linux, with the latest*.yml
 #      files the app's updater reads. Each is built on its own OS, with the
@@ -18,9 +19,7 @@
 name: Release
 
 on:
-  push:
-    branches: [prod]
-  workflow_dispatch: # re-run by hand, e.g. after a flaky build
+  workflow_dispatch: # the release button; also re-runs a failed release
 
 concurrency:
   group: release
@@ -29,7 +28,7 @@ concurrency:
 # Nothing by default: each job asks for what it needs. Actions are pinned to a commit (the tag is in
 # the comment), and checkout doesn't leave the token behind for the build steps that follow it:
 # what this workflow publishes is installed by every app and pulled by every auto-updating server.
-# For the same reason no job restores a cache: a cache can be written by any run on `dev`.
+# For the same reason no job restores a cache: a cache can be written by any run on `main`.
 permissions: {}
 
 env:
@@ -38,8 +37,8 @@ env:
 
 jobs:
   prepare:
-    # Releases come from `prod` only, also when run by hand: the other jobs all need this one
-    if: github.ref == 'refs/heads/prod'
+    # Releases come from `main` only: the other jobs all need this one
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write # create the draft release
     runs-on: ubuntu-latest

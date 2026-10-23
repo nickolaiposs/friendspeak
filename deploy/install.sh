@@ -4,7 +4,7 @@
 # machine at home with ports 80 and 443 forwarded to it.
 #
 #   From a checkout:   ./deploy/install.sh
-#   On a new server:   curl -fsSL https://raw.githubusercontent.com/nickolaiposs/friendspeak/prod/deploy/install.sh -o install.sh
+#   On a new server:   curl -fsSL https://raw.githubusercontent.com/nickolaiposs/friendspeak/main/deploy/install.sh -o install.sh
 #                      bash install.sh
 #
 # It asks for what it needs. To run it without questions, pass --domain and --yes.
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO="${FRIENDSPEAK_REPO:-nickolaiposs/friendspeak}"
-REF="${FRIENDSPEAK_REF:-prod}"
+REF="${FRIENDSPEAK_REF:-}" # empty: the newest release, so the stack matches the :latest image
 
 DOMAIN="${DOMAIN:-}"
 SERVER_NAME="${SERVER_NAME:-}"
@@ -99,11 +99,19 @@ mkdir -p "$DIR" "$DIR/assets-pack" "$DIR/assets-extra"
 DIR="$(cd "$DIR" && pwd)"
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || true)"
+latest_tag() { # the newest release's tag, or nothing
+  local auth=()
+  [ -z "${GITHUB_TOKEN:-}" ] || auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  curl -fsSL ${auth[@]+"${auth[@]}"} "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+    | sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' | head -1 || true
+}
 fetch() { # fetch <file>: from next to this script if it's there, else from GitHub
   if [ -n "$SRC" ] && [ -f "$SRC/$1" ] && [ -f "$SRC/docker-compose.yaml" ]; then
     [ "$SRC" = "$DIR" ] || cp "$SRC/$1" "$DIR/$1"
     return
   fi
+  [ -n "$REF" ] || REF="$(latest_tag)"
+  [ -n "$REF" ] || REF=main
   local url="https://raw.githubusercontent.com/$REPO/$REF/deploy/$1"
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$url" -o "$DIR/$1"

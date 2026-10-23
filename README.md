@@ -266,7 +266,7 @@ Open them in the provider's firewall (DigitalOcean: **Networking → Firewalls**
 On the server:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nickolaiposs/friendspeak/prod/deploy/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/nickolaiposs/friendspeak/main/deploy/install.sh -o install.sh
 sudo bash install.sh
 ```
 

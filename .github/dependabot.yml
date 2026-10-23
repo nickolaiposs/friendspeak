@@ -1,4 +1,4 @@
-# Weekly PRs into `dev` (the default branch) for what the builds pin (D64): actions and the base
+# Weekly PRs into `main` (the default branch) for what the builds pin (D64): actions and the base
 # image by digest, the Rust toolchain by version, npm and cargo packages by lockfile. One PR per
 # group, and ci.yml runs on each. Security fixes come on their own, when GitHub knows of one.
 version: 2

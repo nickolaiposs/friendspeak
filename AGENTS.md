@@ -81,8 +81,8 @@ scripts/build-game.js  builds both vendored projects
 scripts/build-media.js builds the media sidecar for this OS into native/dist/<os>-<arch>/
 scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.patch (our changes to upstream), Cargo.lock
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
-.github/workflows/     ci.yml (dev + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (push to prod → release, D29; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows); image-scan.yml (known vulnerabilities in the server image, D65)
-.github/dependabot.yml weekly PRs into dev for actions, the base image, the Rust toolchain, npm and cargo (D64)
+.github/workflows/     ci.yml (main + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (started by hand from main → release, D29, D68; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows); image-scan.yml (known vulnerabilities in the server image, D65)
+.github/dependabot.yml weekly PRs into main for actions, the base image, the Rust toolchain, npm and cargo (D64)
 SECURITY.md            how to report a vulnerability, and how to check a download's provenance
 data/                  (gitignored) server state when run via `npm start` (state.json, profiles/, messages/, mail/, files/, …)
 release/               (gitignored) electron-builder output
@@ -139,12 +139,13 @@ There are no unit tests. Verification so far has been scripted with **puppeteer-
 
 Always syntax-check after edits, rebuild the game after touching `game/*/src`, and rebuild the sidecar (`cargo build --release` in `native/`) after touching `native/src`.
 
-## Branches and releases (D29)
+## Branches and releases (D29, D68)
 
-- `dev` is the default branch: commit and open PRs there. **`prod` is releases only.** Every push to it runs `.github/workflows/release.yml`, which publishes `version` from package.json as a GitHub Release (installers) plus `ghcr.io/nickolaiposs/friendspeak:<version>` and `:latest`. Installed apps and auto-updating servers act on it.
-- To release: bump `version` in package.json, add a `## <version> - <date>` section to `CHANGELOG.md`, merge `dev` → `prod`. The workflow refuses a version that's already released, and `ci.yml` checks this on PRs into `prod`.
+- **Trunk-based:** `main` is the only long-lived branch. Push to it directly, or open a PR into it from a short-lived branch. Keep `main` working: CI runs on every push and PR.
+- **Releases are started by hand,** never by a push: Actions → Release → Run workflow on `main` (or `gh workflow run release.yml --ref main`). `.github/workflows/release.yml` publishes `version` from package.json as a GitHub Release (installers) plus `ghcr.io/nickolaiposs/friendspeak:<version>` and `:latest`. Installed apps and auto-updating servers act on it.
+- To release: bump `version` in package.json and add a `## <version> - <date>` section to `CHANGELOG.md` on `main`, then run the workflow. It refuses a version that's already released, and `ci.yml` checks a version bump for both when it lands.
 - Keep the socket protocol tolerant of version skew: a server may update while clients are older, and vice versa. Add optional fields; don't change the meaning of existing ones.
-- Don't push to `prod`, tag, or publish a release unless asked.
+- Don't run the release workflow, tag, or publish a release unless asked.
 - The release workflow is what apps and servers trust (D64). Keep its rules when changing it: actions pinned to a commit, no `cache` in any release job, no write permission in a job that runs repo or dependency code, and every published file attested. `gh attestation verify <file> --repo nickolaiposs/friendspeak` checks a release.
 
 ## Finishing a feature

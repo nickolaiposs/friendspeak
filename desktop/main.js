@@ -621,8 +621,8 @@ function setHotkeys(combos) {
 
 // ---------------------------------------------------------------- updates (D29)
 
-// Releases are published by .github/workflows/release.yml on every push to
-// `prod`. The installers carry the latest*.yml files electron-updater reads.
+// Releases are published by .github/workflows/release.yml, started by hand
+// from `main` (D68). The installers carry the latest*.yml files electron-updater reads.
 const REPO = { owner: 'nickolaiposs', repo: 'friendspeak' };
 const RELEASES = `https://github.com/${REPO.owner}/${REPO.repo}/releases`;
 // In-app install works for the Windows installer and the Linux AppImage.

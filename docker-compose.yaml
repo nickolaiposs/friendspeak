@@ -29,7 +29,7 @@ name: friendspeak
 
 services:
   friendspeak:
-    # Published by the release workflow on every push to `prod`. Keep :latest
+    # Published by the release workflow when a release is started (D68). Keep :latest
     # for auto-updates; pin a version (e.g. :1.1.0) to stay on it.
     image: ${FRIENDSPEAK_IMAGE:-ghcr.io/nickolaiposs/friendspeak:latest}
     restart: unless-stopped

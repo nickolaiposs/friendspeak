@@ -1,7 +1,8 @@
 # Changelog
 
-Every release is built from the `prod` branch. Add a section for the new
-version (matching `version` in package.json) before merging `dev` into `prod`:
+Every release is built from `main` when it is started by hand (Actions →
+Release → Run workflow). Add a section for the new version (matching `version`
+in package.json) before starting it:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
