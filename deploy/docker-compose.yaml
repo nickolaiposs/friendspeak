@@ -25,9 +25,13 @@ services:
     image: ${FRIENDSPEAK_IMAGE:-ghcr.io/nickolaiposs/friendspeak:latest}
     restart: unless-stopped
     init: true
-    # Not published: only Caddy reaches it, on the stack's own network
+    # The web side isn't published: only Caddy reaches it, on the stack's own network.
+    # The SFU's media (D70) is UDP, which Caddy doesn't carry: it goes straight to this
+    # container, on port 3000 (the number the app already knows from https://DOMAIN:3000).
     expose:
       - "3000"
+    ports:
+      - "3000:3000/udp"
     environment:
       # Plain HTTP inside the stack; Caddy does TLS
       HTTPS: "0"
@@ -52,6 +56,11 @@ services:
       ADMIN_PATH: ${ADMIN_PATH:-}
       # off = an admin key alone signs in (no code from an authenticator app)
       ADMIN_MFA: ${ADMIN_MFA:-on}
+      # Streams (D70): screen shares and cameras through the SFU, over UDP 3000 straight to
+      # this container. Apps send to DOMAIN unless SFU_ANNOUNCED_ADDRESS names another address
+      SFU: ${SFU:-on}
+      SFU_ANNOUNCED_ADDRESS: ${SFU_ANNOUNCED_ADDRESS:-}
+      SFU_WORKERS: ${SFU_WORKERS:-1}
       # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
       GAME: ${GAME:-on}
       GAME_WORLD: ${GAME_WORLD:-Blizzard}
@@ -94,9 +103,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # The only service the internet reaches. 80 is for Let's Encrypt and for
+  # The only service the internet reaches on TCP. 80 is for Let's Encrypt and for
   # forwarding http:// to https://; 443/udp is HTTP/3; 3000 is the port the app
-  # tries for an address typed without https:// (see Caddyfile).
+  # tries for an address typed without https:// (see Caddyfile). UDP 3000 is
+  # friendspeak's own (the SFU), above.
   caddy:
     image: caddy:2
     restart: unless-stopped

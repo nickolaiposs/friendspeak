@@ -134,6 +134,19 @@ pub fn open(cfg: Config, hw: bool, like: Option<&Frame>) -> Result<(Box<dyn Enco
     Err(why.unwrap_or_else(|| "built without the software encoder".to_string()))
 }
 
+// The profile and level of an Annex B access unit's SPS, as "High 5.2", for the log
+pub fn sps_profile(data: &[u8]) -> Option<String> {
+    let at = data.windows(4).position(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1f == 7)? + 4;
+    let (profile, level) = (*data.get(at)?, *data.get(at + 2)?);
+    let name = match profile {
+        66 => "Baseline",
+        77 => "Main",
+        100 => "High",
+        _ => "profile",
+    };
+    Some(format!("{name} {}.{}", level / 10, level % 10))
+}
+
 // Whether an Annex B access unit holds an IDR slice (NAL type 5)
 pub fn has_idr(data: &[u8]) -> bool {
     let mut i = 0;

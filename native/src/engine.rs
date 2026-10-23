@@ -938,6 +938,7 @@ impl Stream {
             let mut trim = Trim::default();
             let mut nv12 = Nv12::default();
             let mut cfg = cfg;
+            let mut told = false;
             while let Ok(msg) = lrx.recv() {
                 match msg {
                     LayerMsg::Rates(bps, fps) => {
@@ -968,6 +969,11 @@ impl Stream {
                         }
                         match res {
                             Ok(Some(unit)) => {
+                                // What the encoder really made, once per encoder: the level has to allow the size and rate
+                                if unit.key && !told {
+                                    told = true;
+                                    log!("{kind:?} {}x{}@{}: {} {}", cfg.w, cfg.h, cfg.fps, enc.name(), encode::sps_profile(&unit.data).unwrap_or_else(|| "(no SPS)".into()));
+                                }
                                 if let Some(factor) = trim.spent(Instant::now(), unit.data.len(), unit.key, cfg.bps) {
                                     enc.set_rates((cfg.bps as f32 * factor) as u32, cfg.fps);
                                 }
