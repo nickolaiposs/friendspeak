@@ -12,6 +12,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const tls = require('tls');
+const net = require('net');
+const dns = require('dns');
 const { spawn } = require('child_process');
 const readline = require('readline');
 const { createLogs, originOf } = require('./logs');
@@ -442,10 +444,10 @@ function allowScreenShare() {
 // ---------------------------------------------------------------- native media sidecar (D45)
 
 // friendspeak-media: a process of its own that captures a screen, window or
-// camera, encodes it and sends it to each viewer over standard WebRTC. The app
-// starts it on first use, talks to it in JSON lines (commands on stdin, events
-// on stdout) and relays the events to the UI. If it is missing or keeps dying,
-// shares go through the browser engine as before.
+// camera, encodes and encrypts it, and publishes it to the server's SFU over
+// standard WebRTC (D45, D70). The app starts it on first use, talks to it in JSON
+// lines (commands on stdin, events on stdout) and relays the events to the UI.
+// If it is missing or keeps dying, shares go through the browser engine.
 const MEDIA_EXE = 'friendspeak-media' + (process.platform === 'win32' ? '.exe' : '');
 const MEDIA_CRASHES = 3; // after this many unexpected exits, no more native media until the app restarts
 const media = { proc: null, caps: null, ready: null, crashes: 0 };
@@ -486,7 +488,8 @@ function startMedia() {
         return;
       }
       if (ev.ev === 'ready') {
-        media.caps = { version: ev.version, sources: ev.sources || [], hardware: ev.hardware || [], audio: !!ev.audio };
+        // sfu: it publishes to the SFU (D70); a sidecar from before that only knew per-viewer connections
+        media.caps = { version: ev.version, sources: ev.sources || [], hardware: ev.hardware || [], audio: !!ev.audio, sfu: ev.sfu === 1 };
         return resolve(media.caps);
       }
       if (win && !win.isDestroyed()) win.webContents.send('desktop:media', ev);
@@ -508,18 +511,31 @@ function startMedia() {
   return media.ready;
 }
 
-const MEDIA_OPS = ['start', 'quality', 'stop', 'viewer', 'unviewer', 'signal', 'view'];
+const MEDIA_OPS = ['start', 'connect', 'quality', 'key', 'stop'];
 const MEDIA_KINDS = ['screen', 'camera'];
 
 async function sendMedia(cmd) {
-  if (!cmd || !MEDIA_OPS.includes(cmd.op) || !MEDIA_KINDS.includes(cmd.kind)) return;
+  // `key` is for every share at once; the rest name one
+  if (!cmd || !MEDIA_OPS.includes(cmd.op) || (cmd.op !== 'key' && !MEDIA_KINDS.includes(cmd.kind))) return;
   if (!(await startMedia()) || !media.proc) {
     // Nothing to carry the share: tell the page as the sidecar would
     if (cmd.op === 'start' && win && !win.isDestroyed()) win.webContents.send('desktop:media', { ev: 'error', kind: cmd.kind, message: 'native media is not available' });
     return;
   }
   if (cmd.op === 'start') cmd = await describeSource(cmd);
+  if (cmd.op === 'connect') cmd = await resolveCandidates(cmd);
   media.proc.stdin.write(JSON.stringify(cmd) + '\n');
+}
+
+// The SFU names itself by the host the app dialed, which can be a name (D70); the sidecar takes addresses
+async function resolveCandidates(cmd) {
+  const out = [];
+  for (const c of (Array.isArray(cmd.candidates) ? cmd.candidates : []).slice(0, 8)) {
+    const address = String(c?.address || '');
+    if (net.isIP(address)) out.push(c);
+    else if (address) for (const a of await dns.promises.lookup(address, { all: true, family: 4 }).catch(() => [])) out.push({ ...c, address: a.address });
+  }
+  return { ...cmd, candidates: out };
 }
 
 // What only the main process knows about a share: where the screen is, whose
