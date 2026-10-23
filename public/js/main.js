@@ -669,7 +669,7 @@ function dmCallButtons(c, compact) {
       },
       icon('screen')
     ),
-    compact ? null : h('button', { class: 'icon-btn' + (dmCallUi.max ? ' on' : ''), title: dmCallUi.max ? 'Show the chat' : 'Hide the chat', onclick: () => ((dmCallUi.max = !dmCallUi.max), renderDmCall()) }, icon('expand')),
+    compact || dmCallUi.pop ? null : h('button', { class: 'icon-btn' + (dmCallUi.max ? ' on' : ''), title: dmCallUi.max ? 'Show the chat' : 'Hide the chat', onclick: () => ((dmCallUi.max = !dmCallUi.max), renderDmCall()) }, icon('expand')),
     hangup('Hang up'),
   ];
   return all.filter(Boolean);
@@ -677,8 +677,11 @@ function dmCallButtons(c, compact) {
 
 // The call's view sits on top of the conversation with that person, so it only
 // shows (and video is only received at full size) while that DM is open. The
-// sidebar panel and the incoming-call card show wherever you are.
-const dmCallUi = { call: null, el: null, tiles: new Map(), focus: null, max: false, volume: 1, muted: false, ringing: null, ringTimer: null };
+// sidebar panel and the incoming-call card show wherever you are. The video
+// (ui.view: the stats line, its buttons and the tiles) can be in a window of
+// its own instead (popOutDmCall), where it shows whatever is open in the app.
+// pop: that window ({ win, name, ready, onTop }); timer, history, statsPanel: see startStats
+const dmCallUi = { call: null, el: null, view: null, tiles: new Map(), focus: null, max: false, volume: 1, muted: false, ringing: null, ringTimer: null, pop: null, timer: null, statsPanel: null };
 
 function renderDmCall() {
   const c = DMCALL.cur;
@@ -747,21 +750,34 @@ function renderDmCall() {
   // A new call (or none): start the view over
   if (ui.call !== c) {
     for (const key of [...ui.tiles.keys()]) dropDmCallTile(key);
+    clearInterval(ui.timer);
+    ui.statsPanel?.close();
+    const old = ui.pop;
+    ui.pop = null; // first: its window closing would move the view back
+    if (old && !old.win.closed) old.win.close();
     ui.ro?.disconnect();
+    ui.view?.remove();
     ui.el?.remove();
-    Object.assign(ui, { call: c, el: null, focus: null, max: false, volume: 1, muted: false });
+    Object.assign(ui, { call: c, el: null, view: null, focus: null, max: false, volume: 1, muted: false, timer: null });
     if (c) {
       ui.main = h('div', { class: 'stage-main' });
       ui.grid = h('div', { class: 'stage-grid' });
       ui.body = h('div', { class: 'stage' }, ui.main, ui.grid);
+      ui.stats = h('span', { class: 'muted small stream-stats' });
+      ui.topBtns = h('div', { class: 'stage-controls' });
+      ui.top = h('div', { class: 'call-top' }, ui.stats, h('div', { class: 'spacer' }), ui.topBtns);
+      ui.view = h('div', { class: 'call-view' }, ui.top, ui.body);
       ui.bar = h('div', { class: 'call-bar' });
-      ui.el = h('div', { class: 'call-stage' }, ui.body, ui.bar);
+      ui.el = h('div', { class: 'call-stage' }, ui.view, ui.bar);
       ui.ro = new ResizeObserver(() => layoutStage(ui));
       ui.ro.observe(ui.grid);
+      // The "socket ids" of a call's VoiceClient are profile ids
+      startStats(ui, { tile: dmStatsTile, voice: () => DMCALL.voice, name: (sid) => profileOf(sid).name });
     }
   }
   const head = c && S.channelId === 'dm:' + c.peerId ? $('#main > .chat-header') : null;
-  $('#main').classList.toggle('call-max', !!head && ui.max);
+  const pop = ui.pop?.ready ? ui.pop : null;
+  $('#main').classList.toggle('call-max', !!head && ui.max && !ui.pop);
   if (!c) return;
   // The view takes room from the messages: keep them at the newest one
   const box = $('#messages');
@@ -793,7 +809,28 @@ function renderDmCall() {
   const rest = want.filter((w) => w.key !== ui.focus).map((w) => ui.tiles.get(w.key).el);
   if (rest.length !== ui.grid.children.length || rest.some((el, i) => ui.grid.children[i] !== el)) ui.grid.replaceChildren(...rest);
   ui.body.classList.toggle('focused', !!focused);
-  ui.el.classList.toggle('has-video', want.some((w) => w.kind !== 'user'));
+  const video = want.some((w) => w.kind !== 'user');
+  ui.el.classList.toggle('has-video', video);
+  ui.el.classList.toggle('popped', !!pop);
+  ui.top.hidden = !video && !pop;
+  if (pop) pop.win.document.title = 'Call with ' + p.name;
+  const fullscreen = () => (ui.body.ownerDocument.fullscreenElement ? ui.body.ownerDocument.exitFullscreen() : ui.body.requestFullscreen?.().catch(() => {}));
+  ui.topBtns.replaceChildren(
+    ...[
+      focused ? h('button', { class: 'btn small ghost', title: 'Show everything', onclick: () => ((ui.focus = null), renderDmCall()) }, 'Grid') : null,
+      pop && desktop?.streamOnTop
+        ? h(
+            'button',
+            { class: 'btn small ghost', title: 'Keep this window above other windows', onclick: () => ((pop.onTop = !pop.onTop), desktop.streamOnTop(pop.name, pop.onTop), renderDmCall()) },
+            pop.onTop ? 'On top ✓' : 'Keep on top'
+          )
+        : null,
+      pop
+        ? h('button', { class: 'btn small ghost', title: 'Show the call’s video in the conversation again', onclick: () => (dockDmCall(), desktop?.focus?.()) }, 'Back to app')
+        : h('button', { class: 'btn small ghost', title: 'Open the call’s video in a window of its own', disabled: !!ui.pop, onclick: () => popOutDmCall() }, 'Pop out'),
+      h('button', { class: 'icon-btn', title: 'Fullscreen', onclick: fullscreen }, icon('expand')),
+    ].filter(Boolean)
+  );
 
   for (const t of ui.tiles.values()) {
     t.el.classList.toggle('focus', t === focused);
@@ -806,7 +843,7 @@ function renderDmCall() {
     const src = v?.mediaOf(t.who, t.kind) || null;
     if (t.video.srcObject !== src) t.video.srcObject = src;
     // Taken out of the page (another channel was open), a video pauses
-    if (src && head && t.video.paused) t.video.play().catch(() => {});
+    if (src && (head || pop) && t.video.paused) t.video.play().catch(() => {});
     t.status.hidden = !!src;
     if (t.kind === 'screen') {
       t.video.muted = !theirs || S.deafened || audio.micTest || ui.muted;
@@ -825,7 +862,7 @@ function dmCallTile(key, who, kind) {
   const ui = dmCallUi;
   const mine = who === me().id;
   const p = mine ? me() : profileOf(who);
-  const tile = { key, who, kind, el: null, video: null, status: null, flag: null };
+  const tile = { key, who, sid: who, kind, el: null, video: null, status: null, flag: null }; // sid: for startStats
   // A single click focuses; wait a moment so a double click can go fullscreen instead
   let clickTimer;
   const attrs = {
@@ -836,14 +873,15 @@ function dmCallTile(key, who, kind) {
     },
     ondblclick: () => {
       clearTimeout(clickTimer);
-      if (tile.video) document.fullscreenElement ? document.exitFullscreen() : tile.el.requestFullscreen?.().catch(() => {});
+      const doc = tile.el.ownerDocument; // the app's page, or the video's own window
+      if (tile.video) doc.fullscreenElement ? doc.exitFullscreen() : tile.el.requestFullscreen?.().catch(() => {});
     },
   };
   if (kind !== 'screen') {
     attrs['data-who'] = who; // speaking outline
     tile.flag = h('span', { class: 'tile-flag' });
   }
-  const label = h('span', { class: 'tile-name' }, kind === 'screen' ? (mine ? 'Your screen' : p.name + '’s screen') : mine ? 'You' : p.name, tile.flag);
+  const label = h('span', { class: 'tile-name' }, kind === 'screen' ? (mine ? 'Your screen' : p.name + '’s screen') : mine ? 'You' : p.name, kind === 'screen' ? h('span', { class: 'live-badge' }, 'LIVE') : tile.flag);
   if (kind === 'user') {
     tile.el = h('div', attrs, avatarEl(p, 64), label);
     return tile;
@@ -868,14 +906,15 @@ function dmCallTile(key, who, kind) {
   if (!mine) {
     // Tell them how many device pixels we show, so their encoder is no bigger
     // than that, and pauses while we can't see it (window hidden, or another
-    // channel open).
+    // channel open). The window is the one the video is in.
     let timer;
     let last = '';
     tile.report = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        const dpr = devicePixelRatio || 1;
-        const view = { w: Math.round(video.clientWidth * dpr), h: Math.round(video.clientHeight * dpr), hidden: document.hidden || !video.isConnected };
+        const doc = video.ownerDocument;
+        const dpr = doc.defaultView?.devicePixelRatio || 1;
+        const view = { w: Math.round(video.clientWidth * dpr), h: Math.round(video.clientHeight * dpr), hidden: doc.hidden || !video.isConnected };
         if (!view.hidden && !(view.w && view.h)) return;
         const sig = JSON.stringify(view);
         if (sig === last || ui.tiles.get(key) !== tile) return;
@@ -902,6 +941,55 @@ document.addEventListener('visibilitychange', () => {
   for (const t of dmCallUi.tiles.values()) t.report?.();
 });
 
+// The stream the call's stats are about: the focused one, else a screen share, else a camera
+function dmStatsTile() {
+  const ui = dmCallUi;
+  if (!ui.view?.isConnected) return null; // another channel is open: nothing is shown
+  const live = [...ui.tiles.values()].filter((t) => t.video?.srcObject);
+  return live.find((t) => t.key === ui.focus) || live.find((t) => t.kind === 'screen') || live.find((t) => t.who !== me().id) || live[0] || null;
+}
+
+// "Pop out": the call's video moves to a window of its own, like the stage's
+// (popOutStage). The call's buttons stay with the conversation, since their
+// menus are drawn in the app's page. Closing the window brings the video back.
+function popOutDmCall() {
+  const ui = dmCallUi;
+  if (!ui.call) return;
+  if (ui.pop) return ui.pop.win.focus();
+  const view = ui.view;
+  ui.pop = popWindow({
+    alive: (pop) => ui.pop === pop && ui.view === view,
+    ready(host) {
+      ui.statsPanel?.close();
+      host.replaceChildren(view);
+      dmCallMoved();
+    },
+    // This page's observers don't see sizes change in another window
+    changed() {
+      layoutStage(ui);
+      for (const t of ui.tiles.values()) t.report?.();
+    },
+    closed: () => dockDmCall(),
+  });
+  renderDmCall();
+}
+
+function dockDmCall() {
+  const ui = dmCallUi;
+  const pop = ui.pop;
+  if (!pop) return;
+  ui.pop = null;
+  if (pop.ready) ui.el.prepend(ui.view);
+  if (!pop.win.closed) pop.win.close();
+  dmCallMoved();
+}
+
+// A video stops when its element moves to another page
+function dmCallMoved() {
+  for (const t of dmCallUi.tiles.values()) if (t.video?.srcObject) t.video.play().catch(() => {});
+  renderDmCall();
+}
+
 // The call clock, and who's speaking
 setInterval(() => {
   const c = DMCALL.cur;
@@ -909,10 +997,11 @@ setInterval(() => {
 }, 1000);
 setInterval(() => {
   const v = DMCALL.voice;
-  if (!v || !dmCallUi.el?.isConnected) return;
+  if (!v || !dmCallUi.view?.isConnected) return;
   const levels = v.levels();
   if (audio.selfAnalyser) levels.set(me().id, Level(audio.selfAnalyser));
-  for (const el of dmCallUi.el.getElementsByClassName('tile')) if (el.dataset.who) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
+  // The tiles may be in a window of their own
+  for (const { el } of dmCallUi.tiles.values()) if (el.dataset.who) el.classList.toggle('speaking', (levels.get(el.dataset.who) || 0) > 0.02);
 }, 90);
 
 // ---------------------------------------------------------------- toasts, modals, popovers
@@ -2058,6 +2147,56 @@ function renderHeader() {
   );
 }
 
+// Reordering channels (channel:move): drag one you can manage among those of its type
+const CH_DRAG = 'application/x-friendspeak-channel';
+let dragCh = null; // the channel being dragged
+
+// before: the channel it goes in front of; none puts it last
+async function moveChannel(ch, before) {
+  try {
+    const r = await S.socket.timeout(8000).emitWithAck('channel:move', { id: ch.id, before: before?.id ?? null });
+    if (r?.error) toast(r.error, 'error');
+  } catch {
+    toast('This server can’t reorder channels until it is updated', 'error'); // an older server never answers
+  }
+}
+
+// list: the channels of ch's type, as shown
+function channelDrag(ch, list) {
+  const mark = (el, where) => (el.classList.toggle('drop-before', where === 'before'), el.classList.toggle('drop-after', where === 'after'));
+  const below = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return e.clientY > r.top + r.height / 2;
+  };
+  const ours = (e) => dragCh && dragCh.type === ch.type && dragCh.id !== ch.id && e.dataTransfer.types.includes(CH_DRAG);
+  return {
+    draggable: canCh(ch.id, 'manage') && list.length > 1 ? 'true' : null,
+    ondragstart: (e) => {
+      dragCh = ch;
+      e.dataTransfer.setData(CH_DRAG, ch.id);
+      e.dataTransfer.effectAllowed = 'move';
+    },
+    ondragend: () => (dragCh = null),
+    ondragover: (e) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      mark(e.currentTarget, below(e) ? 'after' : 'before');
+    },
+    ondragleave: (e) => mark(e.currentTarget, null),
+    ondrop: (e) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      mark(e.currentTarget, null);
+      const moved = dragCh;
+      dragCh = null;
+      const rest = list.filter((c) => c.id !== moved.id);
+      const before = below(e) ? rest[rest.indexOf(ch) + 1] : ch;
+      if (list[list.findIndex((c) => c.id === moved.id) + 1] !== before) moveChannel(moved, before);
+    },
+  };
+}
+
 function renderChannels() {
   const box = $('#channel-list');
   if (inDmView()) return (box.replaceChildren(dmSidebar()), syncWatchTip());
@@ -2065,6 +2204,8 @@ function renderChannels() {
   const text = S.server.channels.filter((c) => c.type === 'text');
   const voice = S.server.channels.filter((c) => c.type === 'voice');
   const chMenu = (ch) => (e) => {
+    const list = ch.type === 'text' ? text : voice;
+    const at = list.indexOf(ch);
     const items = [
       ch.type === 'text' && S.server.storage && { label: 'Browse files', run: () => openFileBrowser(ch.id) },
       canCh(ch.id, 'manage') && {
@@ -2075,6 +2216,8 @@ function renderChannels() {
         },
       },
       canCh(ch.id, 'manage') && hasPerms() && { label: 'Permissions…', run: () => channelPermsDialog(ch) },
+      canCh(ch.id, 'manage') && at > 0 && { label: 'Move up', run: () => moveChannel(ch, list[at - 1]) },
+      canCh(ch.id, 'manage') && at < list.length - 1 && { label: 'Move down', run: () => moveChannel(ch, list[at + 2]) },
       canCh(ch.id, 'manage') && {
         label: 'Delete',
         danger: true,
@@ -2113,6 +2256,7 @@ function renderChannels() {
           class: 'channel' + (ch.id === S.channelId ? ' active' : '') + (S.unread.has(ch.id) ? ' unread' : '') + (mentionUnread.channel(S.entry.id, ch.id) ? ' mentioned' : ''),
           onclick: () => selectChannel(ch.id),
           oncontextmenu: chMenu(ch),
+          ...channelDrag(ch, text),
         },
         icon('hash'),
         channelNameEl(ch.name, S.server.emojis),
@@ -2131,6 +2275,7 @@ function renderChannels() {
             'data-watch': video ? 'ch:' + ch.id : null, // the hover card with "Start watching"
             onclick: () => (canCh(ch.id, 'send') ? joinVoice(ch.id) : toast('You don’t have permission to join this voice channel', 'error')),
             oncontextmenu: chMenu(ch),
+            ...channelDrag(ch, voice),
           },
           icon('speaker'),
           channelNameEl(ch.name, S.server.emojis),
@@ -5058,35 +5203,8 @@ function openStage({ screen } = {}) {
     S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), muted: new Set(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
-    // Resolution, real frame rate and codec of the focused (or first) screen
-    // share or camera, so people can see what they are getting (and the sharer
-    // sees what each viewer gets). Sampled once per second and fed to both the
-    // header and the stats panel, since rates are deltas between calls.
-    let frames = 0;
-    let last = null;
-    S.stage.history = [];
-    S.stage.timer = setInterval(async () => {
-      const tile = statsTile();
-      const v = tile?.video;
-      const total = v?.getVideoPlaybackQuality?.().totalVideoFrames || 0;
-      const fps = tile === last ? Math.max(0, total - frames) : 0;
-      frames = total;
-      last = tile;
-      const base = v?.videoWidth ? `${v.videoWidth}×${v.videoHeight} · ${fps} fps` : '';
-      const info = tile && (await S.voice?.videoStats(tile.sid, tile.kind).catch(() => null));
-      if (statsTile() !== tile || S.stage?.stats !== stats) return;
-      const full = base && [base, formatVideoStats(info)].filter(Boolean).join(' · ');
-      stats.textContent = full;
-      stats.title = full ? 'Stream stats: ' + full : '';
-      stats.style.cursor = full && !S.stage.pop ? 'pointer' : '';
-      if (tile && info) {
-        const hist = S.stage.history;
-        hist.push({ time: new Date().toISOString(), tile: tile.key, kind: tile.kind, role: Array.isArray(info) ? 'sender' : 'receiver', stats: info });
-        if (hist.length > 60) hist.shift();
-      }
-      S.stage.statsPanel?.update(tile, info);
-    }, 1000);
-    stats.onclick = () => S.stage.pop || openStatsPanel(stats); // the panel is drawn in the app's page
+    // The focused (or first) screen share or camera
+    startStats(S.stage, { tile: statsTile, voice: () => S.voice, name: (sid) => S.call?.users.find((u) => u.sid === sid)?.name });
     S.stage.el = h(
       'div',
       { class: 'stage-view' },
@@ -5137,6 +5255,42 @@ async function watchStream(u, kind) {
   // They may have stopped or left while we joined
   const still = kind === 'screen' && S.users.some((x) => x.sid === u.sid && x.voice === channelId && x.sharing);
   openStage(still ? { screen: u.sid } : {});
+}
+
+// Resolution, real frame rate and codec of the stream src.tile() picks, so
+// people can see what they are getting (and the sharer sees what each viewer
+// gets). Sampled once per second and fed to both st.stats (a line of text) and
+// the stats panel, since rates are deltas between calls.
+// st: the stage, or the DM call's view (dmCallUi); clearing st.timer stops it.
+// src: { tile(), voice(): the VoiceClient, name(sid): a viewer's name }
+function startStats(st, src) {
+  const { stats } = st;
+  let frames = 0;
+  let last = null;
+  st.history = [];
+  st.statsSrc = src;
+  stats.onclick = () => st.pop || openStatsPanel(st, stats); // the panel is drawn in the app's page
+  const timer = (st.timer = setInterval(async () => {
+    const tile = src.tile();
+    const v = tile?.video;
+    const total = v?.getVideoPlaybackQuality?.().totalVideoFrames || 0;
+    const fps = tile === last ? Math.max(0, total - frames) : 0;
+    frames = total;
+    last = tile;
+    const base = v?.videoWidth ? `${v.videoWidth}×${v.videoHeight} · ${fps} fps` : '';
+    const info = tile && (await src.voice()?.videoStats(tile.sid, tile.kind).catch(() => null));
+    if (src.tile() !== tile || st.timer !== timer) return;
+    const full = base && [base, formatVideoStats(info)].filter(Boolean).join(' · ');
+    stats.textContent = full;
+    stats.title = full ? 'Stream stats: ' + full : '';
+    stats.style.cursor = full && !st.pop ? 'pointer' : '';
+    if (tile && info) {
+      const hist = st.history;
+      hist.push({ time: new Date().toISOString(), tile: tile.key, kind: tile.kind, role: Array.isArray(info) ? 'sender' : 'receiver', stats: info });
+      if (hist.length > 60) hist.shift();
+    }
+    st.statsPanel?.update(tile, info);
+  }, 1000));
 }
 
 function statsTile() {
@@ -5284,11 +5438,10 @@ function formatVideoStats(info) {
     .join(' | ');
 }
 
-// The "Stream stats" panel: live numbers for the tile statsTile() picked, plus
-// the last minute of samples (S.stage.history) as JSON to paste into a bug report.
-function openStatsPanel(anchor) {
-  const st = S.stage;
-  if (!st || st.statsPanel) return;
+// The "Stream stats" panel: live numbers for the tile startStats() samples, plus
+// the last minute of samples (st.history) as JSON to paste into a bug report.
+function openStatsPanel(st, anchor) {
+  if (st.statsPanel) return;
   const body = h('div', { class: 'stats-body' }, h('p', { class: 'muted small' }, 'Waiting for the next sample…'));
   const copy = async () => {
     const mine = st.history.at(-1)?.role === 'sender';
@@ -5297,7 +5450,7 @@ function openStatsPanel(anchor) {
       version: appUpdate?.current || null,
       userAgent: navigator.userAgent,
       devicePixelRatio: window.devicePixelRatio,
-      trackSettings: mine ? S.voice?.local[kind]?.getVideoTracks()[0]?.getSettings() || null : null,
+      trackSettings: mine ? st.statsSrc.voice()?.local[kind]?.getVideoTracks()[0]?.getSettings() || null : null,
     };
     try {
       await navigator.clipboard.writeText(JSON.stringify({ header, history: st.history }, null, 2));
@@ -5311,14 +5464,14 @@ function openStatsPanel(anchor) {
   const api = {
     close: () => pop.close(),
     update(tile, info) {
-      body.replaceChildren(statsView(tile, info));
+      body.replaceChildren(statsView(tile, info, st.statsSrc.name));
       pop.place();
     },
   };
   st.statsPanel = api;
 }
 
-function statsView(tile, info) {
+function statsView(tile, info, nameOf) {
   const f = (x, d = 1) => (typeof x === 'number' && isFinite(x) ? x.toFixed(d) : '–');
   const size = (w, hh) => (w ? `${w}×${hh}` : '–');
   const hw = (x) => (x === true ? 'hw' : x === false ? 'sw' : '');
@@ -5338,7 +5491,7 @@ function statsView(tile, info) {
   if (!info.length) return h('p', { class: 'muted small' }, 'No viewers yet.');
   const cols = ['Viewer', 'Capture', 'Rung', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path', 'Viewer size'];
   const row = (v) => {
-    const name = S.call?.users.find((u) => u.sid === v.sid)?.name || 'someone';
+    const name = nameOf(v.sid) || 'someone';
     const limit = v.limit && v.limit !== 'none' ? v.limit : 'none';
     return [
       name + (v.paused ? ' (away)' : ''),
@@ -5495,6 +5648,7 @@ function closeStage({ nav = false } = {}) {
   const st = S.stage;
   if (!st || (nav && st.pop)) return;
   clearInterval(st.timer);
+  st.timer = null;
   st.statsPanel?.close();
   st.ro.disconnect();
   for (const key of [...st.tiles.keys()]) dropTile(key);
@@ -5513,37 +5667,54 @@ function closeStage({ nav = false } = {}) {
 // script: the stage's elements are moved into it and this page keeps driving
 // them, because a stream can't leave the page that receives it. Closing the
 // window closes the stage; "Back to app" (dockStage) moves it back.
-let stageWinSeq = 0;
 function popOutStage() {
   const st = S.stage;
   if (!st) return;
   if (st.pop) return st.pop.win.focus();
+  st.pop = popWindow({
+    alive: (pop) => S.stage === st && st.pop === pop,
+    ready(host) {
+      st.statsPanel?.close();
+      host.replaceChildren(st.el);
+      document.body.classList.remove('stream-visible');
+      stageMoved();
+    },
+    changed: () => (layoutStage(), reportTiles()),
+    closed: () => closeStage(),
+  });
+  syncStage();
+}
+
+// A window showing popout.html, for the stage or a DM call's video to move
+// into; null (after a toast) when it can't open. The result is
+// { win, name, ready, onTop }.
+// on: { alive(pop): is it still wanted, ready(host): move the elements into host,
+//       changed(): it was resized, hidden or shown, closed() }
+let stageWinSeq = 0;
+function popWindow(on) {
   const name = 'friendspeak-stream-' + ++stageWinSeq;
   const win = window.open('/popout.html', name, 'width=1100,height=680');
-  if (!win) return toast('Could not open a window for the video grid', 'error');
-  const pop = (st.pop = { win, name, ready: false, onTop: false });
-  const mine = () => S.stage === st && st.pop === pop;
-  syncStage();
-  // The page loads in its own time; the stage stays in the app until then
+  if (!win) return toast('Could not open a window for the video', 'error'), null;
+  const pop = { win, name, ready: false, onTop: false };
+  const mine = () => on.alive(pop);
+  // The page loads in its own time; the elements stay in the app until then
   const timer = setInterval(() => {
     if (!mine()) return clearInterval(timer);
-    if (win.closed) return clearInterval(timer), closeStage();
+    if (win.closed) return clearInterval(timer), on.closed();
     const host = win.document.getElementById('stream');
     if (!host) return;
     clearInterval(timer);
     // The theme is variables and attributes on <html> (theme.js)
     for (const a of document.documentElement.attributes) win.document.documentElement.setAttribute(a.name, a.value);
-    st.statsPanel?.close();
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    host.replaceChildren(st.el);
-    document.body.classList.remove('stream-visible');
     pop.ready = true;
-    win.addEventListener('resize', () => mine() && (layoutStage(), reportTiles()));
-    win.document.addEventListener('visibilitychange', () => mine() && reportTiles());
+    win.addEventListener('resize', () => mine() && on.changed());
+    win.document.addEventListener('visibilitychange', () => mine() && on.changed());
     // Closed with its own close button (or reloaded, which empties it)
-    win.addEventListener('pagehide', () => mine() && closeStage());
-    stageMoved();
+    win.addEventListener('pagehide', () => mine() && on.closed());
+    on.ready(host);
   }, 50);
+  return pop;
 }
 
 // "Back to app": the stage returns to the app's view and its window closes
@@ -5571,7 +5742,7 @@ function stageMoved() {
 }
 
 // The stage's window can't draw itself: it goes with this page
-window.addEventListener('pagehide', () => S.stage?.pop?.win.close());
+window.addEventListener('pagehide', () => (S.stage?.pop?.win.close(), dmCallUi.pop?.win.close()));
 
 // ---------------------------------------------------------------- penguin game (Yukon)
 

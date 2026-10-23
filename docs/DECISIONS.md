@@ -331,7 +331,7 @@ Without a mic, users join **listen-only** instead of failing.
 - That connection is driven by the existing `VoiceClient`, through an adapter that looks like the chat socket. Mute, push-to-talk, the soundboard, cameras, screen shares, codec preferences and per-viewer encoder sizing are shared with voice channels (D5, D22) instead of written twice.
 - With one viewer there is nothing to save by opting in, so each side receives whatever the other shares.
 - A call and a voice channel don't run together: there is one microphone graph (D31). Starting or accepting a call leaves the voice channel, and joining a voice channel hangs up.
-- The call view lives in the conversation. Elsewhere in the app the call goes on, with a panel in the sidebar; the video is paused for you until you come back.
+- The call view lives in the conversation. Elsewhere in the app the call goes on, with a panel in the sidebar; the video is paused for you until you come back, unless you moved it to a window of its own ("Pop out", as in voice channels).
 - Results are written into the thread as local-only notes ("Call · 4:05", "Missed call"), each side writing its own.
 
 **Consequences:**
