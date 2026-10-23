@@ -8,8 +8,8 @@
 //
 //   workers      one per SFU_WORKERS (default 1), each with a WebRtcServer on a UDP port of its own:
 //                udpPort, udpPort + 1, … (a WebRtcServer serves only its own worker's routers)
-//   rooms        channelId → { router, worker, peers }: a router per voice channel, made on first use and
-//                closed when no transport is left in it
+//   rooms        channelId → { router, worker, peers }: a router per voice channel, made when the first app
+//                asks for its capabilities and closed when the last socket in it has left
 //   peers        sid → { channelId, transports, producers, consumers }: one per socket that publishes or watches
 const os = require('os');
 
@@ -122,7 +122,8 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
   // Close a room whose last transport is gone
   function tidy(room) {
     if (!room || rooms.get(room.id) !== room) return;
-    for (const sid of room.peers) if (peers.get(sid)?.transports.size) return;
+    // Someone still there: in the room by its caps, a transport, or both
+    for (const sid of room.peers) if (peers.has(sid)) return;
     rooms.delete(room.id);
     room.slot.routers.delete(room.id);
     room.router?.close();
@@ -145,9 +146,11 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
     return peer;
   }
 
-  // The router's capabilities, for the app's mediasoup-client Device
-  async function caps(channelId) {
+  // The router's capabilities, for the app's mediasoup-client Device. The socket counts as in the room from
+  // here on, so its leaving closes the room once nobody is left (an app asks for these when it joins voice)
+  async function caps(sid, channelId) {
     const room = await roomFor(channelId);
+    peerOf(sid, channelId);
     return room.router.rtpCapabilities;
   }
 

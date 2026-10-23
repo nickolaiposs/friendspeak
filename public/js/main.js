@@ -1694,8 +1694,16 @@ function openSocket(entry, rejoinVoice = null) {
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
   c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
-  // What the SFU session needs to know about this connection (D70): who is who, and their keys
-  const sfuInfo = { serverId: () => c.server?.id || '', profile: () => me(), user: (sid) => c.users.find((u) => u.sid === sid), users: () => c.users };
+  // What the SFU session needs to know about this connection (D70): who is who, and their keys. Media keys are
+  // sealed to the card the server lists for someone; for a contact whose card we pinned (D32) a different
+  // one means no key, so a server can't slip in a card of its own for them.
+  const sfuUser = (sid) => {
+    const u = c.users.find((x) => x.sid === sid);
+    const pinned = u?.card && DM.contacts.get(u.id)?.card;
+    if (pinned && pinned.s !== u.card.s) return (log.warn('sfu: a member’s key differs from the one pinned for them; sending them no media key'), { ...u, card: null });
+    return u;
+  };
+  const sfuInfo = { serverId: () => c.server?.id || '', profile: () => me(), user: sfuUser, users: () => c.users };
   c.voice.sfuInfo = () => sfuInfo;
   c.previews = new Previews({ socket, ...sfuInfo }); // the hover card's stills, in a call here or not
   // Pictures come as references to this server (D58). They are made into addresses here, on the

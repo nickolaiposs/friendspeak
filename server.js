@@ -2517,7 +2517,7 @@ async function startServer(opts = {}) {
           ? v.slice(0, SFU_MAX_LAYERS).map((l) => ({ w: Math.max(0, Math.min(16384, Math.round(+l?.w) || 0)), h: Math.max(0, Math.min(16384, Math.round(+l?.h) || 0)), fps: Math.max(0, Math.min(240, +l?.fps || 0)) }))
           : [];
 
-      sfuOn('sfu:caps', async (_, sfu, room) => ({ ok: true, rtpCapabilities: await sfu.caps(room) }));
+      sfuOn('sfu:caps', async (_, sfu, room) => ({ ok: true, rtpCapabilities: await sfu.caps(socket.id, room) }));
 
       // `owner`: who publishes on a send transport, the page or the sidecar for one kind
       sfuOn('sfu:transport', async ({ direction, owner }, sfu, room) => {
