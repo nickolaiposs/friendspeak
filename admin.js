@@ -995,6 +995,28 @@ function createAdmin(ctx) {
     res.json({ available: info.available, enabled: info.enabled, reason: info.available ? null : info.reason || null, world: info.world || null, players: g?.available && g.players ? g.players() : null, maxUsers: g?.maxUsers ?? null, off: !!ctx.gameOff });
   });
 
+  // The SFU (D70): its workers and, per voice channel, who publishes and watches what. Read-only: the media is
+  // end-to-end encrypted, so there is nothing to look at but sizes, rates and scores.
+  api.get('/sfu', async (_req, res) => {
+    const sfu = ctx.sfu?.();
+    if (!sfu) return res.json({ running: false });
+    const { workers, rooms } = await sfu.stats();
+    const person = (sid) => {
+      const u = ctx.users.get(sid);
+      return u ? { sid, id: u.profile.id, name: u.profile.name, color: u.profile.color, avatar: u.profile.avatar } : { sid, id: null, name: '(left)' };
+    };
+    res.json({
+      running: true,
+      workers,
+      rooms: rooms.map((r) => ({
+        channelId: r.channelId,
+        name: ctx.channelName?.(r.channelId) ?? null,
+        worker: r.worker,
+        members: r.members.map((m) => ({ ...person(m.sid), transports: m.transports, producers: m.producers, consumers: m.consumers.map((c) => ({ ...c, fromName: person(c.from).name })) })),
+      })),
+    });
+  });
+
   const serverView = () => {
     const { name, icon, inviteOnly } = ctx.state();
     const { available, enabled, reason, world } = ctx.gameInfo();

@@ -223,6 +223,11 @@ input[type='color'] { width: 48px; height: 36px; padding: 2px; }
 .dot-on { color: var(--green); }
 .marks { color: var(--muted); font-size: 12px; margin-left: 4px; }
 .voicelist { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+/* Streams (the SFU, D70): a full-width card per voice channel, a block per person in it */
+.sfu-rooms { display: flex; flex-direction: column; gap: 12px; }
+.sfu-member { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
+.sfu-member:first-of-type { border-top: 0; padding-top: 0; }
+.sfu-transport { margin-right: 12px; white-space: nowrap; }
 .countdown { font-variant-numeric: tabular-nums; font-weight: 600; }
 .icon-preview { width: 64px; height: 64px; border-radius: 14px; object-fit: cover; background: var(--bg-3); display: grid; place-items: center; font-size: 26px; flex: none; overflow: hidden; }
 .msg-ok { color: var(--green); }
