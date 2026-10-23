@@ -599,6 +599,8 @@ function createAdmin(ctx) {
       memory: { rss: mem.rss, heapUsed: mem.heapUsed },
       docker: !!ctx.inDocker,
       https: !!ctx.https,
+      tls: isTls(req), // this request came encrypted: our own TLS, or a reverse proxy's (Caddy in the domain stack, D53)
+      proxy: proxyKnown,
       fingerprint: ctx.fingerprint(),
       inviteOnly: st.inviteOnly !== false,
       invites: st.invites.filter((v) => !v.revoked && !(v.expires && v.expires <= Date.now()) && !(v.maxUses && v.uses >= v.maxUses)).length, // the ones that still work
@@ -996,7 +998,7 @@ function createAdmin(ctx) {
   const serverView = () => {
     const { name, icon, inviteOnly } = ctx.state();
     const { available, enabled, reason, world } = ctx.gameInfo();
-    return { name, icon, inviteOnly, audioQuality: ctx.audioQuality(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
+    return { name, icon, inviteOnly, audioQuality: ctx.audioQuality(), giphy: ctx.giphy(), game: { available, enabled, reason: available ? null : reason || null, world: world || null } };
   };
   api.get('/server', (_req, res) => res.json(serverView()));
 
@@ -1021,6 +1023,17 @@ function createAdmin(ctx) {
       if (patch.inviteOnly !== undefined) what.push(patch.inviteOnly ? 'invites required' : 'invites not required');
       logAction(req, 'server.update', what.join(', '));
     });
+  });
+
+  // The server's GIPHY key (D8): searched with on behalf of members who have none. '' removes it (back to GIPHY_API_KEY).
+  // Write-only: the key is never sent back, the view only says whether one is set and where from.
+  api.put('/server/giphy', (req, res) => {
+    const key = req.body?.key;
+    if (typeof key !== 'string' || key.length > 100 || (key && !/^[A-Za-z0-9]{8,100}$/.test(key.trim()))) return res.status(400).json({ error: 'That does not look like a GIPHY API key' });
+    ctx.setGiphyKey(key.trim());
+    notify('state');
+    logAction(req, 'giphy.key', key.trim() ? 'set' : 'removed');
+    res.json({ ok: true, server: serverView() });
   });
 
   // Invites (D51): the tokens people join with. The dashboard is sent the token of every working invite.

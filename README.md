@@ -130,7 +130,7 @@ To play over the internet instead of a LAN, forward the TCP port on the host's r
 |-----------------|---------------|----------------------------------------------------------------|
 | `PORT`          | `3000`        | Port to listen on                                              |
 | `SERVER_NAME`   | `friendspeak` | Initial server name (first start only; afterwards rename it in Settings → Server) |
-| `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key                |
+| `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key (or set it in the admin dashboard) |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
 | `LOG_RETENTION_DAYS` | `14`     | How many days of the server's log are kept on disk (`data/logs/`) for the admin dashboard. `0` = keep the log in memory only |
 | `LOG_MAX_SIZE`  | `50MB`        | Most disk space the log history may use; the oldest days are deleted first |
@@ -372,7 +372,7 @@ While a Steam game is running on your computer, the app shows its name next to y
 
 GIF search uses GIPHY, which requires a free API key from https://developers.giphy.com. You can supply it in either of two ways:
 - each user pastes a key in **Settings → Integrations** (stored only in their browser), or
-- the host sets `GIPHY_API_KEY`, and the server searches on everyone's behalf.
+- the host pastes a key in the admin dashboard's **Server settings** (or sets `GIPHY_API_KEY`), and the server searches on everyone's behalf. A key saved in the dashboard takes the place of `GIPHY_API_KEY`.
 
 ## Tips
 

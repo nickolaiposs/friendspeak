@@ -44,7 +44,8 @@ function render(o, uptimeEl) {
         ['Hosting', o.docker ? 'Docker' : 'Plain Node'],
       ])),
       card('Access', kv([
-        ['HTTPS', yn(o.https, 'On', 'Off')],
+        // o.https is the server's own certificate; behind a reverse proxy (the domain stack, D53) the proxy does TLS
+        ['HTTPS', o.https ? 'On (this server’s certificate)' : o.tls ? 'On, through a reverse proxy' : o.proxy ? 'Behind a reverse proxy, but this connection isn’t encrypted' : 'Off'],
         o.fingerprint && ['Fingerprint', h('span', { class: 'mono small' }, o.fingerprint)],
         ['Joining', o.inviteOnly ? `Needs an invite (${o.invites} working)` : 'Open to anyone with the address'],
         ['Local admin access', yn(o.adminLocal, 'On', 'Off')],

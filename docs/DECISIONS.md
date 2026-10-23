@@ -65,7 +65,7 @@ Without a mic, users join **listen-only** instead of failing.
 **Consequences:** a slightly awkward browser story, documented in the README. The desktop app makes it disappear.
 
 ## D8: GIFs via GIPHY, key per user or per server · Active
-**Decision:** a user's own key is used client-side. Otherwise the server proxies the search over the socket (`gif:search`) using `GIPHY_API_KEY`.
+**Decision:** a user's own key is used client-side. Otherwise the server proxies the search over the socket (`gif:search`) using the server's key: the one set in the admin dashboard (Server settings), else `GIPHY_API_KEY`. The dashboard can set or remove its key but never reads it back.
 **Consequences:** there's no shared default key. GIFs need one key somewhere. Proxying over the socket avoids CORS and keeps the server key private. Sent GIF URLs must be `https://`.
 
 ## D9: Emoji picker from npm, served locally · Active

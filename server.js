@@ -60,13 +60,13 @@ async function startServer(opts = {}) {
   const HOST = opts.host;
   const USE_HTTPS = !!opts.https;
   const TRUST_PROXY = opts.trustProxy === true; // TRUST_PROXY=1: a reverse proxy in front says who is calling (D61)
-  const GIPHY_API_KEY = opts.giphyKey || '';
+  const GIPHY_ENV_KEY = opts.giphyKey || ''; // GIPHY_API_KEY; a key set in the admin dashboard (state.giphyKey) takes its place
   let fingerprint = null; // SHA-256 of the self-signed certificate, when HTTPS
   const DATA_DIR = opts.dataDir || path.join(__dirname, 'data');
   // Keep the console lines for the admin dashboard (D34), in memory and on disk (#50)
   const logs =
     opts.captureLogs === false ? null : logbuffer.install({ dir: path.join(DATA_DIR, 'logs'), retentionDays: opts.logs?.retentionDays ?? 14, maxBytes: opts.logs?.maxBytes ?? 50 * 1024 ** 2 });
-  if (logs) for (const secret of [GIPHY_API_KEY, opts.admin?.key, opts.update?.token, opts.update?.watchtowerToken]) logs.redact(secret);
+  if (logs) for (const secret of [GIPHY_ENV_KEY, opts.admin?.key, opts.update?.token, opts.update?.watchtowerToken]) logs.redact(secret);
   const bootTime = Date.now();
   const earlierLines = logs && opts.crashReports ? logs.tail(200) : []; // from before this boot, read before it logs anything
   let usersRef = null;
@@ -211,6 +211,7 @@ async function startServer(opts = {}) {
       defaultPerms: { ...DEFAULT_PERMS }, // what everybody gets unless a role they hold says otherwise
       defaultGrantable: [], // role ids everyone may hand out when defaultPerms.manageRoles is on
       forceMuted: [], // profile ids a moderator force-muted
+      giphyKey: '', // GIF search key set in the admin dashboard, over GIPHY_API_KEY; never sent to clients
       updateSettings: {}, // { mode?, cron? } overriding AUTO_UPDATE / MAINTENANCE_CRON, set in the admin dashboard; never sent to clients
       memberRoles: {}, // profileId -> [roleId], only profiles with a role; kept beside profiles because storedProfile() rebuilds those
       inviteOnly: true, // joining takes an invite (D51); from Settings → Server. `invites` is added below, so a first start can be told apart
@@ -411,6 +412,11 @@ async function startServer(opts = {}) {
   state.updateSettings = Object.fromEntries(
     ['mode', 'cron'].filter((k) => state.updateSettings && typeof state.updateSettings === 'object' && typeof state.updateSettings[k] === 'string').map((k) => [k, state.updateSettings[k].slice(0, 100)])
   );
+
+  // GIPHY key from the dashboard: replaces GIPHY_API_KEY while set
+  state.giphyKey = typeof state.giphyKey === 'string' ? state.giphyKey.slice(0, 100) : '';
+  logs?.redact(state.giphyKey);
+  const giphyKey = () => state.giphyKey || GIPHY_ENV_KEY;
 
   // The updater needs the saved overrides, so it is created once the state is loaded
   const updater = createUpdater({
@@ -2364,7 +2370,7 @@ async function startServer(opts = {}) {
       // --- GIFs (server-side key, used when the client has none) ---
 
       on('gif:search', async ({ q }, ack) => {
-        const key = GIPHY_API_KEY;
+        const key = giphyKey();
         if (!key) return ack({ error: 'nokey' });
         try {
           const qs = new URLSearchParams({ api_key: key, limit: '30', rating: 'pg-13' });
@@ -2551,6 +2557,12 @@ async function startServer(opts = {}) {
         gameInfo,
         audioQuality,
         updater,
+        giphy: () => ({ set: !!giphyKey(), source: state.giphyKey ? 'dashboard' : GIPHY_ENV_KEY ? 'env' : null }),
+        setGiphyKey: (k) => {
+          state.giphyKey = k;
+          logs?.redact(k);
+          save();
+        },
         saveUpdateSettings: (o) => {
           state.updateSettings = o;
           save();
