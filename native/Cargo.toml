@@ -8,6 +8,9 @@ description = "friendspeak's native media sidecar: capture, encode and send stre
 [dependencies]
 # WebRTC: ICE, DTLS-SRTP, RTP packetizing and bandwidth estimation. Pure Rust crypto, so no C toolchain per target.
 str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+# The media encryption (D70): AES-128-GCM in pure Rust, as str0m's own crypto, and the OS's random source for IVs
+aes-gcm = "0.10"
+getrandom = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Software H.264 (Cisco's OpenH264, built from source): the fallback when there is no hardware encoder
