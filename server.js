@@ -18,6 +18,7 @@ const logbuffer = require('./logbuffer');
 const { createCrashLog } = require('./crashlog');
 const { createPersist } = require('./persist');
 const { createAdmin, httpLimit } = require('./admin');
+const { createSfu, OWNERS: SFU_OWNERS, KINDS: SFU_KINDS, MAX_LAYERS: SFU_MAX_LAYERS } = require('./sfu');
 
 const VERSION = require('./package.json').version;
 
@@ -186,6 +187,11 @@ async function startServer(opts = {}) {
   // scheduled update from `server:update` and show a maintenance warning.
   const ioRef = { current: null };
   const adminRef = { current: null }; // the admin dashboard, created once everything it reads exists
+  const sfuRef = { current: null }; // the SFU (D70), once its workers have started; null without one
+  // The newest preview of each stream, encrypted by its sharer (D70): "<sid>|<kind>" -> { blob, ts, channelId }.
+  // In memory only, and gone with the share.
+  const previews = new Map();
+  const previewAt = new Map(); // "<sid>|<kind>" -> when the last one arrived
 
   // ---------- persistent state ----------
 
@@ -907,7 +913,7 @@ async function startServer(opts = {}) {
   // The admin dashboard is the one exception (D34), at a path of its own (D52).
   app.get('/', (_req, res) => res.type('text/plain').send('This is a friendspeak server. Connect to it with the friendspeak desktop app.\n'));
   // `password`: apps from before invites ask for one when it is set, and send what was typed as the invite
-  app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, invite: state.inviteOnly, password: state.inviteOnly, version: VERSION }));
+  app.get('/api/info', (_req, res) => res.json({ name: state.name, icon: state.icon, invite: state.inviteOnly, password: state.inviteOnly, version: VERSION, sfu: sfuRef.current ? 1 : undefined }));
 
   // Clients are often served from another origin (desktop app, another server),
   // and authenticate uploads with their socket id, never cookies, so * is fine.
@@ -1164,6 +1170,7 @@ async function startServer(opts = {}) {
         playing: u.playing,
         game: u.game || '',
         gameIcon: lean && u.gameIcon ? refOf(u.gameIcon) : '', // not to apps from before D58: they would be sent the picture on every update
+        sfu: !!u.sfu, // the app shares and watches through the SFU (D70); one that doesn't can't watch those who do
       };
     });
   }
@@ -1229,7 +1236,7 @@ async function startServer(opts = {}) {
     //    events costing more. What goes over is dropped, and answered if it wanted an answer.
     const EVENT_BUDGET = 400;
     const EVENT_REFILL = 40; // per second
-    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20 };
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
     let lastHandlerError = 0;
     function guard(socket, next) {
       const add = socket.on.bind(socket);
@@ -1582,6 +1589,9 @@ async function startServer(opts = {}) {
     function leaveVoice(socket) {
       const u = users.get(socket.id);
       if (!u || !u.voice) return;
+      // Whatever it published or watched through the SFU goes with it (D70)
+      sfuRef.current?.leave(socket.id);
+      for (const k of ['screen', 'camera']) previews.delete(`${socket.id}|${k}`);
       socket.to('voice:' + u.voice).emit('voice:peer-left', { sid: socket.id });
       socket.leave('voice:' + u.voice);
       u.voice = null;
@@ -1949,7 +1959,7 @@ async function startServer(opts = {}) {
       // `proto: 2`: the app takes pictures by reference and the small events (D58). Apps from before that send none.
       socket.on('hello', (payload, ack) => {
         if (typeof ack !== 'function') return;
-        const { profile, invite, password, proof, uploadKey: wantsKey, proto } = isObj(payload) ? payload : {};
+        const { profile, invite, password, proof, uploadKey: wantsKey, proto, sfu: usesSfu } = isObj(payload) ? payload : {};
         const lean = Number.isInteger(proto) && proto >= 2;
         // An id that can't be one is refused here, before it costs an invite: cleanProfile would give it a new id on every connect
         if (isObj(profile) && profile.id !== undefined && profile.id !== '' && !isProfileId(profile.id)) return ack({ error: 'This profile’s id can’t be used on a server. Make a new profile.' });
@@ -2016,7 +2026,7 @@ async function startServer(opts = {}) {
         // The socket id says who uploads, but every member is sent everyone's socket id. An app that asks
         // gets a secret to send along; without it, its uploads would be anyone's to make in its name.
         const uploadKey = wantsKey === true ? crypto.randomBytes(16).toString('hex') : null;
-        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey, lean });
+        users.set(socket.id, { profile: p, voice: null, muted: false, deafened: false, sharing: false, camera: false, since: Date.now(), ip: clientIp(socket), uploadKey, lean, sfu: usesSfu === 1 });
         socket.leave(lean ? FULL : LEAN); // a second hello on the same socket
         socket.join(lean ? LEAN : FULL);
         // Back with the profile everyone already has (most connects): only `seen` moves, and nobody
@@ -2037,7 +2047,7 @@ async function startServer(opts = {}) {
         if (first && makeFirstAdmin(p.id)) console.log(`[auth] ${whoIs(p)} is the first to join and is now the administrator`);
         const g = permsOf(p.id);
         console.log(`[server] ${whoIs(p)} connected`);
-        ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined });
+        ack({ ok: true, sid: socket.id, server: publicState(g, lean), users: userList(g, lean), perms: g, uploadKey: uploadKey || undefined, sfu: sfuRef.current ? 1 : undefined });
         if (changed) emitProfile(p.id, socket);
         broadcastUsers();
         if (joinedWith) invitesChanged();
@@ -2400,7 +2410,8 @@ async function startServer(opts = {}) {
         u.voice = channelId;
         console.debug(`[voice] ${whoIs(u.profile)} joined ${ch.name}`);
         socket.join('voice:' + channelId);
-        ack({ ok: true, peers });
+        // What is published there through the SFU (D70), for an app that watches that way
+        ack({ ok: true, peers, producers: sfuRef.current?.list(channelId) });
         broadcastUsers();
       });
 
@@ -2470,6 +2481,149 @@ async function startServer(opts = {}) {
         const peer = users.get(to);
         if (!peer || !me.voice || peer.voice !== me.voice || !isObj(data)) return;
         io.to(to).emit('rtc:signal', { from: socket.id, data });
+      });
+
+      // --- the SFU (D70): shares and cameras, published once and forwarded. The media is encrypted by the
+      // apps; what passes here is signaling, and key blobs nobody here can open. ---
+
+      // The socket's voice channel, when it may publish and watch there: in it, with the channel's `send`
+      // (as voice:join asks). Losing either closes everything it had (leaveVoice).
+      const sfuOn = (event, fn) =>
+        on(event, async (payload, ack) => {
+          const sfu = sfuRef.current;
+          const u = users.get(socket.id);
+          if (!sfu) return ack({ error: 'This server has no media relay' });
+          if (!u.voice) return ack({ error: 'Join the voice channel first' });
+          if (!permsOf(u.profile.id).channels[u.voice]?.send) return ack(noPerm('share or watch in this channel'));
+          try {
+            ack(await fn(payload, sfu, u.voice));
+          } catch (err) {
+            ack({ error: String(err?.message || err).slice(0, 200) });
+          }
+        });
+      // A small JSON object from the app, or null: what mediasoup gets is never more than it needs
+      const small = (v, max) => {
+        if (!isObj(v)) return null;
+        try {
+          return JSON.stringify(v).length <= max ? v : null;
+        } catch {
+          return null;
+        }
+      };
+      const sfuId = (v) => (typeof v === 'string' && /^[\w-]{1,64}$/.test(v) ? v : '');
+      // Each encoding's size, lowest first, as the publisher reports it (the SFU picks layers for viewers by it)
+      const layersOf = (v) =>
+        Array.isArray(v)
+          ? v.slice(0, SFU_MAX_LAYERS).map((l) => ({ w: Math.max(0, Math.min(16384, Math.round(+l?.w) || 0)), h: Math.max(0, Math.min(16384, Math.round(+l?.h) || 0)), fps: Math.max(0, Math.min(240, +l?.fps || 0)) }))
+          : [];
+
+      sfuOn('sfu:caps', async (_, sfu, room) => ({ ok: true, rtpCapabilities: await sfu.caps(socket.id, room) }));
+
+      // `owner`: who publishes on a send transport, the page or the sidecar for one kind
+      sfuOn('sfu:transport', async ({ direction, owner }, sfu, room) => {
+        if (direction !== 'send' && direction !== 'recv') return { error: 'direction must be send or recv' };
+        if (direction === 'send' && !SFU_OWNERS.includes(owner)) return { error: 'Unknown publisher' };
+        return { ok: true, ...(await sfu.transport(socket.id, room, { direction, owner }, hostOf(socket))) };
+      });
+
+      sfuOn('sfu:connect', async ({ transportId, dtlsParameters }, sfu) => {
+        const dtls = small(dtlsParameters, 4096);
+        if (!sfuId(transportId) || !dtls || !Array.isArray(dtls.fingerprints) || dtls.fingerprints.length > 8) return { error: 'Invalid DTLS parameters' };
+        await sfu.connect(socket.id, transportId, dtls);
+        return { ok: true };
+      });
+
+      // kind: screen | camera (video) | shareAudio (a share's sound)
+      sfuOn('sfu:produce', async ({ transportId, kind, rtpParameters, layers }, sfu) => {
+        const rtp = small(rtpParameters, 16384);
+        if (!Object.hasOwn(SFU_KINDS, kind)) return { error: 'Unknown kind' };
+        const max = SFU_KINDS[kind] === 'video' ? SFU_MAX_LAYERS : 1;
+        if (!sfuId(transportId) || !rtp || !Array.isArray(rtp.encodings) || rtp.encodings.length < 1 || rtp.encodings.length > max || !Array.isArray(rtp.codecs) || rtp.codecs.length > 8) return { error: 'Invalid RTP parameters' };
+        return { ok: true, producerId: await sfu.produce(socket.id, transportId, kind, rtp, layersOf(layers)) };
+      });
+
+      // The publisher's layers changed size (a new source, another tier)
+      sfuOn('sfu:layers', async ({ producerId, layers }, sfu) => (sfu.setLayers(socket.id, sfuId(producerId), layersOf(layers)) ? { ok: true } : { error: 'No such stream' }));
+
+      sfuOn('sfu:list', async (_, sfu, room) => ({ ok: true, producers: sfu.list(room) }));
+
+      // Start watching a stream: the consumer starts paused on its lowest layer; sfu:resume starts it
+      sfuOn('sfu:consume', async ({ producerId, rtpCapabilities }, sfu) => {
+        const caps = small(rtpCapabilities, 32768);
+        if (!sfuId(producerId) || !caps) return { error: 'Invalid request' };
+        return { ok: true, ...(await sfu.consume(socket.id, producerId, caps)) };
+      });
+
+      sfuOn('sfu:resume', async ({ consumerId }, sfu) => (await sfu.resume(socket.id, sfuId(consumerId)), { ok: true }));
+      // A viewer that just got the sender's key asks for a keyframe: what came before it couldn't be decrypted
+      sfuOn('sfu:keyframe', async ({ consumerId }, sfu) => (sfu.keyframe(socket.id, sfuId(consumerId)), { ok: true }));
+      sfuOn('sfu:pause', async ({ consumerId }, sfu) => (await sfu.pause(socket.id, sfuId(consumerId)), { ok: true }));
+
+      // Stop watching (consumerId) or publishing (producerId)
+      sfuOn('sfu:close', async ({ consumerId, producerId }, sfu) => {
+        if (consumerId) sfu.stopConsumer(socket.id, sfuId(consumerId));
+        if (producerId) sfu.unpublish(socket.id, sfuId(producerId));
+        return { ok: true };
+      });
+
+      // The viewer's tile in device pixels: the SFU picks the layer that fills it (D70)
+      sfuOn('sfu:view', async ({ consumerId, w, h }, sfu) => {
+        const clamp = (n) => Math.max(0, Math.min(16384, Math.round(+n) || 0));
+        return sfu.view(socket.id, sfuId(consumerId), clamp(w), clamp(h)) ? { ok: true } : { error: 'No such stream' };
+      });
+
+      // A media key sealed to someone in the same voice channel (D70). The server can't open it.
+      on('sfu:keys', ({ to, blob }) => {
+        const me = users.get(socket.id);
+        const them = users.get(sfuId(to));
+        if (!me.voice || them?.voice !== me.voice || typeof blob !== 'string' || blob.length > 4096) return;
+        io.to(to).emit('sfu:keys', { from: socket.id, blob });
+      });
+
+      // --- stream previews (D70): a still of each stream for the hover card, encrypted with a key per share
+      // that its sharer seals to the people who can see the channel ---
+
+      // A socket that can see the voice channel `sharer` is in, and who that is
+      const viewsChannelOf = (viewerSid, sharerSid) => {
+        const sharer = users.get(sharerSid);
+        const viewer = users.get(viewerSid);
+        return !!sharer?.voice && !!viewer && canView(viewer.profile.id, sharer.voice);
+      };
+
+      // Who the sharer seals its preview key to: everyone online who can see its channel
+      on('sfu:preview:viewers', (_, ack) => {
+        const me = users.get(socket.id);
+        if (!me.voice) return ack({ error: 'Not in a voice channel' });
+        ack({ ok: true, sids: [...users.keys()].filter((s) => s !== socket.id && viewsChannelOf(s, socket.id)) });
+      });
+
+      on('sfu:preview:key', ({ to, blob }) => {
+        if (typeof blob !== 'string' || blob.length > 4096 || !viewsChannelOf(sfuId(to), socket.id)) return;
+        io.to(to).emit('sfu:preview:key', { from: socket.id, blob });
+      });
+
+      // Someone who has no key yet (came online later, or was just given the channel) asks the sharer for it
+      on('sfu:preview:want', ({ sid: sharer }) => {
+        if (!viewsChannelOf(socket.id, sfuId(sharer)) || !sfuRef.current?.has(sharer)) return;
+        io.to(sharer).emit('sfu:preview:want', { from: socket.id });
+      });
+
+      // The sharer's newest still, encrypted: kept in memory until the next one or the end of the share
+      on('sfu:preview', ({ kind, blob }) => {
+        const me = users.get(socket.id);
+        if ((kind !== 'screen' && kind !== 'camera') || typeof blob !== 'string' || blob.length > 33000 || !me.voice || !sfuRef.current?.publishes(socket.id, kind)) return;
+        const key = `${socket.id}|${kind}`;
+        const now = Date.now();
+        if (now - (previewAt.get(key) || 0) < 3000) return;
+        previewAt.set(key, now);
+        previews.set(key, { blob, ts: now, channelId: me.voice });
+        console.debug(`[sfu] ${whoIs(me.profile)} sent a ${kind} preview`);
+      });
+
+      on('sfu:preview:get', ({ sid: sharer, kind }, ack) => {
+        const p = previews.get(`${sfuId(sharer)}|${kind}`);
+        if (!p || !viewsChannelOf(socket.id, sharer) || users.get(sharer)?.voice !== p.channelId) return ack({ error: 'No preview' });
+        ack({ ok: true, blob: p.blob, ts: p.ts });
       });
 
       // --- penguin game (Yukon) ---
@@ -2558,6 +2712,8 @@ async function startServer(opts = {}) {
         lastIp,
         addressOf,
         actions,
+        sfu: () => sfuRef.current, // the SFU view (D70)
+        channelName: (id) => channel(id)?.name ?? null,
         hasAdmin,
         usage,
         gameInfo,
@@ -2594,6 +2750,39 @@ async function startServer(opts = {}) {
   });
   updater.start();
   const port = server.address().port;
+  // The SFU (D70), once the port is known: its UDP port is the same number by default. If it can't start
+  // (the port is taken, the worker binary is missing), the server runs without it and apps share over the mesh.
+  if (opts.sfu?.enabled !== false) {
+    const sfu = createSfu({
+      workers: opts.sfu?.workers || 1,
+      udpPort: opts.sfu?.udpPort || port,
+      tcpPort: opts.sfu?.tcpPort || 0,
+      announced: opts.sfu?.announced || '',
+      who: (sid) => whoIs(users.get(sid)?.profile),
+      channelName: (id) => channel(id)?.name ?? 'a deleted channel',
+      emit: {
+        room: (channelId, event, payload, except) => {
+          if (event === 'sfu:producerClosed') previews.delete(`${payload.sid}|${payload.kind}`);
+          const to = ioRef.current?.to('voice:' + channelId);
+          (except ? to?.except(except) : to)?.emit(event, payload);
+        },
+        to: (sids, event, payload) => sids.length && ioRef.current?.to(sids).emit(event, payload),
+      },
+    });
+    try {
+      await sfu.start();
+      sfuRef.current = sfu;
+      // The dashboard's SFU view refetches on this; no more than once a second
+      let hint = 0;
+      sfu.onChange(() => {
+        if (hint) return;
+        hint = setTimeout(() => ((hint = 0), adminRef.current?.notify('sfu')), 1000);
+      });
+    } catch (err) {
+      console.error(`[sfu] could not start, so shares and cameras go over the mesh: ${err.message}`);
+      await sfu.close().catch(() => {});
+    }
+  }
   // The first to join is the administrator (D63). A server from before that with members and no administrator has to be given one.
   if (Object.keys(state.profiles).length && !hasAdmin()) console.warn('[server] nobody on this server is an administrator, so nobody in the app can moderate or manage it: give someone a role with Administrator in the admin dashboard (Roles)');
   console.log(`[server] version ${VERSION} listening on port ${port}`);
@@ -2604,6 +2793,9 @@ async function startServer(opts = {}) {
     https: USE_HTTPS,
     fingerprint,
     name: state.name,
+    get sfu() {
+      return sfuRef.current ? { ports: sfuRef.current.ports, tcp: opts.sfu?.tcpPort || 0 } : null;
+    },
     firstInvite, // the token of the invite made on a first start, else null: shown by the CLI
     get inviteOnly() {
       return state.inviteOnly;
@@ -2623,6 +2815,7 @@ async function startServer(opts = {}) {
       clearInterval(mediaSweepTimer);
       updater.stop();
       admin?.close();
+      await sfuRef.current?.close();
       unsubCrashes?.();
       console.log('[server] shutting down');
       closing = true;
@@ -2689,6 +2882,14 @@ if (require.main === module) {
     crashReports: true,
     game: !/^(off|0|false|no)$/i.test(env.GAME || ''),
     trustProxy: /^(1|true|on|yes)$/i.test(env.TRUST_PROXY || ''),
+    // The SFU (D70): on unless SFU=off. Its UDP port is PORT's number unless SFU_UDP_PORT says otherwise.
+    sfu: {
+      enabled: !/^(off|0|false|no)$/i.test(env.SFU || ''),
+      workers: Math.max(1, Math.min(64, Number(env.SFU_WORKERS) || 1)),
+      udpPort: Number(env.SFU_UDP_PORT) || 0,
+      tcpPort: Number(env.SFU_TCP_PORT) || 0,
+      announced: (env.SFU_ANNOUNCED_ADDRESS || '').trim(),
+    },
     // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
     admin: { proxy: !!publicOrigin(env.PUBLIC_URL), enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
     update: {
@@ -2719,6 +2920,7 @@ if (require.main === module) {
     if (env.GIPHY_API_KEY) console.log('  GIPHY: server key configured');
     console.log(`  Version:           ${s.version}` + (s.update.mode === 'off' ? '' : `  (updates: ${s.update.mode === 'on' ? 'automatic, cron "' + s.update.cron + '"' : 'notify only'})`));
     console.log(`  File storage:      ${fmtBytes(s.storage.used)} of ${fmtBytes(s.storage.max)} used`);
+    console.log(`  Streams (SFU):     ${!s.sfu ? (/^(off|0|false|no)$/i.test(env.SFU || '') ? 'off (SFU=off): shares go peer to peer' : 'not running (see the log): shares go peer to peer') : `UDP port ${s.sfu.ports.join(', ')}${s.sfu.tcp ? `, TCP port ${s.sfu.tcp}` : ''} (forward ${s.sfu.ports.length > 1 ? 'these' : 'it'} like port ${s.port})`}`);
     console.log(`  Penguin game:      ${env.GAME && /^(off|0|false|no)$/i.test(env.GAME) ? 'off (GAME=off)' : !s.game.available ? s.game.reason : s.gameEnabled ? 'ready (' + s.game.worldName + ')' : 'turned off (Settings → Server)'}`);
     console.log('');
     // stdout, not console: these must never enter the log the dashboard shows

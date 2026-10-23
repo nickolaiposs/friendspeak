@@ -1,0 +1,11 @@
+# The tools the SFU's worker (mediasoup, D70) is compiled with in the image's deps stage (Dockerfile), pinned
+# by hash: the build fetches nothing that isn't checked. mediasoup's own build would pip-install these
+# without hashes (invoke unpinned). meson and ninja are the versions mediasoup 3.29.0's worker/tasks.py asks
+# for; ninja has a wheel per architecture, so both hashes are listed.
+# To update: `pip download --no-deps --only-binary :all: --platform manylinux2014_<arch> <pkg>==<version>`
+# for x86_64 and aarch64, then `sha256sum` the wheels.
+invoke==3.0.3 --hash=sha256:f11327165e5cbb89b2ad1d88d3292b5113332c43b8553b494da435d6ec6f5053
+meson==1.12.0 --hash=sha256:71f133147fa0fcfe8f4df49fa1045771064947834538409e5d97b3613aac8b4e
+ninja==1.13.2 \
+    --hash=sha256:65a24341b5ac09fcadcc37082660be40a94174e51a937fabf6e2cae26225fa2c \
+    --hash=sha256:d775a5e43e9088f507a6250d57fcf5678eb31268c545feb5064ffeee33735622

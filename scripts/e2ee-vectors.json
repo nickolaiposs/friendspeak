@@ -1,0 +1,51 @@
+{
+  "format": "D70 media encryption, see docs/DECISIONS.md",
+  "clear": 5,
+  "vectors": [
+    {
+      "name": "H.264 keyframe: SPS, PPS, SEI in the clear; an IDR slice and a second slice encrypted",
+      "codec": "H264",
+      "index": 1,
+      "input": "000000016764001facd9405005bb0110000003001000000303c0f18319600000000168ebe3cb22c0000000010605ffff0000000165888400000300112233445566778899aabbccddeeff00000301020304000001658800c0ffee0000030000030100aa",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "iv": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "output": "000000016764001facd9405005bb0110000003001000000303c0f18319600000000168ebe3cb22c0000000010605ffff0000000165888400000300bba40bff2bef448213d20ecc9bfc4f6053ef210b87bb33871af0b8dc735c31cc8173e32d1ca0a1a2a3a4a5a6a7a8a9aaab01000001658800c0ffeeaa8638bb7f8999856387265193b6d26fb5b0e136c362e2a0a1a2a3a4a5a6a7a8a9aaab01"
+    },
+    {
+      "name": "H.264 P slice shorter than the clear part: unchanged",
+      "codec": "H264",
+      "index": 2,
+      "input": "00000001419a0102",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "iv": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "output": "00000001419a0102"
+    },
+    {
+      "name": "H.264 non-IDR slice with key index 255",
+      "codec": "H264",
+      "index": 255,
+      "input": "00000001419a246c41300000030000030102030405060708",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "iv": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "output": "00000001419a246c4130aa8638bb7f8b300e8f7eb208efe45a5a61d47749bb62c33883f85fdaa0a1a2a3a4a5a6a7a8a9aaabff"
+    },
+    {
+      "name": "H.265 keyframe: VPS, SPS, PPS in the clear; an IDR_W_RADL slice encrypted",
+      "codec": "H265",
+      "index": 7,
+      "input": "0000000140010c01ffff016000000300b000000001420101016000000300b0000003005aa0000000014401c172b46240000000012601af0812345678000003000102030405060708090a0b0c0d0e0f",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "iv": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "output": "0000000140010c01ffff016000000300b000000001420101016000000300b0000003005aa0000000014401c172b46240000000012601af08123456d28638bb7f8b300e8f7eb2084f18bb6c5ee02cbb69b474be0a7362fb4407d97aa6193ca0a1a2a3a4a5a6a7a8a9aaab07"
+    },
+    {
+      "name": "Opus frame, encrypted whole",
+      "codec": "opus",
+      "index": 3,
+      "input": "fc8f3c5e2a9b00000000000000000000000000000000000000000102030405",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "iv": "a0a1a2a3a4a5a6a7a8a9aaab",
+      "output": "560904e55412330a8a78b5004612b06053ee230883173daf2510709941898a118602e7111bdafc878226add74a0530a0a1a2a3a4a5a6a7a8a9aaab03"
+    }
+  ]
+}

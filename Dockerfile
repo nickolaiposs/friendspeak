@@ -34,6 +34,21 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
     && rm -rf node_modules/phaser/src node_modules/phaser/types node_modules/phaser/plugins node_modules/@mediapipe
+# The SFU's worker (mediasoup, D70) is compiled here, for the target platform, from the source in its npm
+# package. Its postinstall (skipped above) would download a prebuilt binary that nothing checks. The C/C++
+# libraries the build fetches (OpenSSL, libuv, abseil, libsrtp, …) are checked by meson against the SHA-256
+# in each wrap file, and the build tools are installed first from docker/mediasoup-build.txt, pinned by
+# hash, where the build looks for them, so it installs none of its own. Only the binary is kept.
+COPY docker/mediasoup-build.txt ./docker/
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip g++ \
+    && cd node_modules/mediasoup \
+    && python3 -m pip install --no-user --no-deps --require-hashes --target worker/out/pip_meson_ninja -r /app/docker/mediasoup-build.txt \
+    && ln -s out/pip_meson_ninja worker/pip_invoke \
+    && MEDIASOUP_SKIP_WORKER_PREBUILT_DOWNLOAD=true node npm-scripts.mjs postinstall \
+    && test -x worker/out/Release/mediasoup-worker \
+    && find worker -mindepth 1 -maxdepth 1 ! -name out -exec rm -rf {} + \
+    && find worker/out -mindepth 1 -maxdepth 1 ! -name Release -exec rm -rf {} + \
+    && find worker/out/Release -mindepth 1 ! -name mediasoup-worker -exec rm -rf {} +
 
 # ---------------------------------------------------------------- runtime
 FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20

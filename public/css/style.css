@@ -531,6 +531,12 @@ body.stream-pop > .popover { z-index: 55; } /* the video grid's window has no #p
 .watch-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
 .watch-who strong { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-row .avatar, .watch-row .btn { flex: none; }
+/* A still of the stream above its row (D70): 16:9, letterboxed by the sharer */
+.watch-preview { position: relative; margin: 6px 6px 0; border-radius: 6px; overflow: hidden; background: #000; aspect-ratio: 16 / 9; }
+.watch-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.watch-age { position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 4px; background: rgb(0 0 0 / 0.65); color: #fff; font-size: calc(11px * var(--font-scale)); }
+/* Someone whose app predates the SFU can't watch shares there */
+.voice-user .old-app { flex: none; font-size: calc(10px * var(--font-scale)); color: var(--yellow); white-space: nowrap; }
 
 .emoji-pop { padding: 0; overflow: hidden; }
 emoji-picker { --background: var(--bg-1); --border-color: var(--line); --input-border-color: var(--bg-3); --input-font-color: var(--text); --indicator-color: var(--accent); --button-hover-background: var(--bg-3); --button-active-background: var(--bg-active); height: 400px; width: 360px; }
