@@ -372,8 +372,9 @@ export class SfuSession {
       if (p.connected && p.video) p.settle?.resolve();
     } else if (ev.ev === 'stats') {
       p.stats = ev;
-      // The layers' sizes, for the SFU to pick by (they follow the source and the tier)
-      const layers = (ev.layers || []).map((l) => ({ w: l.w, h: l.h, fps: l.rungFps }));
+      // The layers' sizes, for the SFU to pick by (they follow the source and the tier). Only those that run:
+      // one the upload can't carry is left out first, so the SFU moves its viewers down before it stops.
+      const layers = (ev.layers || []).filter((l) => l.on).map((l) => ({ w: l.w, h: l.h, fps: l.rungFps }));
       if (p.video && JSON.stringify(layers) !== JSON.stringify(p.layers)) {
         p.layers = layers;
         ask(this.socket, 'sfu:layers', { producerId: p.video.id, layers });

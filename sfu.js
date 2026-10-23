@@ -362,10 +362,11 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
     if (!c.view || c.consumer.closed) return;
     const p = producerIn(peers.get(c.consumer.appData.sid)?.channelId, c.producerId)?.p;
     const layers = p?.layers?.length ? p.layers : null;
-    const count = p?.producer.rtpParameters.encodings?.length || 1;
+    // With the publisher's list, nothing above the last layer in it: a layer it left out is about to stop
+    const count = Math.min(p?.producer.rtpParameters.encodings?.length || 1, layers ? layers.length : Infinity);
     let want = count - 1;
     if (layers) {
-      for (let i = 0; i < Math.min(layers.length, count); i++) {
+      for (let i = 0; i < count; i++) {
         if (layers[i].h >= c.view.h * 0.9) {
           want = i;
           break;
@@ -420,7 +421,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
         const transports = await Promise.all(
           [...peer.transports.values()].map(async (t) => {
             const [st] = await t.transport.getStats().catch(() => []);
-            return { id: t.transport.id, direction: t.direction, owner: t.owner, ice: t.transport.iceState, dtls: t.transport.dtlsState, sendBitrate: st?.sendBitrate ?? null, recvBitrate: st?.recvBitrate ?? null, available: st?.availableOutgoingBitrate ?? null };
+            return { id: t.transport.id, direction: t.direction, owner: t.owner, ice: t.transport.iceState, dtls: t.transport.dtlsState, sendBitrate: st?.sendBitrate ?? null, recvBitrate: st?.recvBitrate ?? null, available: st?.availableOutgoingBitrate ?? null, probation: st?.probationSendBitrate ?? null };
           })
         );
         const producers = await Promise.all(

@@ -56,7 +56,16 @@ const UP: f64 = 1.2;
 const DOWN_TICKS: u8 = 2;
 const UP_TICKS: u8 = 3;
 const HOLD: Duration = Duration::from_secs(8); // no layer starts again this long after one stopped
+const SEVERE: f64 = 0.6; // the estimate fell below this share of what runs: drop to what fits at once, not a layer a tick
+// A layer the budget drops is reported off at once, so the SFU moves its viewers down (at a keyframe of the
+// layer below, which it asks for), and its encoder runs this much longer so they have something to watch until then
+const LEAVE: Duration = Duration::from_millis(1500);
+// The estimate starts as a guess (START_BPS): no layer is stopped until it has had this long to measure the link
+const SETTLE: Duration = Duration::from_secs(4);
 const SPEND: f64 = 0.85; // of the estimate, what the encoders together are told to spend
+// The top layer may spend up to this many times what its rung needs, not up to its ceiling: every viewer on
+// it gets the same stream, and the sharer's upload says nothing about their downloads
+const TOP_HEADROOM: f64 = 1.3;
 // The software encoder's ceiling: past 1440p60 it can't keep up (D46, D70)
 const SOFT_MAX: (usize, usize, f32) = (2560, 1440, 60.0);
 
@@ -110,6 +119,7 @@ struct Layer {
     rid: Rid,
     rung: Option<Rung>,
     on: bool,
+    leaving: Option<Instant>, // dropped by the budget: the encoder stops then
     enc: Option<Enc>,
     bytes: u64,
     bytes_prev: u64,
@@ -124,6 +134,7 @@ struct Conn {
     connect_at: Option<Instant>, // when the SFU's parameters arrived
     connected: bool,
     ever: bool, // it was connected once
+    since: Option<Instant>, // when it connected
     failed: bool,
     timeout: Instant,
     estimate: f64, // bits per second
@@ -387,6 +398,7 @@ impl Conn {
             connect_at: None,
             connected: false,
             ever: false,
+            since: None,
             failed: false,
             timeout: now,
             estimate: START_BPS as f64,
@@ -422,7 +434,7 @@ impl Stream {
         let opus = if source.audio && (source::audio() || source.kind == "test") { Some(Opus::new()?) } else { None };
         let conn = Conn::new(kind, hw, opus.is_some(), tx)?;
         let capture = source::start(source, &tier, sinks)?;
-        let layers = RIDS.iter().map(|rid| Layer { rid: Rid::from(*rid), rung: None, on: true, enc: None, bytes: 0, bytes_prev: 0, sent_bps: 0.0 }).collect();
+        let layers = RIDS.iter().map(|rid| Layer { rid: Rid::from(*rid), rung: None, on: true, leaving: None, enc: None, bytes: 0, bytes_prev: 0, sent_bps: 0.0 }).collect();
         let mut s = Stream {
             kind,
             tier,
@@ -565,6 +577,7 @@ impl Stream {
                             e.want_key = true;
                         }
                         self.conn.ever = true;
+                        self.conn.since.get_or_insert(Instant::now());
                         self.replan = true;
                     }
                     Event::KeyframeRequest(r) => {
@@ -800,15 +813,26 @@ impl Stream {
         let layers = cost.len() - 1;
         let on = self.layers.iter().filter(|l| l.rung.is_some() && l.on).count();
         let est = self.conn.estimate;
+        if self.conn.since.is_none_or(|t| now.saturating_duration_since(t) < SETTLE) {
+            return;
+        }
         let b = &mut self.budget;
         if on > 1 && est * FIT < cost[on] {
             b.down += 1;
             b.up = 0;
-            if b.down >= DOWN_TICKS {
+            // A link that suddenly carries far less (a cap, someone else's download) can't wait two ticks a
+            // layer: what doesn't fit is dropped together, before the queue overflows and the loss drags the
+            // estimate down further
+            let severe = est < SEVERE * cost[on];
+            if b.down >= DOWN_TICKS || severe {
                 b.down = 0;
                 b.hold = Some(now + HOLD);
-                self.layers[on - 1].on = false;
-                log!("{:?}: {} stopped, the upload ({:.1} Mbit/s) can't carry it", self.kind, self.layers[on - 1].rid, est / 1e6);
+                let keep = if severe { (1..on).rev().find(|k| cost[*k] <= est * FIT).unwrap_or(1) } else { on - 1 };
+                for l in &mut self.layers[keep..on] {
+                    l.on = false;
+                    l.leaving = Some(now + LEAVE);
+                    log!("{:?}: {} stopped, the upload ({:.1} Mbit/s) can't carry it", self.kind, l.rid, est / 1e6);
+                }
             }
             return;
         }
@@ -818,6 +842,7 @@ impl Stream {
             if b.up >= UP_TICKS {
                 b.up = 0;
                 self.layers[on].on = true;
+                self.layers[on].leaving = None;
                 log!("{:?}: {} started again ({:.1} Mbit/s up)", self.kind, self.layers[on].rid, est / 1e6);
             }
         } else {
@@ -838,8 +863,14 @@ impl Stream {
                 l.on = false;
             }
         }
+        let now = Instant::now();
         for i in 0..self.layers.len() {
-            let want = live && self.layers[i].on && self.layers[i].rung.is_some();
+            let l = &mut self.layers[i];
+            if l.leaving.is_some_and(|t| now >= t) {
+                l.leaving = None;
+            }
+            // A leaving layer keeps its encoder until the SFU has moved its viewers off it
+            let want = live && (l.on || l.leaving.is_some()) && l.rung.is_some();
             let rung = self.layers[i].rung;
             let same = self.layers[i].enc.as_ref().map(|e| Some(e.rung) == rung);
             match (want, same) {
@@ -851,15 +882,18 @@ impl Stream {
                 _ => {}
             }
         }
-        // Lower layers spend what they need; the top one what is left of the estimate, within its ceiling
+        // Lower layers spend what they need; the top one what is left of the estimate, up to TOP_HEADROOM times its need.
+        // A leaving layer gets what is left after that.
         let mut left = self.conn.estimate * SPEND;
-        let running: Vec<usize> = (0..self.layers.len()).filter(|i| self.layers[*i].enc.is_some()).collect();
+        let mut running: Vec<usize> = (0..self.layers.len()).filter(|i| self.layers[*i].enc.is_some() && self.layers[*i].on).collect();
+        running.extend((0..self.layers.len()).filter(|i| self.layers[*i].enc.is_some() && !self.layers[*i].on));
         let mut total = 0.0;
+        let on = running.iter().filter(|i| self.layers[**i].on).count();
         for (n, &i) in running.iter().enumerate() {
             let rung = self.layers[i].enc.as_ref().unwrap().rung;
             let need = self.need(&rung);
-            let top = n + 1 == running.len();
-            let bps = if top { left.clamp(MIN_BPS as f64, ladder::ceiling(&rung) as f64) } else { need.min(left).max(MIN_BPS as f64) };
+            let top = n + 1 >= on; // the best layer that is on, or one that is leaving
+            let bps = if top { left.min(need * TOP_HEADROOM).clamp(MIN_BPS as f64, ladder::ceiling(&rung) as f64) } else { need.min(left).max(MIN_BPS as f64) };
             left = (left - bps).max(0.0);
             let e = self.layers[i].enc.as_mut().unwrap();
             let bps = bps as u32;
