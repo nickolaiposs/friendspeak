@@ -351,7 +351,12 @@ export function mediaResolver(address) {
   return {
     profile,
     emoji,
-    users: (list) => Array.isArray(list) && list.forEach(profile),
+    users: (list) =>
+      Array.isArray(list) &&
+      list.forEach((u) => {
+        profile(u);
+        if (u && typeof u === 'object' && u.gameIcon) u.gameIcon = abs(u.gameIcon); // the Steam game's icon (D59)
+      }),
     server: (sv) => {
       if (sv?.profiles && typeof sv.profiles === 'object') Object.values(sv.profiles).forEach(profile);
       if (Array.isArray(sv?.emojis)) sv.emojis.forEach(emoji);

@@ -366,7 +366,7 @@ To update by hand instead, set `AUTO_UPDATE=notify` (or pin `FRIENDSPEAK_IMAGE` 
 
 ## Steam
 
-While a Steam game is running on your computer, the app shows its name next to yours (🎮): in the member list of your servers and to the people you have a DM open with. The app reads it from Steam on your computer: there is no Steam sign-in, and only games installed through Steam are named. Turn it off under **Settings → Integrations**.
+While a Steam game is running on your computer, the app shows its name and icon next to yours: in the member list of your servers and to the people you have a DM open with. The app reads it from Steam on your computer: there is no Steam sign-in, and only games installed through Steam are named. Turn it off under **Settings → Integrations**.
 
 ## GIFs
 

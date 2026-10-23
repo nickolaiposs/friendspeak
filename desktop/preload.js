@@ -52,7 +52,7 @@ contextBridge.exposeInMainWorld('friendspeakDesktop', {
   // Hardware acceleration (D46): { hardwareAcceleration, atStart, gpu }; pass a patch to change it
   prefs: (patch) => ipcRenderer.invoke('desktop:prefs', patch),
 
-  // The Steam game running on this computer (D59): { id, name } or null. The page asks only while the setting is on.
+  // The Steam game running on this computer (D59): { id, name, icon } or null (icon: a data URL, or ''). The page asks only while the setting is on.
   steamGame: () => ipcRenderer.invoke('desktop:steam-game'),
 
   // Logs and crash reports (issue #51), kept on this computer only. write() records a line from the page

@@ -395,6 +395,8 @@ body.game-visible #main { display: none; }
 .member-roles .role-tag { flex: 0 1 auto; min-width: 0; }
 .role-more { flex: none; font-size: calc(10.5px * var(--font-scale)); color: var(--muted); align-self: center; }
 .member-status { font-size: calc(12px * var(--font-scale)); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Steam game someone is playing: its icon in place of the controller (D59) */
+.game-icon { width: 1.15em; height: 1.15em; border-radius: 3px; vertical-align: -.2em; margin-right: .3em; object-fit: cover; }
 
 /* ---------------- buttons, fields */
 

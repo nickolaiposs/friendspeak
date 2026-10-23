@@ -128,6 +128,7 @@ async function startServer(opts = {}) {
   const MAX_AVATAR_BYTES = 384 * 1024;
   const MAX_BANNER_BYTES = 640 * 1024; // profile background
   const MAX_ICON_BYTES = 512 * 1024;
+  const MAX_GAME_ICON_BYTES = 16 * 1024; // the Steam game's icon next to a name (D59): Steam's are 32×32, about 1 KB
   const AUDIO_QUALITIES = ['low', 'standard', 'high', 'max']; // voice quality levels, lowest first
   const MAX_ROLES = 50;
   const MAX_ROLES_PER_MEMBER = 10;
@@ -694,6 +695,7 @@ async function startServer(opts = {}) {
     const live = new Set();
     for (const p of Object.values(state.profiles)) live.add(p.avatar).add(p.banner);
     for (const e of state.emojis) live.add(e.url);
+    for (const u of users.values()) live.add(u.gameIcon);
     for (const [v, hash] of mediaRefs) if (!live.has(v)) (mediaRefs.delete(v), mediaByHash.delete(hash));
   }
   const mediaSweepTimer = setInterval(sweepMedia, 10 * 60e3);
@@ -1161,6 +1163,7 @@ async function startServer(opts = {}) {
         camera: u.camera,
         playing: u.playing,
         game: u.game || '',
+        gameIcon: lean && u.gameIcon ? refOf(u.gameIcon) : '', // not to apps from before D58: they would be sent the picture on every update
       };
     });
   }
@@ -2491,12 +2494,15 @@ async function startServer(opts = {}) {
       });
 
       // What the person is playing outside friendspeak (a Steam game's name, D59); '' for nothing.
-      // Their app says so, and nothing checks it: it is a line of text, like a status.
-      on('activity', ({ game }) => {
+      // Their app says so, and nothing checks it: it is a line of text, like a status. `icon`: the
+      // game's icon from Steam on their computer, a small JPEG or PNG, sent on by reference (D58).
+      on('activity', ({ game, icon }) => {
         const u = users.get(socket.id);
         const name = str(game, 64).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
-        if ((u.game || '') === name) return;
+        const pic = name && isDataImage(icon, MAX_GAME_ICON_BYTES) && /^data:image\/(png|jpeg);/.test(icon) ? icon : '';
+        if ((u.game || '') === name && (u.gameIcon || '') === pic) return;
         u.game = name;
+        u.gameIcon = pic;
         broadcastUsers();
       });
 

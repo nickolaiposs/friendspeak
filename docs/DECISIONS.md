@@ -911,6 +911,7 @@ Live, a frame takes 0.3 ms of each 10 ms with the machine busy (every core loade
 - **It is on by default**, with a switch under Settings → Integrations (`steamPlaying`). Off, the app doesn't look, and tells its servers and DM peers "nothing" at once.
 - **Servers get it as `activity { game }`** and pass it on in `users` as `game`, held in memory only. **DM peers get it in `hello`**, over the sealed link, and keep it only while that link is up.
 - **Nothing checks the name.** It is what the person's app says, like a status: cut to 64 characters and shown as text.
+- **The game's icon comes from the same computer:** the small picture Steam keeps for its library (`appcache/librarycache`), sent with the name. Servers pass it on by reference (D58), like avatars, and DM peers get it in `hello`. Nobody's app asks Steam's servers for it, so no viewer's address reaches Valve. Without one (a game Steam has no icon for, an older app) the 🎮 stays.
 
 **Consequences:**
 - Only Steam games that are installed on this computer are named. A shortcut to a program from elsewhere has no manifest and is not shown, nor is a game streamed from another machine.

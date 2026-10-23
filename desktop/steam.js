@@ -8,6 +8,7 @@
 //
 // The name comes from the game's appmanifest_<id>.acf in a Steam library. A
 // shortcut to a program that isn't from Steam has no manifest, so it is never shown.
+// The icon is the small picture Steam keeps for its library, in appcache/librarycache.
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -15,6 +16,7 @@ const { execFile } = require('node:child_process');
 
 const LIBRARY_TTL = 60e3; // how long the list of installed games is kept
 const MAX_NAME = 64;
+const MAX_ICON = 16 * 1024; // Steam's icons are 32×32 and about 1 KB; anything much bigger isn't one
 
 // stdout of a program, '' when it fails or isn't there
 const run = (cmd, args) =>
@@ -72,6 +74,28 @@ async function installed(roots) {
   return games;
 }
 
+// The game's icon as a data URL, '' when Steam has none on disk. Steam keeps it in
+// librarycache/<id>/<sha1>.jpg, or (before 2024) librarycache/<id>_icon.jpg.
+const icons = new Map(); // id -> data URL ('' too: looked for and not there)
+async function iconOf(id, roots) {
+  if (icons.has(id)) return icons.get(id);
+  let icon = '';
+  for (const root of roots) {
+    const dir = path.join(root, 'appcache', 'librarycache');
+    const names = await fs.readdir(path.join(dir, id)).catch(() => []);
+    const file = names.find((n) => /^[0-9a-f]{40}\.jpg$/i.test(n));
+    for (const f of [file && path.join(dir, id, file), path.join(dir, id + '_icon.jpg')].filter(Boolean)) {
+      const buf = await fs.readFile(f).catch(() => null);
+      // A JPEG starts FF D8 FF
+      if (buf && buf.length <= MAX_ICON && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) icon = 'data:image/jpeg;base64,' + buf.toString('base64');
+      if (icon) break;
+    }
+    if (icon) break;
+  }
+  icons.set(id, icon);
+  return icon;
+}
+
 // Windows: { id, root } from HKCU\Software\Valve\Steam
 async function fromRegistry() {
   const out = await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam']);
@@ -80,28 +104,33 @@ async function fromRegistry() {
   return { id: id ? String(parseInt(id[1], 16)) : '', root: root ? path.normalize(root[1]) : '' };
 }
 
-// What is running: { id, name } or null
+// For tests: FRIENDSPEAK_FAKE_STEAM_APP=<id> of an installed game makes it the one running
+const FAKE_APP = /^\d+$/.test(process.env.FRIENDSPEAK_FAKE_STEAM_APP || '') ? process.env.FRIENDSPEAK_FAKE_STEAM_APP : '';
+
+// What is running: { id, name, icon } or null
 async function steamGame() {
   try {
     let id = '';
     let games;
+    let roots = steamRoots();
     if (process.platform === 'win32') {
       const reg = await fromRegistry();
-      if (!+reg.id) return null;
-      id = reg.id;
-      games = await installed(steamRoots(reg.root));
+      if (!+reg.id && !FAKE_APP) return null;
+      id = FAKE_APP || reg.id;
+      roots = steamRoots(reg.root);
+      games = await installed(roots);
     } else {
       const ps = await run('ps', ['-A', '-ww', '-o', 'args=']);
       if (!ps) return null;
-      games = await installed(steamRoots());
-      id = /\bSteamLaunch AppId=(\d+)/.exec(ps)?.[1] || '';
+      games = await installed(roots);
+      id = FAKE_APP || /\bSteamLaunch AppId=(\d+)/.exec(ps)?.[1] || '';
       if (!id) {
         const lines = ps.split('\n');
         id = games.find((g) => lines.some((l) => l.trimStart().startsWith(g.dir)))?.id || '';
       }
     }
     const game = id && games.find((g) => g.id === id);
-    return game ? { id: game.id, name: game.name.slice(0, MAX_NAME) } : null;
+    return game ? { id: game.id, name: game.name.slice(0, MAX_NAME), icon: await iconOf(game.id, roots) } : null;
   } catch {
     return null;
   }

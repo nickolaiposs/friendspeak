@@ -17,7 +17,7 @@
 //   binary                     a sealed chunk of an image: u32 transfer, u32 index, bytes
 // Nothing else is read: an op that isn't sealed is dropped (apps from before D32 sent those).
 // Ops:
-//   { t: 'hello', p: { name, color, avatar?, status, game } }   on open, on profile change and when `game` (the Steam game we are playing, D59) changes
+//   { t: 'hello', p: { name, color, avatar?, status, game, gameIcon? } }   on open, on profile change and when `game` (the Steam game we are playing, D59) changes; gameIcon: its icon, a small data URL
 //   { t: 'msg', op, m: { id, text, gif, replyTo, ts, files? } }
 //   { t: 'edit', op, id, text, edited }  { t: 'del', op, id }  { t: 'react', op, id, emoji, on }
 //   { t: 'ack', op }   { t: 'typing' }
@@ -60,12 +60,13 @@ export class DirectMessages {
     this.contacts = new Map(); // peerId -> { key, owner, id, name, color, avatar, status, last, unread, outbox: [op], card?, seen, wants, gone, conflict? }
     this.threads = new Map(); // peerId -> Promise<messages[]>, oldest first
     this.servers = new Map(); // address -> { socket, password, online: Set<profileId>, mail }
-    this.peers = new Map(); // peerId -> { pc, dc, via, polite, chain, ignoreOffer, open, ready, key, sent, asked, tx, xfers, nextX, game }
+    this.peers = new Map(); // peerId -> { pc, dc, via, polite, chain, ignoreOffer, open, ready, key, sent, asked, tx, xfers, nextX, game, gameIcon }
     this.rx = new Map(); // peerId -> promise chain, so received ops apply in order
     this.keys = new Map(); // peerId -> { s, key }: the shared key, per pinned card
     this.mailing = new Set(); // peerIds with a mailbox delivery in flight
     this.urls = new Map(); // file key -> Promise<object URL | null>
     this.game = ''; // the Steam game we are playing (D59): told to connected peers, kept nowhere
+    this.gameIcon = ''; // and its icon from Steam (a data URL, or '')
     setInterval(() => this.flushAll(), 20e3); // retry connections that failed
   }
 
@@ -459,7 +460,7 @@ export class DirectMessages {
 
   sendHello(peerId) {
     const { name, color, avatar, status } = this.me;
-    const p = { name, color, avatar, status, game: this.game, relays: [] }; // relays: empties the list apps from before D55 keep of where to find us
+    const p = { name, color, avatar, status, game: this.game, gameIcon: this.gameIcon || undefined, relays: [] }; // relays: empties the list apps from before D55 keep of where to find us
     if (JSON.stringify(p).length > MAX_HELLO) delete p.avatar;
     this.send(peerId, { t: 'hello', p });
   }
@@ -640,14 +641,19 @@ export class DirectMessages {
   }
 
   // The Steam game we are playing ('' for none), and the one a connected peer is
-  setGame(name) {
-    if (this.game === name) return;
+  setGame(name, icon = '') {
+    if (this.game === name && this.gameIcon === icon) return;
     this.game = name;
+    this.gameIcon = icon;
     for (const [id, peer] of this.peers) if (peer.ready) this.sendHello(id);
   }
   gameOf(peerId) {
     const peer = this.peers.get(peerId);
     return (peer?.ready && peer.game) || '';
+  }
+  gameIconOf(peerId) {
+    const peer = this.peers.get(peerId);
+    return (peer?.ready && peer.game && peer.gameIcon) || '';
   }
 
   // ---------- my actions ----------
@@ -921,6 +927,8 @@ export class DirectMessages {
     // What they are playing lives with the connection: it is gone when they are
     const peer = this.peers.get(peerId);
     if (peer) peer.game = str(p.game, 64).replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+    // Its icon: a small JPEG or PNG that came with it, nothing to fetch (16 KB, as on a server)
+    if (peer) peer.gameIcon = typeof p.gameIcon === 'string' && p.gameIcon.length <= 16 * 1024 * 1.4 && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(p.gameIcon) ? p.gameIcon : '';
     const avatar = typeof p.avatar === 'string' && (isImage(p.avatar) ? !p.avatar.startsWith('data:') || /^data:image\/(png|jpe?g|gif|webp);base64,/.test(p.avatar) : p.avatar.length <= 16) ? p.avatar : undefined;
     const known = this.contacts.get(peerId);
     this.addContact({

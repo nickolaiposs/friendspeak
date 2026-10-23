@@ -117,6 +117,11 @@ const isOnline = (pid) => S.users.some((u) => u.id === pid);
 const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing', 'game'];
 // The Steam game someone is playing (D59), as the member list and DMs word it
 const playingText = (game) => (game && typeof game === 'string' ? '🎮 ' + game : '');
+// The same, with the game's icon from Steam in place of the controller when there is one (D59)
+const playingEl = (game, icon) =>
+  game && typeof game === 'string' && isImage(icon) ? h('span', { class: 'game-playing' }, h('img', { class: 'game-icon', src: icon, alt: '', referrerpolicy: 'no-referrer' }), game) : playingText(game);
+// Parts of a "what they are doing" line (text or elements), with dots between
+const dotted = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
 const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
 const sameUsers = (a, b, fields) => a.length === b.length && a.every((u, i) => fields.every((f) => u[f] === b[i][f]));
 const isBanned = (pid) => !!S.server?.bans?.some((b) => b.profileId === pid);
@@ -397,15 +402,19 @@ function pruneMentions(c) {
 // The desktop app reads it from Steam on this computer. Servers get it as `activity`, DM peers in `hello`.
 const STEAM_POLL = 15e3;
 let steamName = '';
-const sendActivity = (c) => c.connected && c.socket.emit('activity', { game: steamName });
+let steamIcon = ''; // its icon from Steam on this computer: a small data URL, or ''
+const sendActivity = (c) => c.connected && c.socket.emit('activity', { game: steamName, icon: steamIcon || undefined });
 async function pollSteam() {
   if (!desktop?.steamGame) return;
-  let name = settings.get().steamPlaying ? (await desktop.steamGame().catch(() => null))?.name || '' : '';
-  if (!settings.get().steamPlaying) name = ''; // turned off while we asked
-  if (name === steamName) return;
+  const game = settings.get().steamPlaying ? await desktop.steamGame().catch(() => null) : null;
+  let name = game?.name || '';
+  let icon = name && typeof game.icon === 'string' && game.icon.startsWith('data:image/') ? game.icon : '';
+  if (!settings.get().steamPlaying) name = icon = ''; // turned off while we asked
+  if (name === steamName && icon === steamIcon) return;
   steamName = name;
+  steamIcon = icon;
   for (const c of conns()) sendActivity(c);
-  DM.setGame(name);
+  DM.setGame(name, icon);
 }
 if (desktop?.steamGame) (setInterval(pollSteam, STEAM_POLL), pollSteam());
 
@@ -1288,10 +1297,9 @@ function roleTag(r) {
 function profilePopover(anchor, u, align = 'right') {
   const p = fullProfile(u);
   const live = S.users.find((x) => x.id === p.id);
-  const game = playingText(live?.game || DM.gameOf(p.id)); // a DM contact may not be on the server in view
-  const doing = live
-    ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin', game].filter(Boolean).join(' · ')
-    : game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '');
+  // a DM contact may not be on the server in view
+  const game = live?.game ? playingEl(live.game, live.gameIcon) : playingEl(DM.gameOf(p.id), DM.gameIconOf(p.id));
+  const doing = dotted(live ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin', game] : [game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '')]);
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
   const roles = rolesOf(p.id);
   const pop = popover(
@@ -1299,7 +1307,7 @@ function profilePopover(anchor, u, align = 'right') {
     h(
       'div',
       { class: 'profile-card' },
-      profileCardHead(p, [doing ? h('div', { class: 'small pc-doing' }, doing) : null, roles.length ? h('div', { class: 'role-tags' }, roles.map(roleTag)) : null]),
+      profileCardHead(p, [doing.length ? h('div', { class: 'small pc-doing' }, doing) : null, roles.length ? h('div', { class: 'role-tags' }, roles.map(roleTag)) : null]),
       other
         ? h(
             'div',
@@ -2841,6 +2849,7 @@ function renderMembers() {
   };
   const row = (u) => {
     const roles = rolesOf(u.id);
+    const doing = dotted([u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin', playingEl(u.game, u.gameIcon)]);
     return h(
       'div',
       { class: 'member' + (u.offline ? ' offline' : ''), onclick: (e) => profilePopover(e.currentTarget, u, 'left'), oncontextmenu: menu(u) },
@@ -2852,7 +2861,7 @@ function renderMembers() {
         h(
           'div',
           { class: 'member-status' },
-          [u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin', playingText(u.game)].filter(Boolean).join(' · ') || u.status || ''
+          doing.length ? doing : u.status || ''
         ),
         roles.length
           ? h(
@@ -3027,7 +3036,7 @@ function syncComposer() {
 // Whether a DM can be delivered right now
 const dmStatus = (peerId) =>
   DM.connected(peerId)
-    ? ['connected', playingText(DM.gameOf(peerId))].filter(Boolean).join(' · ')
+    ? dotted(['connected', playingEl(DM.gameOf(peerId), DM.gameIconOf(peerId))])
     : DM.online(peerId)
       ? 'connecting…'
       : DM.canMail(peerId)
@@ -3052,7 +3061,7 @@ function refreshChatTitle() {
   head.querySelectorAll(':scope > .icon:first-child, :scope > .dm-av, :scope > .chat-title').forEach((el) => el.remove());
   head.prepend(...chatTitle(ch));
   const status = head.querySelector('.dm-status');
-  if (status && ch.type === 'dm') status.textContent = dmStatus(ch.with);
+  if (status && ch.type === 'dm') status.replaceChildren(...[dmStatus(ch.with)].flat()); // text, or parts with the game's icon
   const conflict = head.querySelector('.dm-conflict');
   if (conflict && ch.type === 'dm') conflict.hidden = !DM.contacts.get(ch.with)?.conflict;
   const ta = $('#composer-input');
