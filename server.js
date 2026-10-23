@@ -1236,7 +1236,7 @@ async function startServer(opts = {}) {
     //    events costing more. What goes over is dropped, and answered if it wanted an answer.
     const EVENT_BUDGET = 400;
     const EVENT_REFILL = 40; // per second
-    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
     let lastHandlerError = 0;
     function guard(socket, next) {
       const add = socket.on.bind(socket);
@@ -2555,6 +2555,8 @@ async function startServer(opts = {}) {
       });
 
       sfuOn('sfu:resume', async ({ consumerId }, sfu) => (await sfu.resume(socket.id, sfuId(consumerId)), { ok: true }));
+      // A viewer that just got the sender's key asks for a keyframe: what came before it couldn't be decrypted
+      sfuOn('sfu:keyframe', async ({ consumerId }, sfu) => (sfu.keyframe(socket.id, sfuId(consumerId)), { ok: true }));
       sfuOn('sfu:pause', async ({ consumerId }, sfu) => (await sfu.pause(socket.id, sfuId(consumerId)), { ok: true }));
 
       // Stop watching (consumerId) or publishing (producerId)

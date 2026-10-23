@@ -1,10 +1,10 @@
 // The native media sidecar (D45), as the desktop app exposes it: a process of
 // its own that captures a screen, window or camera with the OS's APIs, encodes
-// it (in hardware where it can) and sends it to each viewer over standard
-// WebRTC. This module is the thin client for it; voice.js decides when a share
+// it (in hardware where it can), encrypts it and publishes it to the server's
+// SFU (D70). This module is the thin client for it; sfu.js decides when a share
 // goes through it and relays its signaling. Without the desktop app, or where
 // the sidecar isn't there or keeps failing, `can()` is false and shares use
-// the browser engine as before.
+// the browser engine.
 import { log } from './log.js';
 import { settings } from './store.js';
 
@@ -40,7 +40,8 @@ export const nativeMedia = {
   },
   // Whether a share from this kind of source ('screen', 'window', 'camera') can go through the sidecar now
   can(source) {
-    return !!caps && settings.get().nativeStreaming && caps.sources.includes(source);
+    // caps.sfu: a sidecar from before D70 only knew per-viewer connections, which are gone
+    return !!caps && !!caps.sfu && settings.get().nativeStreaming && caps.sources.includes(source);
   },
   send(cmd) {
     bridge?.send(cmd);

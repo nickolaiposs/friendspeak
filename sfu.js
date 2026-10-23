@@ -29,6 +29,7 @@ const MAX_CONSUMERS = 64; // per socket
 const MAX_LAYERS = 3;
 const UP_AFTER_DOWN_MS = 2000; // a consumer moves up no sooner than this after it moved down
 const MAX_INCOMING = 60e6; // bits per second a send transport takes (2160p60 at its ceiling, with room)
+const START_BITRATE = 4_000_000; // where the estimate of a viewer's link starts (see transport())
 
 function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = console, emit, who = (sid) => sid, channelName = (id) => id }) {
   let mediasoup;
@@ -162,7 +163,9 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
       enableUdp: true,
       enableTcp: !!tcpPort,
       preferUdp: true,
-      initialAvailableOutgoingBitrate: 1_000_000,
+      // Where the estimate of a viewer's link starts: enough for a 720p60 layer at once when a tile is enlarged.
+      // mediasoup lowers it as soon as the link says otherwise.
+      initialAvailableOutgoingBitrate: START_BITRATE,
       appData: { sid, owner },
     });
     if (peers.get(sid) !== peer) {
@@ -330,6 +333,11 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
     await c.consumer.pause();
   }
 
+  // mediasoup limits how often a producer is asked
+  function keyframe(sid, consumerId) {
+    consumerOf(sid, consumerId)?.consumer.requestKeyFrame().catch(() => {});
+  }
+
   function stopConsumer(sid, consumerId) {
     const peer = peers.get(sid);
     const c = peer?.consumers.get(consumerId);
@@ -409,7 +417,12 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
       for (const sid of room.peers) {
         const peer = peers.get(sid);
         if (!peer) continue;
-        const transports = [...peer.transports.values()].map((t) => ({ id: t.transport.id, direction: t.direction, owner: t.owner, ice: t.transport.iceState, dtls: t.transport.dtlsState }));
+        const transports = await Promise.all(
+          [...peer.transports.values()].map(async (t) => {
+            const [st] = await t.transport.getStats().catch(() => []);
+            return { id: t.transport.id, direction: t.direction, owner: t.owner, ice: t.transport.iceState, dtls: t.transport.dtlsState, sendBitrate: st?.sendBitrate ?? null, recvBitrate: st?.recvBitrate ?? null, available: st?.availableOutgoingBitrate ?? null };
+          })
+        );
         const producers = await Promise.all(
           [...peer.producers.entries()].map(async ([id, p]) => {
             const st = await p.producer.getStats().catch(() => []);
@@ -455,6 +468,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
     resume,
     pause,
     stopConsumer,
+    keyframe,
     view,
     leave,
     stats,
