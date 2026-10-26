@@ -157,6 +157,9 @@ export function setColors(el, colors) {
   el.style.setProperty('--accent-fill', fill);
   el.style.setProperty('--accent-fill-hover', mix(fill, onColor(colors.accent) === '#ffffff' ? '#000000' : '#ffffff', 0.12));
   el.style.setProperty('--red-fill', fillOf(colors.red));
+  el.style.setProperty('--green-fill', fillOf(colors.green));
+  // a border a step stronger than --line: what a hovered tile or card shows (D72)
+  el.style.setProperty('--line-strong', mix(colors.line, colors.text, 0.1));
   el.style.colorScheme = isDark(colors['bg-2']) ? 'dark' : 'light'; // native scrollbars and form controls
 }
 

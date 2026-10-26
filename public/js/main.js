@@ -251,6 +251,19 @@ const I = {
   // the call's connection: bars beyond its quality are dimmed (.vp-signal)
   signal: '<svg viewBox="0 0 24 24"><rect class="bar1" x="3" y="15" width="4" height="6" rx="1"/><rect class="bar2" x="10" y="10" width="4" height="11" rx="1"/><rect class="bar3" x="17" y="4" width="4" height="17" rx="1"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
+  close: '<svg viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>',
+  more: '<svg viewBox="0 0 24 24"><path d="M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/></svg>',
+  info: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/></svg>',
+  okCircle: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-2 15-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>',
+  errorCircle: '<svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>',
+  warn: '<svg viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>',
+  chevronLeft: '<svg viewBox="0 0 24 24"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>',
+  chevronRight: '<svg viewBox="0 0 24 24"><path d="M10 6 8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>',
+  upload: '<svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5z"/></svg>',
+  shield: '<svg viewBox="0 0 24 24"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>',
+  image: '<svg viewBox="0 0 24 24"><path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>',
+  key: '<svg viewBox="0 0 24 24"><path d="M12.65 10A6 6 0 1 0 7 18a6 6 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/></svg>',
+  file: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg>',
 };
 const icon = (name, cls = '') => h('span', { class: 'icon ' + cls, html: I[name] });
 
@@ -300,7 +313,7 @@ function toggleUserMute(id, name) {
   renderRail();
   renderChannels();
 }
-const userMuteItem = (id, name) => id !== me()?.id && { label: userMuted(id) ? 'Unmute notifications' : 'Mute notifications', run: () => toggleUserMute(id, name) };
+const userMuteItem = (id, name) => id !== me()?.id && { label: 'Mute notifications', checked: userMuted(id), run: () => toggleUserMute(id, name) };
 const serverMuted = (id) => !!settings.get().notifyMutedServers[id];
 function toggleServerMute(id) {
   const cur = { ...settings.get().notifyMutedServers };
@@ -561,23 +574,27 @@ function friendDialog() {
       {},
       h('p', { class: 'muted' }, 'A friend code adds someone to your direct messages with their key, so you know it’s really them from the first message. You reach each other through a server you both use. Send yours to a friend, and paste theirs below.'),
       h('label', { class: 'field' }, h('span', {}, 'Their friend code'), theirs),
-      h('label', { class: 'field' }, h('span', {}, 'Your friend code'), mine),
-      h('div', { class: 'row tight' }, h('button', { class: 'btn small ghost', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied')) }, 'Copy your code')),
+      h(
+        'div',
+        { class: 'field' },
+        h('span', { class: 'field-head' }, 'Your friend code', h('button', { class: 'btn small ghost link-btn', onclick: () => navigator.clipboard.writeText(code).then(() => toast('Friend code copied', 'success')) }, 'Copy')),
+        mine
+      ),
       servers.all().length ? null : h('p', { class: 'muted small' }, 'You have no saved servers yet. Direct messages travel through a server you and your friend both use.')
     ),
-    { actions: [(c) => h('button', { class: 'btn', onclick: () => add(c) }, 'Add friend')] }
+    { actions: [(c) => h('button', { class: 'btn ghost', onclick: () => c() }, 'Cancel'), (c) => h('button', { class: 'btn', onclick: () => add(c) }, 'Add friend')] }
   );
 }
 
 async function trustKeyPrompt(peerId) {
   const name = profileOf(peerId).name;
   const text = `Someone using ${name}’s profile is showing a different key than the one saved on this device, so their messages are being refused. That happens when ${name} lost their profile and made it again, and also when someone is pretending to be them. Ask ${name} before you trust it.`;
-  if (await confirmModal('Different key', text, 'Trust the new key')) DM.trustNewKey(peerId);
+  if (await confirmModal('Different key', text, 'Trust the new key', { cancel: 'Not now', titleIcon: 'warn' })) DM.trustNewKey(peerId);
 }
 
 async function deleteConversation(peerId) {
   const name = profileOf(peerId).name;
-  if (!(await confirmModal('Delete conversation', `Delete your conversation with ${name} from this device? Their copy isn't affected.`))) return;
+  if (!(await confirmModal('Delete conversation', `Delete your conversation with ${name} from this device? Their copy isn't affected.`, 'Delete conversation'))) return;
   if (DMCALL.with(peerId)) DMCALL.hangup();
   if (S.channelId === 'dm:' + peerId) leaveDmView();
   await DM.removeContact(peerId);
@@ -676,7 +693,8 @@ function startDmCall(peerId, video = false) {
   DMCALL.start(peerId, video);
 }
 
-async function acceptDmCall() {
+// `camera`: answer a video call with ours on too
+async function acceptDmCall(camera = false) {
   const c = DMCALL.cur;
   if (c?.state !== 'ringing') return;
   if (S.call) leaveVoice();
@@ -684,6 +702,7 @@ async function acceptDmCall() {
   DMCALL.sync(micOff(), S.deafened);
   selectChannel('dm:' + c.peerId);
   await DMCALL.accept();
+  if (camera === true && DMCALL.voice && !DMCALL.voice.local.camera) toggleCamera();
 }
 
 function dmCallStatus(c) {
@@ -762,15 +781,22 @@ function renderDmCall() {
 
   const card = $('#call-ring');
   card.hidden = c?.state !== 'ringing';
+  // A stacked card that can't be missed (D72): role="alertdialog", so it's announced
+  card.setAttribute('role', 'alertdialog');
+  card.setAttribute('aria-label', card.hidden ? '' : `${dmCallStatus(c)} from ${p.name}`);
   card.replaceChildren(
     ...(card.hidden
       ? []
       : [
-          avatarEl(p, 44),
-          h('div', { class: 'cr-text' }, h('strong', {}, p.name), h('span', { class: 'muted small' }, dmCallStatus(c))),
-          h('button', { class: 'btn small accept', onclick: acceptDmCall }, 'Accept'),
-          h('button', { class: 'btn small danger', onclick: () => DMCALL.hangup() }, 'Decline'),
-        ])
+          h('div', { class: 'cr-who' }, h('div', { class: 'cr-av' }, avatarEl(p, 48)), h('div', { class: 'cr-text' }, h('strong', {}, p.name), h('span', { class: 'muted small' }, dmCallStatus(c) + '…'))),
+          h(
+            'div',
+            { class: 'cr-btns' },
+            h('button', { class: 'btn danger', onclick: () => DMCALL.hangup() }, icon('hangup'), 'Decline'),
+            h('button', { class: 'btn accept', onclick: () => acceptDmCall() }, icon('phone'), 'Accept')
+          ),
+          c.video ? h('button', { class: 'btn small ghost', onclick: () => acceptDmCall(true) }, 'Accept with camera') : null,
+        ].filter(Boolean))
   );
 
   const panel = $('#call-panel');
@@ -1059,38 +1085,103 @@ setInterval(() => {
 
 // ---------------------------------------------------------------- toasts, modals, popovers
 
-function toast(text, kind = 'info', ms = 3500) {
-  const el = h('div', { class: 'toast ' + kind }, text);
+// kind: info, success or error. `action` ({ label, run }) adds a button, such as Undo. The timer
+// waits while the pointer is on it.
+const TOAST_ICONS = { info: 'info', success: 'okCircle', error: 'errorCircle' };
+function toast(text, kind = 'info', ms = 3500, { action } = {}) {
+  let t1, t2;
+  const out = (after) => {
+    clearTimeout(t1);
+    clearTimeout(t2);
+    t1 = setTimeout(() => el.classList.add('out'), after);
+    t2 = setTimeout(() => el.remove(), after + 400);
+  };
+  const el = h(
+    'div',
+    {
+      class: 'toast ' + kind,
+      role: kind === 'error' ? 'alert' : 'status',
+      onmouseenter: () => (clearTimeout(t1), clearTimeout(t2), el.classList.remove('out')),
+      onmouseleave: () => out(1500),
+    },
+    icon(TOAST_ICONS[kind] || 'info', 'toast-icon'),
+    h('span', { class: 'toast-text' }, text),
+    action ? h('button', { class: 'btn small ghost toast-action', onclick: () => (action.run(), out(0)) }, action.label) : null
+  );
   $('#toasts').append(el);
-  setTimeout(() => el.classList.add('out'), ms);
-  setTimeout(() => el.remove(), ms + 400);
+  out(ms);
 }
 
-function modal(title, body, { actions = [], wide = false, dismissable = true, onClose } = {}) {
+// Open modals, innermost last: only it answers Escape and keeps Tab inside (D72)
+const modals = [];
+const FOCUSABLE = 'button:not(:disabled), [href], input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+const focusables = (root) => [...root.querySelectorAll(FOCUSABLE)].filter((el) => el.getClientRects().length && !el.closest('[hidden], .tip'));
+
+// `actions`: buttons for the foot (or functions of `close` that return one); one with the class
+// "side" goes at the left. `size: 'sm'` for confirms, `wide` for settings and lists. `alert`: a
+// question about something that can't be undone (role="alertdialog", the focus starts on Cancel).
+function modal(title, body, { actions = [], wide = false, size = '', dismissable = true, onClose, alert = false, titleIcon, className = '' } = {}) {
+  const opener = document.activeElement;
+  const id = 'modal-' + uid();
   const close = () => {
+    const i = modals.indexOf(entry);
+    if (i < 0) return;
+    modals.splice(i, 1);
     root.remove();
-    document.removeEventListener('keydown', onKey);
     onClose?.();
+    // Back to whatever opened it, unless that went away meanwhile
+    if (opener?.isConnected && opener !== document.body && !modals.at(-1)?.box.contains(document.activeElement)) opener.focus({ preventScroll: true });
   };
-  const onKey = (e) => dismissable && e.key === 'Escape' && close();
-  const root = h(
+  const box = h(
     'div',
-    { class: 'modal-backdrop', onmousedown: (e) => dismissable && e.target === root && close() },
+    {
+      class: ['modal', wide && 'wide', size, className].filter(Boolean).join(' '),
+      role: alert ? 'alertdialog' : 'dialog',
+      'aria-modal': 'true',
+      'aria-labelledby': id,
+      tabindex: '-1',
+    },
     h(
       'div',
-      { class: 'modal' + (wide ? ' wide' : '') },
-      h('div', { class: 'modal-head' }, h('h2', {}, title), dismissable && h('button', { class: 'x', onclick: close }, '×')),
-      h('div', { class: 'modal-body' }, body),
-      actions.length ? h('div', { class: 'modal-foot' }, actions.map((a) => (typeof a === 'function' ? a(close) : a))) : null
-    )
+      { class: 'modal-head' },
+      h('h2', { id }, titleIcon ? icon(titleIcon, 'title-icon ' + titleIcon) : null, title),
+      dismissable && h('button', { class: 'icon-btn close', title: 'Close', 'aria-label': 'Close', onclick: () => close() }, icon('close'))
+    ),
+    h('div', { class: 'modal-body' }, body),
+    actions.length ? h('div', { class: 'modal-foot' }, actions.map((a) => (typeof a === 'function' ? a(close) : a))) : null
   );
-  document.addEventListener('keydown', onKey);
+  const root = h('div', { class: 'modal-backdrop', onmousedown: (e) => dismissable && e.target === root && close() }, box);
+  const entry = { box, close, dismissable };
+  modals.push(entry);
   $('#modal-root').append(root);
-  setTimeout(() => root.querySelector('input,textarea,select')?.focus(), 30);
+  setTimeout(() => {
+    if (box.contains(document.activeElement) || modals.at(-1) !== entry) return;
+    const field = box.querySelector('.modal-body input:not([type="hidden"]):not([readonly]):not([type="checkbox"]):not([type="range"]), .modal-body textarea:not([readonly]), .modal-body select');
+    const cancel = alert && [...box.querySelectorAll('.modal-foot .btn.ghost')].find((b) => !b.classList.contains('danger'));
+    (field || cancel || box).focus({ preventScroll: true });
+  }, 30);
   return close;
 }
+document.addEventListener('keydown', (e) => {
+  const top = modals.at(-1);
+  if (!top) return;
+  if (e.key === 'Escape' && !e.defaultPrevented) {
+    if (top.dismissable) (e.preventDefault(), top.close());
+    return;
+  }
+  if (e.key !== 'Tab') return;
+  // A popover opened from the dialog (a picker) keeps its own Tab order
+  if (activePopover?.el.contains(document.activeElement)) return;
+  const list = focusables(top.box);
+  if (!list.length) return e.preventDefault();
+  const i = list.indexOf(document.activeElement);
+  if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === list.length - 1)) {
+    e.preventDefault();
+    list[i < 0 ? 0 : e.shiftKey ? list.length - 1 : 0].focus();
+  }
+});
 
-function promptModal(title, label, value = '') {
+function promptModal(title, label, value = '', okLabel = 'Save') {
   return new Promise((resolve) => {
     let done = false;
     const input = h('input', { value, onkeydown: (e) => e.key === 'Enter' && ok() });
@@ -1100,7 +1191,7 @@ function promptModal(title, label, value = '') {
       resolve(input.value.trim());
     };
     const close = modal(title, h('label', { class: 'field' }, h('span', {}, label), input), {
-      actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, 'Save')],
+      actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, okLabel)],
       onClose: () => !done && resolve(null),
     });
   });
@@ -1150,14 +1241,20 @@ function exportDialog(p) {
   );
 }
 
-function confirmModal(title, text, okLabel = 'Delete') {
+// A yes/no question about something that can't be undone. `okLabel` names the action ("Delete
+// channel", not "Delete", D72). `side`: { label, run } for a third choice at the left of the foot.
+function confirmModal(title, text, okLabel, { side, cancel = 'Cancel', titleIcon } = {}) {
   return new Promise((resolve) => {
     let done = false;
-    const close = modal(title, h('p', {}, text), {
+    const close = modal(title, typeof text === 'string' ? h('p', { class: 'confirm-text' }, text) : text, {
+      size: 'sm',
+      alert: true,
+      titleIcon,
       actions: [
-        h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'),
+        side ? h('button', { class: 'btn ghost side', onclick: () => (close(), side.run()) }, side.label) : null,
+        h('button', { class: 'btn ghost', onclick: () => close() }, cancel),
         h('button', { class: 'btn danger', onclick: () => ((done = true), close(), resolve(true)) }, okLabel),
-      ],
+      ].filter(Boolean),
       onClose: () => !done && resolve(false),
     });
   });
@@ -1167,9 +1264,11 @@ let activePopover = null;
 function closePopover() {
   activePopover?.close();
 }
-// `doc`: the page it opens in, when that isn't the app's (the stage in a window of its own)
+// `doc`: the page it opens in, when that isn't the app's (the stage in a window of its own).
+// Escape, or a press outside, closes it; the focus goes back to whatever had it before.
 function popover(anchor, content, { align = 'end', className = '', onClose, doc = document } = {}) {
   closePopover();
+  const opener = doc.activeElement;
   const el = h('div', { class: 'popover ' + className }, content);
   (doc === document ? $('#popovers') : doc.body).append(el);
   const { innerWidth, innerHeight } = doc.defaultView;
@@ -1185,40 +1284,321 @@ function popover(anchor, content, { align = 'end', className = '', onClose, doc 
     Object.assign(el.style, { left: left + 'px', top: top + 'px' });
   };
   place();
-  const onDown = (e) => !el.contains(e.target) && !anchor.contains(e.target) && !e.target.closest('.modal-backdrop') && close();
-  const onKey = (e) => e.key === 'Escape' && close();
+  const onDown = (e) => !el.contains(e.target) && !anchor.contains(e.target) && !e.target.closest?.('.modal-backdrop') && close();
+  // In the capture phase, so Escape closes only the popover and not a dialog under it
+  const onKey = (e) => e.key === 'Escape' && (e.stopPropagation(), e.preventDefault(), close());
   const close = () => {
+    if (!el.isConnected) return;
+    const had = el.contains(doc.activeElement);
     el.remove();
     doc.removeEventListener('mousedown', onDown, true);
-    doc.removeEventListener('keydown', onKey);
+    doc.removeEventListener('keydown', onKey, true);
     if (activePopover?.el === el) activePopover = null;
+    if (had && opener?.isConnected && opener !== doc.body) opener.focus({ preventScroll: true });
     onClose?.();
   };
   setTimeout(() => {
     doc.addEventListener('mousedown', onDown, true);
-    doc.addEventListener('keydown', onKey);
+    doc.addEventListener('keydown', onKey, true);
   });
   activePopover = { el, close, place };
   return activePopover;
 }
 
-// items: { label, run, danger? }, or with `checked` a checkbox
-function contextMenu(e, items) {
-  e.preventDefault();
-  const anchor = { getBoundingClientRect: () => ({ left: e.clientX, right: e.clientX, top: e.clientY, bottom: e.clientY }), contains: () => false };
-  const p = popover(
-    anchor,
-    h(
-      'div',
-      { class: 'menu' },
-      items.filter(Boolean).map((it) =>
-        'checked' in it
-          ? h('button', { class: 'menu-item', role: 'menuitemcheckbox', 'aria-checked': String(!!it.checked), onclick: () => (p.close(), it.run()) }, h('span', { class: 'menu-check', html: it.checked ? I.check : '' }), it.label)
-          : h('button', { class: 'menu-item' + (it.danger ? ' danger' : ''), onclick: () => (p.close(), it.run()) }, it.label)
-      )
-    ),
-    { align: 'start', doc: e.target.ownerDocument || document }
+// A menu's items (D72). Each is { label, run } with any of:
+//   danger         red, and goes after a separator at the end
+//   checked        an on/off item with a box (menuitemcheckbox)
+//   selected       one of several choices; the chosen one gets a check at the end (menuitemradio)
+//   disabled, why  shown but not usable; `why` says why, in its tooltip
+//   kbd            the shortcut, as keycaps
+//   icon, avatar   a leading icon from the set, or someone's avatar
+// '-' is a separator (doubles and ones at the ends are dropped), { heading } a label, { note } a line of text.
+function menuEl(items, close, label) {
+  const list = items.filter(Boolean).filter((it, i, all) => it !== '-' || (i > 0 && i < all.length - 1 && all[i + 1] !== '-'));
+  const iconCol = list.some((it) => it.icon); // labels line up when some items have an icon and some don't
+  const el = h(
+    'div',
+    { class: 'menu', role: 'menu', 'aria-label': label || null, tabindex: '-1' },
+    list.map((it) => {
+      if (it === '-') return h('div', { class: 'menu-sep', role: 'separator' });
+      if (it.heading) return h('div', { class: 'menu-label', role: 'presentation' }, it.heading);
+      if (it.note) return h('div', { class: 'menu-note', role: 'presentation' }, it.note);
+      const role = 'checked' in it ? 'menuitemcheckbox' : 'selected' in it ? 'menuitemradio' : 'menuitem';
+      return h(
+        'button',
+        {
+          class: 'menu-item' + (it.danger ? ' danger' : '') + (it.selected ? ' selected' : ''),
+          role,
+          'aria-checked': role === 'menuitem' ? null : String(!!(it.checked ?? it.selected)),
+          'aria-disabled': it.disabled ? 'true' : null,
+          title: it.disabled && it.why ? it.why : null,
+          tabindex: '-1',
+          onclick: () => {
+            if (it.disabled) return;
+            close();
+            it.run();
+          },
+        },
+        role === 'menuitemcheckbox' ? h('span', { class: 'menu-check', html: it.checked ? I.check : '' }) : it.avatar ? avatarEl(it.avatar, 24) : it.icon ? icon(it.icon, 'menu-icon') : iconCol ? h('span', { class: 'icon menu-icon' }) : null,
+        h('span', { class: 'menu-text' }, it.label),
+        it.kbd ? h('kbd', { class: 'menu-kbd' }, it.kbd) : null,
+        it.selected ? icon('check', 'menu-end') : null
+      );
+    })
   );
+  menuKeys(el, close);
+  return el;
+}
+
+// ↑ ↓ Home End move, a letter jumps to the next item starting with it, Tab closes (focus goes back)
+function menuKeys(el, close) {
+  el.addEventListener('keydown', (e) => {
+    const items = [...el.querySelectorAll('.menu-item')];
+    if (!items.length) return;
+    const i = items.indexOf(el.ownerDocument.activeElement);
+    let n = null;
+    if (e.key === 'ArrowDown') n = (i + 1) % items.length;
+    else if (e.key === 'ArrowUp') n = (i <= 0 ? items.length : i) - 1;
+    else if (e.key === 'Home') n = 0;
+    else if (e.key === 'End') n = items.length - 1;
+    else if (e.key === 'Tab') return (e.preventDefault(), close());
+    else if (e.key.length === 1 && /\S/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const k = e.key.toLowerCase();
+      for (let j = 1; j <= items.length && n == null; j++) {
+        const c = items[(i + j) % items.length];
+        if (c.textContent.trim().toLowerCase().startsWith(k)) n = (i + j) % items.length;
+      }
+    }
+    if (n == null) return;
+    e.preventDefault();
+    items[n].focus();
+  });
+}
+
+// Was the last thing the person did a key? (A menu opened from the keyboard focuses its first item.)
+let byKeyboard = false;
+addEventListener('keydown', () => (byKeyboard = true), true);
+addEventListener('pointerdown', () => (byKeyboard = false), true);
+
+// A menu in a popover, from a button
+function menuPopover(anchor, items, { align = 'start', label, className = '', doc } = {}) {
+  let p;
+  const el = menuEl(items, () => p.close(), label);
+  p = popover(anchor, el, { align, className: 'menu-pop ' + className, doc });
+  (byKeyboard ? el.querySelector('.menu-item') || el : el).focus({ preventScroll: true });
+  return p;
+}
+
+// A right-click menu (also Shift+F10 and the menu key on whatever has the focus). See menuEl for `items`.
+function contextMenu(e, items, label) {
+  e.preventDefault();
+  if (!items.some((it) => it && it !== '-' && !it.heading)) return;
+  const at = e.clientX || e.clientY ? { x: e.clientX, y: e.clientY } : null;
+  const target = e.target;
+  const anchor = {
+    getBoundingClientRect: () => {
+      if (at) return { left: at.x, right: at.x, top: at.y, bottom: at.y };
+      const r = target.getBoundingClientRect();
+      return { left: r.left + 8, right: r.left + 8, top: r.bottom, bottom: r.bottom };
+    },
+    contains: () => false,
+  };
+  const doc = target.ownerDocument || document;
+  let p;
+  const el = menuEl(items, () => p.close(), label);
+  p = popover(anchor, el, { align: 'start', className: 'menu-pop', doc });
+  if (!at) p.place(); // below the element, not above
+  (byKeyboard ? el.querySelector('.menu-item') || el : el).focus({ preventScroll: true });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'F10' || !e.shiftKey) return;
+  const t = document.activeElement;
+  if (!t || t === document.body) return;
+  e.preventDefault();
+  t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+});
+
+// ---------------------------------------------------------------- tooltips (D72)
+//
+// Icon buttons and rail icons keep using `title`. When the pointer or the keyboard reaches one, the
+// title moves to data-tip (so the browser's own tooltip stays away) and shows here instead: after a
+// pause on hover, at once on keyboard focus, with the shortcut from data-kbd. Lines after the first
+// (the rail's) are drawn smaller. An icon-only button without a label gets the first line as one.
+const TIP_DELAY = 400;
+const tip = { el: null, target: null, timer: null };
+function tipTarget(node) {
+  const t = node?.closest?.('[title], [data-tip]');
+  if (!t || t.closest('.tip, emoji-picker')) return null;
+  if (t.hasAttribute('title')) {
+    const text = t.getAttribute('title');
+    t.removeAttribute('title');
+    if (text) t.dataset.tip = text;
+    else delete t.dataset.tip;
+    if ((t.tagName === 'BUTTON' || t.tagName === 'A') && text && (!t.hasAttribute('aria-label') || t.dataset.tipLabel) && !t.textContent.trim()) {
+      t.setAttribute('aria-label', text.split('\n')[0]);
+      t.dataset.tipLabel = '1';
+    }
+  }
+  return t.dataset.tip ? t : null;
+}
+function hideTip() {
+  clearTimeout(tip.timer);
+  tip.el?.remove();
+  tip.el = tip.target = null;
+}
+function showTip(t) {
+  hideTip();
+  if (!t.isConnected) return;
+  const [first, ...rest] = t.dataset.tip.split('\n');
+  const el = h('div', { class: 'tip', role: 'tooltip' }, h('div', { class: 'tip-main' }, first, t.dataset.kbd ? h('kbd', {}, t.dataset.kbd) : null), rest.map((l) => h('div', { class: 'tip-line' }, l)));
+  document.body.append(el);
+  const r = t.getBoundingClientRect();
+  const w = el.offsetWidth;
+  const ht = el.offsetHeight;
+  let left, top;
+  if (t.closest('#rail')) [left, top] = [r.right + 10, r.top + r.height / 2 - ht / 2];
+  else {
+    [left, top] = [r.left + r.width / 2 - w / 2, r.top - ht - 6];
+    if (top < 6) top = r.bottom + 6;
+  }
+  el.style.left = Math.max(6, Math.min(left, innerWidth - w - 6)) + 'px';
+  el.style.top = Math.max(6, Math.min(top, innerHeight - ht - 6)) + 'px';
+  tip.el = el;
+  tip.target = t;
+}
+document.addEventListener('pointerover', (e) => {
+  const t = tipTarget(e.target);
+  if (t === tip.target) return;
+  hideTip();
+  if (t) tip.timer = setTimeout(() => t.matches(':hover') && showTip(t), TIP_DELAY);
+});
+document.addEventListener('pointerout', (e) => {
+  if (tip.target && !tip.target.contains(e.relatedTarget)) hideTip();
+});
+document.addEventListener('focusin', (e) => {
+  const t = tipTarget(e.target);
+  if (t && /^(BUTTON|A)$/.test(t.tagName) && t === e.target && t.matches(':focus-visible')) showTip(t);
+  else if (t !== tip.target) hideTip();
+});
+document.addEventListener('focusout', () => hideTip());
+document.addEventListener('pointerdown', () => hideTip(), true);
+document.addEventListener('keydown', (e) => e.key === 'Escape' && tip.el && hideTip(), true);
+document.addEventListener('scroll', () => hideTip(), true);
+
+// ---------------------------------------------------------------- controls (D72)
+
+// On/off for an option that applies at once
+function switchEl(checked, onchange, label, { disabled = false } = {}) {
+  const el = h('button', {
+    class: 'switch',
+    role: 'switch',
+    'aria-checked': String(!!checked),
+    'aria-label': label,
+    disabled,
+    onclick: () => {
+      const on = el.getAttribute('aria-checked') !== 'true';
+      el.setAttribute('aria-checked', String(on));
+      onchange(on);
+    },
+  });
+  return el;
+}
+
+// Two to four choices side by side. options: [[value, label]]; arrows move between them.
+function segmented(options, value, onchange, label, { disabled = false } = {}) {
+  const el = h('div', { class: 'seg', role: 'radiogroup', 'aria-label': label });
+  const set = (v, focus) => {
+    for (const b of el.children) {
+      const on = b.dataset.value === String(v);
+      b.setAttribute('aria-checked', String(on));
+      b.tabIndex = on ? 0 : -1;
+      if (on && focus) b.focus();
+    }
+  };
+  el.append(
+    ...options.map(([v, text]) =>
+      h('button', { role: 'radio', 'data-value': String(v), disabled, onclick: () => (set(v), onchange(v)) }, text)
+    )
+  );
+  el.addEventListener('keydown', (e) => {
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const i = options.findIndex(([v]) => el.querySelector('[aria-checked="true"]')?.dataset.value === String(v));
+    const [v] = options[(i + step + options.length) % options.length];
+    set(v, true);
+    onchange(v);
+  });
+  set(value);
+  return el;
+}
+
+// A setting: its name and help on the left, its control on the right
+function settingRow(title, help, control, { dim = false, id } = {}) {
+  return h('div', { class: 'setting-row' + (dim ? ' dim' : ''), id }, h('div', { class: 'sr-label' }, h('div', { class: 'sr-title' }, title), help ? h('div', { class: 'sr-help' }, help) : null), control);
+}
+
+// Inherit / allow / deny for a permission that may be unset (undefined, true or false)
+function triState(value, onChange, label, { disabled = false, inherit = 'Inherit' } = {}) {
+  const key = (v) => (v === true ? 'allow' : v === false ? 'deny' : 'inherit');
+  const el = segmented(
+    [
+      ['inherit', h('span', { class: 'tri-i', 'aria-hidden': 'true' }, '/')],
+      ['allow', icon('check')],
+      ['deny', icon('close')],
+    ],
+    key(value),
+    (k) => onChange(k === 'allow' ? true : k === 'deny' ? false : undefined),
+    label,
+    { disabled }
+  );
+  el.classList.add('tri');
+  const names = { inherit, allow: 'Allow', deny: 'Deny' };
+  for (const b of el.children) (b.setAttribute('aria-label', names[b.dataset.value]), (b.title = names[b.dataset.value]));
+  return el;
+}
+
+// A shortcut, shown as keycaps: click it, then press the keys. Escape clears it when `clearable`, and
+// otherwise leaves it as it was; so does leaving the field. `read` turns the key event into the value
+// (null: keep listening), `show` the value into "Ctrl+M" style text.
+function hotkeyField(value, onSet, { label, read = comboFromEvent, show = (v) => v, clearable = true } = {}) {
+  const btn = h('button', { class: 'hotkey-btn', 'aria-label': label });
+  const draw = (v) => btn.replaceChildren(...(v ? show(v).split('+').map((k) => h('kbd', { class: 'key' }, k)) : [h('span', { class: 'muted' }, 'Click to set')]));
+  btn.onclick = () => {
+    if (btn.classList.contains('listening')) return;
+    btn.classList.add('listening');
+    btn.replaceChildren(h('span', {}, clearable ? 'Press a key… (Esc clears)' : 'Press a key… (Esc cancels)'));
+    const done = () => {
+      btn.classList.remove('listening');
+      window.removeEventListener('keydown', onKey, true);
+      btn.removeEventListener('blur', done);
+      draw(value);
+    };
+    const onKey = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'Escape' && !clearable) return done();
+      const v = e.key === 'Escape' ? '' : read(e);
+      if (v == null) return; // a modifier on its own
+      value = v;
+      onSet(v);
+      done();
+    };
+    window.addEventListener('keydown', onKey, true);
+    btn.addEventListener('blur', done);
+  };
+  draw(value);
+  return btn;
+}
+
+// Marks under a slider: [[fraction of the track, label]]
+function rangeTicks(marks) {
+  return h('div', { class: 'range-ticks', 'aria-hidden': 'true' }, marks.map(([at, label]) => h('span', { style: { left: at * 100 + '%' }, class: at === 0 ? 'first' : at === 1 ? 'last' : '' }, label)));
+}
+
+// An empty list: an icon, a line, a line of help and at most one action
+function emptyState(iconName, title, help, action) {
+  return h('div', { class: 'empty' }, iconName ? icon(iconName, 'empty-icon') : null, h('strong', {}, title), help ? h('span', { class: 'muted small' }, help) : null, action || null);
 }
 
 // ---------------------------------------------------------------- images (avatars, backgrounds, icons)
@@ -1337,19 +1717,24 @@ function profilePopover(anchor, u, align = 'right') {
   const doing = live ? [...activityParts({ ...live, camera: false, game: null }), game].filter(Boolean) : [game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '')].filter(Boolean);
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
   const roles = rolesOf(p.id);
+  // Moderation sits behind "More", so Ban is never one stray click from Message (D72)
+  const more = other ? memberItems(p.id, anchor, align).filter((it) => it !== '-') : [];
   const pop = popover(
     anchor,
     h(
       'div',
-      { class: 'profile-card' },
+      { class: 'profile-card', role: 'dialog', 'aria-label': p.name },
       profileCardHead(p, [doing.length ? h('div', { class: 'small pc-doing' }, doing) : null, roles.length ? h('div', { class: 'role-tags' }, roles.map(roleTag)) : null]),
       other
         ? h(
             'div',
             { class: 'pc-actions' },
-            h('button', { class: 'btn small', onclick: () => (pop.close(), openDm(p.id)) }, 'Message'),
-            can('kick') && canActOn(p.id) && h('button', { class: 'btn small ghost', onclick: () => (pop.close(), removePrompt(p.id)) }, 'Remove'),
-            can('ban') && canActOn(p.id) && !isBanned(p.id) && h('button', { class: 'btn small ghost danger', onclick: () => (pop.close(), banPrompt(p.id)) }, 'Ban')
+            h('button', { class: 'btn small grow', onclick: () => (pop.close(), openDm(p.id)) }, 'Message'),
+            more.length ? h('button', { class: 'icon-btn outline', title: `More for ${p.name}`, onclick: (e) => {
+                      // Where the button is now: the card closes when the menu opens, and the row it came from may be redrawn
+                      const r = e.currentTarget.getBoundingClientRect();
+                      menuPopover({ getBoundingClientRect: () => r, contains: () => false }, memberItems(p.id, anchor, align), { align: 'end', label: p.name });
+                    } }, icon('more')) : null
           )
         : null
     ),
@@ -1408,15 +1793,24 @@ function profileEditor(p) {
     ),
     h(
       'div',
-      { class: 'banner-edit' },
-      h('div', { class: 'field' }, h('span', {}, 'Profile background'), card),
+      { class: 'field banner-edit' },
+      h('span', {}, 'Profile background'),
       h(
         'div',
-        { class: 'row tight' },
-        imageChoices({ size: IMG.banner, dropOn: [card], onPick: (v) => ((draft.banner = v), refresh()) }),
-        bannerColor,
-        h('button', { class: 'btn small ghost danger', onclick: () => ((draft.banner = ''), refresh()) }, 'Remove'),
-        h('span', { class: 'muted small' }, 'Image, GIF or color. Shown when friends click your name.')
+        { class: 'banner-grid' },
+        card,
+        h(
+          'div',
+          { class: 'banner-controls' },
+          h(
+            'div',
+            { class: 'row tight' },
+            imageChoices({ size: IMG.banner, dropOn: [card], onPick: (v) => ((draft.banner = v), refresh()) }),
+            bannerColor,
+            h('button', { class: 'btn small ghost danger', onclick: () => ((draft.banner = ''), refresh()) }, 'Remove')
+          ),
+          h('span', { class: 'muted small' }, 'Image, GIF or color. Shown when friends click your name. You can also drop an image on the card.')
+        )
       )
     )
   );
@@ -1461,8 +1855,10 @@ function welcome() {
     ),
     {
       dismissable: false,
+      wide: true,
+      className: 'auto-height',
       actions: [
-        h('button', { class: 'btn ghost', onclick: () => importInput.click() }, 'Import profile…'),
+        h('button', { class: 'btn ghost side', onclick: () => importInput.click() }, 'Import profile…'),
         h(
           'button',
           {
@@ -1474,7 +1870,7 @@ function welcome() {
               boot();
             },
           },
-          'Save profile'
+          'Create profile'
         ),
       ],
     }
@@ -1519,7 +1915,7 @@ function renderRail() {
               class: 'rail-server rail-dm' + (S.channelId === 'dm:' + c.id ? ' active' : '') + (userMuted(c.id) ? ' silenced' : ''),
               title: c.name + (DM.online(c.id) ? '' : ' (offline)') + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
               onclick: () => selectChannel('dm:' + c.id),
-              oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
+              oncontextmenu: (e) => contextMenu(e, dmItems(c), c.name),
             },
             avatarEl(c, 44),
             h('span', { class: 'presence' + (DM.online(c.id) ? '' : ' off') }),
@@ -1542,14 +1938,20 @@ function renderRail() {
           title: `${label}\n${s.address}` + (isUnencrypted(s.address) ? '\nNot encrypted' : '') + (calling ? '\nYou’re in voice here' : '') + (muted ? '\nNotifications muted' : '') + (mentions ? `\n${mentions} unread mention${mentions > 1 ? 's' : ''}` : ''),
           onclick: () => connectTo(s),
           oncontextmenu: (e) =>
-            contextMenu(e, [
-              { label: muted ? 'Unmute notifications' : 'Mute notifications', run: () => toggleServerMute(s.id) },
-              { label: 'Edit', run: () => serverDialog(s) },
-              active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
-              calling && { label: 'Leave voice', run: leaveVoice },
-              active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
-              { label: 'Remove', danger: true, run: async () => (await leaveServer(s), active && disconnect(true), S.call?.entry.id === s.id && leaveVoice(), servers.remove(s.id), mentionUnread.clear(s.id), DM.setServers(servers.all()), renderRail()) },
-            ]),
+            contextMenu(
+              e,
+              [
+                { label: 'Mute notifications', checked: muted, run: () => toggleServerMute(s.id) },
+                { label: 'Edit…', run: () => serverDialog(s) },
+                active && S.connected && canSeeServerSettings() && { label: 'Server settings…', run: () => openServerSettings() },
+                '-',
+                calling && { label: 'Leave voice', run: leaveVoice },
+                active && S.connected && { label: 'Disconnect', run: () => disconnect(true) },
+                '-',
+                { label: 'Remove server…', danger: true, run: () => removeServer(s) },
+              ],
+              label
+            ),
         },
         s.serverIcon ? h('img', { class: 'rail-icon', src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(label),
         calling ? h('span', { class: 'rail-call', html: I.speaker }) : null,
@@ -1560,6 +1962,69 @@ function renderRail() {
     h('button', { class: 'rail-add', title: 'Connect to a server', onclick: () => serverDialog() }, icon('plus'))
   );
   syncBadge();
+}
+
+// Leave a server and drop its bookmark (and the invite in it): asked first, since getting back can need a new invite
+async function removeServer(s) {
+  const label = serverLabel(s);
+  if (!(await confirmModal(`Remove ${label}`, `Leave ${label} and take it off your list? You’ll need an invite to join again, unless the server lets anyone in.`, 'Remove server'))) return;
+  const active = S.entry?.id === s.id;
+  await leaveServer(s);
+  if (active) disconnect(true);
+  if (S.call?.entry.id === s.id) leaveVoice();
+  servers.remove(s.id);
+  mentionUnread.clear(s.id);
+  DM.setServers(servers.all());
+  renderRail();
+}
+
+// A DM conversation's menu: in the rail and the DM list
+function dmItems(c) {
+  const free = !DMCALL.with(c.id);
+  return [
+    free && { label: 'Start a voice call', icon: 'phone', run: () => startDmCall(c.id) },
+    free && { label: 'Start a video call', icon: 'cam', run: () => startDmCall(c.id, true) },
+    userMuteItem(c.id, c.name),
+    '-',
+    { label: 'Delete conversation…', danger: true, run: () => deleteConversation(c.id) },
+  ];
+}
+
+// Everything a menu on a person offers, in the same order everywhere (D72): who it is, your own
+// choices about them, then moderation, then what can't be undone. `u` is a live user or a profile.
+function personItems(u, anchor, { align = 'right', mention = false } = {}) {
+  const self = u.id === me().id;
+  const live = S.users.find((x) => x.id === u.id) || u;
+  const name = profileOf(u.id, u.name).name;
+  return [
+    { heading: name },
+    { label: 'Profile', run: () => profilePopover(anchor, live, align) },
+    ...(self
+      ? [{ label: 'Edit profile…', run: () => openSettings('profile') }]
+      : [
+          { label: 'Message', run: () => openDm(u.id) },
+          mention && !inDmView() && S.connected && { label: 'Mention', run: () => mentionInComposer(u.id, name) },
+          live.sid && inCall(live.voice) && { label: 'Volume…', run: () => userVolumePopover(anchor, live, align) },
+          userMuteItem(u.id, name),
+        ]),
+    '-',
+    ...memberItems(u.id, anchor, align),
+  ];
+}
+
+// "@name " where the cursor is in the composer
+function mentionInComposer(id, name) {
+  const ta = $('#composer-input');
+  if (!ta) return;
+  const tag = nameTag(id, name);
+  const text = `@${name}${tag ? '#' + tag : ''} `;
+  const at = ta.selectionStart ?? ta.value.length;
+  const pre = ta.value.slice(0, at);
+  const add = (pre && !/\s$/.test(pre) ? ' ' : '') + text;
+  ta.value = pre + add + ta.value.slice(ta.selectionEnd ?? at);
+  ta.setSelectionRange(at + add.length, at + add.length);
+  autosize(ta);
+  ta.focus();
 }
 
 function serverDialog(existing) {
@@ -1594,7 +2059,7 @@ function serverDialog(existing) {
       plain,
       h('label', { class: 'field' }, h('span', {}, 'Invite'), pass)
     ),
-    { actions: [(c) => ((button.onclick = () => save(c)), button)] }
+    { actions: [(c) => h('button', { class: 'btn ghost', onclick: () => c() }, 'Cancel'), (c) => ((button.onclick = () => save(c)), button)] }
   );
 }
 
@@ -1654,7 +2119,7 @@ function connectTo(entry, { rejoinVoice = null } = {}) {
   desktop.trustServer(entry.address).then((ok) => {
     if (S.entry !== entry || S.conn) return; // switched servers meanwhile
     if (ok) openSocket(entry, rejoinVoice);
-    else renderMain(`Not connected: you didn't trust the certificate of ${entry.address}. Click the server to try again.`);
+    else renderMain(`You didn't trust the certificate of ${entry.address}.`);
   });
 }
 
@@ -2267,46 +2732,51 @@ function renderChannels() {
   const chMenu = (ch) => (e) => {
     const list = ch.type === 'text' ? text : voice;
     const at = list.indexOf(ch);
-    const items = [
-      ch.type === 'text' && S.server.storage && { label: 'Browse files', run: () => openFileBrowser(ch.id) },
-      canCh(ch.id, 'manage') && {
-        label: 'Rename',
-        run: async () => {
-          const n = await channelDialog('Rename channel', ch.name);
-          if (n) doAct('channel:rename', { id: ch.id, name: n });
+    const manage = canCh(ch.id, 'manage');
+    const unread = S.unread.has(ch.id) || mentionUnread.channel(S.entry.id, ch.id);
+    const video = ch.type === 'voice' && S.users.some((u) => u.voice === ch.id && (u.camera || u.sharing));
+    contextMenu(
+      e,
+      [
+        ch.type === 'text' && unread && { label: 'Mark as read', run: () => (S.unread.delete(ch.id), mentionUnread.clear(S.entry.id, ch.id), renderRail(), renderChannels()) },
+        ch.type === 'text' && S.server.storage && { label: 'Browse files', run: () => openFileBrowser(ch.id) },
+        ch.type === 'voice' && !inCall(ch.id) && canCh(ch.id, 'send') && { label: 'Join', run: () => joinVoice(ch.id) },
+        video && { label: 'Open video', run: () => openVideoGrid(ch.id) },
+        '-',
+        manage && {
+          label: 'Rename…',
+          run: async () => {
+            const n = await channelDialog('Rename channel', ch.name, { okLabel: 'Rename channel', type: ch.type });
+            if (n) doAct('channel:rename', { id: ch.id, name: n });
+          },
         },
-      },
-      canCh(ch.id, 'manage') && hasPerms() && { label: 'Permissions…', run: () => channelPermsDialog(ch) },
-      canCh(ch.id, 'manage') && at > 0 && { label: 'Move up', run: () => moveChannel(ch, list[at - 1]) },
-      canCh(ch.id, 'manage') && at < list.length - 1 && { label: 'Move down', run: () => moveChannel(ch, list[at + 2]) },
-      canCh(ch.id, 'manage') && {
-        label: 'Delete',
-        danger: true,
-        run: async () => (await confirmModal('Delete channel', `Delete "${ch.name}" and its history?`)) && doAct('channel:delete', { id: ch.id }),
-      },
-    ];
-    if (items.some(Boolean)) contextMenu(e, items);
-    else e.preventDefault();
+        manage && hasPerms() && { label: 'Permissions…', run: () => channelPermsDialog(ch) },
+        manage && at > 0 && { label: 'Move up', run: () => moveChannel(ch, list[at - 1]) },
+        manage && at < list.length - 1 && { label: 'Move down', run: () => moveChannel(ch, list[at + 2]) },
+        '-',
+        manage && {
+          label: 'Delete channel…',
+          danger: true,
+          run: async () => (await confirmModal('Delete channel', `Delete "${ch.name}" and its history?`, 'Delete channel')) && doAct('channel:delete', { id: ch.id }),
+        },
+      ],
+      (ch.type === 'text' ? '#' : '') + ch.name
+    );
   };
+  const createChannel = async (type) => {
+    const name = await channelDialog(`Create ${type} channel`, '', { okLabel: 'Create channel', type });
+    if (!name) return;
+    const r = await doAct('channel:create', { name, type });
+    if (r.ok && type === 'text') selectChannel(r.channel.id);
+  };
+  // Rows are reached with Tab; Enter and Space act as a click, the menu key or Shift+F10 open the menu
+  const rowKeys = (e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), e.currentTarget.click());
   const cat = (label, type) =>
     h(
       'div',
-      { class: 'cat' },
+      { class: 'cat', oncontextmenu: (e) => contextMenu(e, [can('manageChannels') && { label: `Create ${type} channel…`, run: () => createChannel(type) }], label) },
       h('span', {}, label),
-      !can('manageChannels') ? null : h(
-        'button',
-        {
-          class: 'icon-btn tiny',
-          title: 'Create channel',
-          onclick: async () => {
-            const name = await channelDialog(`New ${type} channel`);
-            if (!name) return;
-            const r = await doAct('channel:create', { name, type });
-            if (r.ok && type === 'text') selectChannel(r.channel.id);
-          },
-        },
-        icon('plus')
-      )
+      !can('manageChannels') ? null : h('button', { class: 'icon-btn tiny', title: `Create ${type} channel`, onclick: () => createChannel(type) }, icon('plus'))
     );
   box.replaceChildren(
     cat('Text channels', 'text'),
@@ -2315,6 +2785,10 @@ function renderChannels() {
         'div',
         {
           class: 'channel' + (ch.id === S.channelId ? ' active' : '') + (S.unread.has(ch.id) ? ' unread' : '') + (mentionUnread.channel(S.entry.id, ch.id) ? ' mentioned' : ''),
+          role: 'link',
+          tabindex: 0,
+          'aria-current': ch.id === S.channelId ? 'page' : null,
+          onkeydown: rowKeys,
           onclick: () => selectChannel(ch.id),
           oncontextmenu: chMenu(ch),
           ...channelDrag(ch, text),
@@ -2334,6 +2808,9 @@ function renderChannels() {
           {
             class: 'channel voice' + (inCall(ch.id) ? ' connected' : '') + (video ? ' has-video' : '') + (canCh(ch.id, 'send') ? '' : ' locked'),
             'data-watch': video ? 'ch:' + ch.id : null, // the hover card with "Start watching"
+            role: 'button',
+            tabindex: 0,
+            onkeydown: rowKeys,
             onclick: () => (canCh(ch.id, 'send') ? joinVoice(ch.id) : toast('You don’t have permission to join this voice channel', 'error')),
             oncontextmenu: chMenu(ch),
             ...channelDrag(ch, voice),
@@ -2376,7 +2853,7 @@ function dmSidebar() {
           class: 'channel dm' + ('dm:' + c.id === S.channelId ? ' active' : '') + (c.unread ? ' unread' : ''),
           title: c.name + (DM.gameOf(c.id) ? '\n' + playingText(DM.gameOf(c.id)) : '') + (userMuted(c.id) ? '\nNotifications muted' : ''),
           onclick: () => selectChannel('dm:' + c.id),
-          oncontextmenu: (e) => contextMenu(e, [userMuteItem(c.id, c.name), { label: 'Delete conversation', danger: true, run: () => deleteConversation(c.id) }]),
+          oncontextmenu: (e) => contextMenu(e, dmItems(c), c.name),
         },
         h('div', { class: 'member-av' }, avatarEl(c, 20), h('span', { class: 'presence' + (DM.online(c.id) ? '' : ' off') })),
         h('span', { class: 'name' }, c.name),
@@ -2390,7 +2867,7 @@ function dmSidebar() {
 
 async function removePrompt(profileId) {
   const name = profileOf(profileId).name;
-  if (!(await confirmModal(`Remove ${name}`, `Disconnect ${name} and take them off the member list? They can come back unless you ban them.`, 'Remove'))) return;
+  if (!(await confirmModal(`Remove ${name}`, `Disconnect ${name} and take them off the member list? They can come back unless you ban them.`, `Remove ${name}`))) return;
   await doAct('member:remove', { profileId });
 }
 
@@ -2405,13 +2882,15 @@ async function banPrompt(profileId) {
         'div',
         {},
         h('p', {}, `${name} will be disconnected and can't come back with this profile. People who can ban can lift it in Server settings → Bans.`),
-        h('label', { class: 'field inline' }, withIp, h('span', {}, 'Also ban their IP address')),
+        h('label', { class: 'check-row' }, withIp, h('span', {}, 'Also ban their IP address')),
         h('p', { class: 'muted small' }, 'A new profile gets around a profile ban. The IP ban is skipped when they share your network.')
       ),
       {
+        size: 'sm',
+        alert: true,
         actions: [
           h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'),
-          h('button', { class: 'btn danger', onclick: () => ((done = true), close(), resolve(true)) }, 'Ban'),
+          h('button', { class: 'btn danger', onclick: () => ((done = true), close(), resolve(true)) }, `Ban ${name}`),
         ],
         onClose: () => !done && resolve(false),
       }
@@ -2424,10 +2903,13 @@ async function banPrompt(profileId) {
 }
 
 // Name a channel; the emoji button inserts unicode or :custom: server emojis
-function channelDialog(title, value = '') {
+// `okLabel` names the action ("Create channel", "Rename channel"); `type` picks the field's icon
+function channelDialog(title, value = '', { okLabel = 'Save', type = 'text' } = {}) {
   return new Promise((resolve) => {
     let done = false;
-    const input = h('input', { value, maxlength: 48, placeholder: 'e.g. 🎮-gaming', onkeydown: (e) => e.key === 'Enter' && ok() });
+    const count = h('span', { class: 'field-count' });
+    const input = h('input', { value, maxlength: 48, placeholder: 'e.g. 🎮-gaming', onkeydown: (e) => e.key === 'Enter' && ok(), oninput: () => (count.textContent = `${[...input.value].length} / 48`) });
+    count.textContent = `${[...value].length} / 48`;
     const ok = () => {
       if (!input.value.trim()) return toast('Enter a channel name', 'error');
       done = true;
@@ -2442,13 +2924,15 @@ function channelDialog(title, value = '') {
         h('span', {}, 'Channel name'),
         h(
           'div',
-          { class: 'input-with-btn' },
+          { class: 'input-with-btn input-box' },
+          icon(type === 'voice' ? 'speaker' : 'hash', 'input-icon'),
           input,
           h('button', { class: 'icon-btn', title: 'Add an emoji', onclick: (e) => (e.preventDefault(), openEmojiPicker(e.currentTarget, { mode: 'insert', target: input })) }, icon('smile'))
-        )
+        ),
+        count
       ),
       {
-        actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, 'Save')],
+        actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn', onclick: ok }, okLabel)],
         onClose: () => (closePopover(), !done && resolve(null)),
       }
     );
@@ -2494,12 +2978,11 @@ function voiceUserEl(u) {
       'data-sid': u.sid,
       'data-watch': u.sharing || u.camera ? 'u:' + u.sid : null,
       title: peer && !isMe && !u.sharing && !u.camera ? `connection: ${peer.state}` : '', // a streamer's row has the hover card instead
+      role: 'button',
+      tabindex: 0,
+      onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), e.currentTarget.click()),
       onclick: (e) => (!isMe && together ? userVolumePopover(e.currentTarget, u) : profilePopover(e.currentTarget, u)),
-      oncontextmenu: (e) => {
-        const el = e.currentTarget;
-        if (isMe && !memberItems(u.id, el).length) return e.preventDefault();
-        contextMenu(e, [...(isMe ? [] : [together && { label: 'Volume…', run: () => userVolumePopover(el, u) }, userMuteItem(u.id, u.name)]), ...memberItems(u.id, el)]);
-      },
+      oncontextmenu: (e) => contextMenu(e, personItems(u, e.currentTarget), u.name),
     },
     avatarEl(u, 24),
     h('span', { class: 'name' }, u.name),
@@ -2555,7 +3038,7 @@ function userVolumePopover(anchor, u, align = 'right') {
     onchange: renderChannels, // the badge next to their name
     ondblclick: () => reset(),
   });
-  const muteBtn = h('button', { class: 'btn small ghost', onclick: () => (apply({ userMutes: { ...settings.get().userMutes, [u.id]: !settings.get().userMutes[u.id] } }), renderChannels()) });
+  const muteBtn = h('button', { class: 'btn small ghost outline', onclick: () => (apply({ userMutes: { ...settings.get().userMutes, [u.id]: !settings.get().userMutes[u.id] } }), renderChannels()) });
   const resetBtn = h('button', { class: 'btn small ghost', onclick: () => reset() }, 'Reset');
   const draw = () => {
     const st = settings.get();
@@ -2563,8 +3046,9 @@ function userVolumePopover(anchor, u, align = 'right') {
     const muted = !!st.userMutes[u.id];
     slider.value = v;
     slider.classList.toggle('boost', v > 1);
-    val.textContent = Math.round(v * 100) + '%' + (muted ? ' (muted)' : v > 1 ? ' (boosted)' : '');
-    muteBtn.textContent = muted ? 'Unmute' : 'Mute';
+    val.textContent = muted ? 'muted' : Math.round(v * 100) + '%';
+    val.classList.toggle('boost', v > 1 && !muted);
+    muteBtn.textContent = muted ? 'Unmute for me' : 'Mute for me';
     resetBtn.disabled = v === 1;
   };
   const apply = (patch) => {
@@ -2578,9 +3062,15 @@ function userVolumePopover(anchor, u, align = 'right') {
     anchor,
     h(
       'div',
-      { class: 'user-pop' },
-      h('div', { class: 'profile-card' }, profileCardHead(fullProfile(u))),
-      h('label', { class: 'field' }, h('span', {}, 'User volume ', val), slider),
+      { class: 'user-pop', role: 'dialog', 'aria-label': `${u.name}’s volume` },
+      h(
+        'div',
+        { class: 'user-pop-head' },
+        avatarEl(u, 36),
+        h('div', { class: 'grow' }, h('strong', {}, u.name), h('div', { class: 'muted small' }, u.voice && channelById(u.voice) ? 'In ' + channelById(u.voice).name : ''))
+      ),
+      h('label', { class: 'field' }, h('span', { class: 'field-head' }, 'User volume', val), slider),
+      rangeTicks([[0, '0'], [1 / MAX_USER_VOLUME, '100%'], [1, Math.round(MAX_USER_VOLUME * 100) + '%']]),
       h('div', { class: 'row' }, muteBtn, resetBtn),
       h('p', { class: 'muted small' }, 'Only changes what you hear.')
     ),
@@ -2821,38 +3311,16 @@ function renderUserPanel() {
 
 function profileSwitcher(anchor) {
   const cur = me();
-  const pop = popover(
+  menuPopover(
     anchor,
-    h(
-      'div',
-      { class: 'menu profiles-menu' },
-      h('div', { class: 'menu-label' }, 'Profiles on this device'),
-      profiles.all().map((p) =>
-        h(
-          'button',
-          { class: 'menu-item profile-item' + (p.id === cur.id ? ' current' : ''), onclick: () => (pop.close(), switchProfile(p.id)) },
-          avatarEl(p, 24),
-          h('span', {}, p.name),
-          p.id === cur.id ? h('span', { class: 'check' }, '✓') : null
-        )
-      ),
-      h('div', { class: 'menu-sep' }),
-      h('button', { class: 'menu-item', onclick: () => (pop.close(), openSettings('profile')) }, 'Edit profile…'),
-      h(
-        'button',
-        {
-          class: 'menu-item',
-          onclick: () => {
-            pop.close();
-            const p = profiles.create({ name: 'new friend' });
-            switchProfile(p.id);
-            openSettings('profile');
-          },
-        },
-        'New profile'
-      )
-    ),
-    { align: 'start' }
+    [
+      { heading: 'Profiles on this device' },
+      ...profiles.all().map((p) => ({ label: p.name, avatar: p, selected: p.id === cur.id, run: () => p.id !== cur.id && switchProfile(p.id) })),
+      '-',
+      { label: 'Edit profile…', run: () => openSettings('profile') },
+      { label: 'New profile', run: () => (switchProfile(profiles.create({ name: 'new friend' }).id), openSettings('profile')) },
+    ],
+    { label: 'Profiles' }
   );
 }
 
@@ -2891,22 +3359,20 @@ function renderMembers() {
     .map(([pid, p]) => ({ ...p, id: pid, offline: true }))
     .sort(byName);
   const hideOffline = settings.get().hideOffline;
-  const menu = (u) => (e) => {
-    const el = e.currentTarget;
-    const mine = u.id === me().id;
-    const rest = memberItems(u.id, el, 'left');
-    if (mine && !rest.length) return;
-    contextMenu(e, [
-      ...(mine ? [] : [inCall(u.voice) && { label: 'Volume…', run: () => userVolumePopover(el, u, 'left') }, { label: 'Message', run: () => openDm(u.id) }, userMuteItem(u.id, u.name)]),
-      ...rest,
-    ]);
-  };
+  const menu = (u) => (e) => contextMenu(e, personItems(u, e.currentTarget, { align: 'left', mention: true }), u.name);
   const row = (u) => {
     const roles = rolesOf(u.id);
     const doing = activityParts(u);
     return h(
       'div',
-      { class: 'member' + (u.offline ? ' offline' : ''), onclick: (e) => profilePopover(e.currentTarget, u, 'left'), oncontextmenu: menu(u) },
+      {
+        class: 'member' + (u.offline ? ' offline' : ''),
+        role: 'button',
+        tabindex: 0,
+        onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), e.currentTarget.click()),
+        onclick: (e) => profilePopover(e.currentTarget, u, 'left'),
+        oncontextmenu: menu(u),
+      },
       h('div', { class: 'member-av' }, avatarEl(u, 32), h('span', { class: 'presence' + (u.offline ? ' off' : '') })),
       h(
         'div',
@@ -2958,17 +3424,34 @@ function renderMain(error) {
   search = null; // and the search field with the header
   if (!inDmView() && (!S.entry || (!S.connected && !S.server))) {
     const list = servers.all();
+    const e = S.entry;
+    const serverIcon = (s) => h('span', { class: 'home-server-icon' }, s.serverIcon ? h('img', { src: s.serverIcon, alt: '', referrerpolicy: 'no-referrer' }) : initials(serverLabel(s)));
     main.replaceChildren(
       h(
         'div',
         { class: 'home' },
         h('div', { class: 'home-logo' }, 'friendspeak'),
-        S.entry && !error ? h('div', { class: 'home-loading' }, spinner(true)) : null,
-        S.entry
-          ? h('p', { class: error ? 'error-text' : 'muted' }, error || `Connecting to ${S.entry.address}…`)
-          : h('p', { class: 'muted' }, 'Text, voice, GIFs and soundboards with your friends. Connect to a server by IP.'),
-        h('div', { class: 'home-actions' }, h('button', { class: 'btn big', onclick: () => serverDialog() }, 'Connect to a server')),
-        list.length
+        // Connecting, or it failed: say so, with a way out (D72)
+        e && !error ? [h('div', { class: 'home-loading' }, spinner(true)), h('p', { class: 'muted', role: 'status' }, `Connecting to ${e.address}…`), h('div', { class: 'home-actions' }, h('button', { class: 'btn ghost', onclick: () => disconnect(true) }, 'Cancel'))] : null,
+        e && error
+          ? h(
+              'div',
+              { class: 'home-error', role: 'alert' },
+              icon(/Retrying/.test(error) ? 'warn' : 'errorCircle', 'empty-icon'),
+              h('strong', {}, /Retrying/.test(error) ? 'Reconnecting' : 'Not connected'),
+              h('p', { class: 'muted' }, error),
+              h(
+                'div',
+                { class: 'row center-row' },
+                /Retrying/.test(error) ? null : h('button', { class: 'btn small', onclick: () => connectTo(e) }, 'Try again'),
+                h('button', { class: 'btn small ghost', onclick: () => serverDialog(e) }, 'Edit server'),
+                h('button', { class: 'btn small ghost', onclick: () => disconnect(true) }, 'Cancel')
+              )
+            )
+          : null,
+        e ? null : h('p', { class: 'muted' }, 'Text, voice, GIFs and soundboards with your friends. Connect to a server by IP.'),
+        e ? null : h('div', { class: 'home-actions' }, h('button', { class: 'btn big', onclick: () => serverDialog() }, 'Connect to a server')),
+        !e && list.length
           ? h(
               'div',
               { class: 'home-servers' },
@@ -2977,13 +3460,14 @@ function renderMain(error) {
                 h(
                   'button',
                   { class: 'home-server', onclick: () => connectTo(s) },
+                  serverIcon(s),
                   h('strong', {}, s.serverName || 'Server'),
                   h('span', { class: 'muted' }, s.address)
                 )
               )
             )
           : null,
-        h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server and connect to it here.')
+        e ? null : h('p', { class: 'muted small hosting' }, 'Hosting? Run the friendspeak server and connect to it here.')
       )
     );
     return;
@@ -3016,6 +3500,12 @@ function renderMain(error) {
   main.ondragover = (e) => {
     if (!hasFiles(e) || !canUpload || !chatById(S.channelId)) return;
     e.preventDefault();
+    if (main.classList.contains('dropping')) return;
+    // Say where the files go, and how much room is left (D72)
+    const st = S.server?.storage;
+    main.dataset.drop = dm
+      ? `Drop to send to ${ch.name}\nImages go straight to ${ch.name}’s device.`
+      : `Drop to upload to #${ch.name}` + (st ? `\n${fmtBytes(Math.max(0, st.max - st.used))} left on this server` : '');
     main.classList.add('dropping');
   };
   main.ondragleave = (e) => !main.contains(e.relatedTarget) && main.classList.remove('dropping');
@@ -3032,7 +3522,7 @@ function renderMain(error) {
       ...chatTitle(ch),
       !S.connected && !dm ? h('span', { class: 'badge warn' }, 'reconnecting…') : null,
       dm ? h('span', { class: 'muted small dm-status' }, dmStatus(ch.with)) : null,
-      dm ? h('button', { class: 'badge warn dm-conflict', hidden: !DM.contacts.get(ch.with)?.conflict, title: 'Messages from a different key are being refused', onclick: () => trustKeyPrompt(ch.with) }, 'different key') : null,
+      dm ? h('button', { class: 'badge warn dm-conflict', hidden: !DM.contacts.get(ch.with)?.conflict, title: 'Messages from a different key are being refused', onclick: () => trustKeyPrompt(ch.with) }, icon('warn'), 'Different key') : null,
       h('div', { class: 'spacer' }),
       dm ? h('div', { class: 'dm-call-btns' }) : null,
       searchBox(ch),
@@ -3065,7 +3555,29 @@ function renderMain(error) {
         fileIn,
         ta,
         h('button', { class: 'icon-btn gif-btn', title: 'GIFs', onclick: (e) => openGifPicker(e.currentTarget) }, 'GIF'),
-        h('button', { class: 'icon-btn', title: 'Emoji', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'insert' }) }, icon('smile'))
+        h('button', { class: 'icon-btn emoji-btn', title: 'Emoji', onclick: (e) => openEmojiPicker(e.currentTarget, { mode: 'insert' }) }, icon('smile')),
+        // A narrow composer (a small window) has no room for its buttons: they move into this menu (D72)
+        h(
+          'button',
+          {
+            class: 'icon-btn composer-more',
+            title: 'Add to message',
+            onclick: (e) => {
+              const b = e.currentTarget;
+              menuPopover(
+                b,
+                [
+                  canUpload && { label: dm ? 'Send images' : 'Upload a file', icon: 'upload', run: () => fileIn.click() },
+                  { label: 'GIF', icon: 'image', run: () => openGifPicker(b) },
+                  { label: 'Emoji', icon: 'smile', run: () => openEmojiPicker(b, { mode: 'insert' }) },
+                  { label: 'Soundboard', icon: 'board', run: () => openSoundboard(b) },
+                ],
+                { align: 'end', label: 'Add to message' }
+              );
+            },
+          },
+          icon('plus')
+        )
       ),
       h('div', { id: 'typing', class: 'typing' })
     )
@@ -3219,14 +3731,35 @@ function messageEl(m, prev) {
   const replied = m.replyTo && S.messages.get(S.channelId)?.find((x) => x.id === m.replyTo);
 
   const reactions = Object.entries(m.reactions || {});
-  const authorMenu = (e) => !m.note && !mine && contextMenu(e, [userMuteItem(m.author, author.name), ...memberItems(m.author, e.currentTarget)]);
+  const authorMenu = (e) => !m.note && contextMenu(e, personItems({ ...author, id: m.author }, e.currentTarget, { align: 'right', mention: true }), author.name);
+  const canDelete = mine || m.note || (hasPerms() && !inDmView() && can('manageMessages'));
+  // Right-click on a message: the hover bar's actions and Copy text (D72)
+  const msgMenu = (e) => {
+    if (e.defaultPrevented) return; // the author's own menu
+    const el = e.currentTarget;
+    contextMenu(
+      e,
+      [
+        !m.note && { label: 'Add reaction', icon: 'addReact', run: () => openEmojiPicker(el.querySelector('.msg-actions button') || el, { mode: 'react', messageId: m.id }) },
+        !m.note && { label: 'Reply', icon: 'reply', run: () => setReply(m) },
+        m.text && { label: 'Copy text', run: () => navigator.clipboard.writeText(m.text).then(() => toast('Text copied', 'success')) },
+        inServer && S.server.id && { label: 'Copy message link', icon: 'link', run: () => copyMessageLink(m) },
+        mine && m.text && !m.note && { label: 'Edit', icon: 'edit', run: () => editMessage(m) },
+        '-',
+        canDelete && { label: 'Delete message…', icon: 'trash', danger: true, run: () => deleteMessageAsk(m, false) },
+      ],
+      'Message'
+    );
+  };
   return h(
     'div',
     {
       class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : '') + (m.mailed ? ' mailed' : '') + (m.note ? ' note' : ''),
       'data-id': m.id,
       'data-ts': m.ts,
+      hidden: deleting.has(m.id),
       title: m.mailed ? 'Waiting in their mailbox' : m.pending ? 'Not delivered yet' : null,
+      oncontextmenu: msgMenu,
     },
     m.replyTo
       ? h(
@@ -3297,21 +3830,28 @@ function messageEl(m, prev) {
       m.note ? null : h('button', { title: 'Reply', onclick: () => setReply(m) }, icon('reply')),
       inServer && S.server.id ? h('button', { title: 'Copy message link', onclick: () => copyMessageLink(m) }, icon('link')) : null,
       mine && m.text && !m.note ? h('button', { title: 'Edit', onclick: () => editMessage(m) }, icon('edit')) : null,
-      mine || m.note || (hasPerms() && !inDmView() && can('manageMessages'))
-        ? h(
-            'button',
-            {
-              title: 'Delete',
-              class: 'danger',
-              onclick: async (e) =>
-                (e.shiftKey || (await confirmModal('Delete message', 'Delete this message? (Tip: shift-click to skip this)'))) &&
-                (inDmView() ? DM.deleteMessage(peerOf(S.channelId), m.id) : doAct('msg:delete', { channelId: S.channelId, messageId: m.id })),
-            },
-            icon('trash')
-          )
-        : null
+      canDelete ? h('button', { title: 'Delete (Shift-click: at once, with Undo)', class: 'danger', onclick: (e) => deleteMessageAsk(m, e.shiftKey) }, icon('trash')) : null
     )
   );
+}
+
+// Delete a message: asked first, or at once with Shift, then with an Undo for a few seconds before
+// it is sent (D72). The socket and channel are the ones in view now, whatever happens meanwhile.
+const deleting = new Map(); // message id -> timer
+async function deleteMessageAsk(m, quick) {
+  const cid = S.channelId;
+  const peer = inDmView() ? peerOf(cid) : null;
+  const socket = S.socket;
+  const send = () =>
+    peer ? DM.deleteMessage(peer, m.id) : socket?.emitWithAck('msg:delete', { channelId: cid, messageId: m.id }).then((r) => r?.error && toast(r.error, 'error'));
+  if (!quick) return (await confirmModal('Delete message', 'Delete this message? Tip: Shift-click the trash to delete at once, with an Undo.', 'Delete message')) && send();
+  const shown = (on) => {
+    const el = $(`.msg[data-id="${CSS.escape(m.id)}"]`);
+    if (el) el.hidden = !on;
+  };
+  shown(false);
+  deleting.set(m.id, setTimeout(() => (deleting.delete(m.id), send()), 6000));
+  toast('Message deleted', 'success', 5500, { action: { label: 'Undo', run: () => (clearTimeout(deleting.get(m.id)), deleting.delete(m.id), shown(true)) } });
 }
 
 function renderMessages(keepScroll = false) {
@@ -3444,8 +3984,9 @@ function renderReplyBar() {
   bar.hidden = !S.replyTo;
   if (!S.replyTo) return;
   bar.replaceChildren(
-    h('span', {}, 'Replying to ', h('strong', {}, profileOf(S.replyTo.author, S.replyTo.name).name)),
-    h('button', { class: 'x', onclick: () => ((S.replyTo = null), renderReplyBar()) }, '×')
+    icon('reply', 'reply-icon'),
+    h('span', { class: 'grow' }, 'Replying to ', h('strong', {}, profileOf(S.replyTo.author, S.replyTo.name).name)),
+    h('button', { class: 'icon-btn small', title: 'Cancel reply', onclick: () => ((S.replyTo = null), renderReplyBar(), $('#composer-input')?.focus()) }, icon('close'))
   );
 }
 
@@ -3468,7 +4009,7 @@ function editMessage(m) {
     if (e.key === 'Enter' && !e.shiftKey) (e.preventDefault(), done(true));
     if (e.key === 'Escape') done(false);
   };
-  el.replaceWith(h('div', { class: 'edit-wrap' }, ta, h('div', { class: 'muted small' }, 'escape to cancel • enter to save')));
+  el.replaceWith(h('div', { class: 'edit-wrap' }, ta, h('div', { class: 'edit-hint muted small' }, h('kbd', { class: 'key' }, 'Esc'), ' to cancel', h('kbd', { class: 'key' }, 'Enter'), ' to save')));
   autosize(ta);
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
@@ -3521,32 +4062,39 @@ function updateMentionMenu(ta) {
   mentionMenu = { el, items, index, at, ta };
   drawMentionMenu();
 }
+// Grouped (@everyone, roles, people, channels) with a key hint at the foot (D72)
+const MM_GROUPS = { everyone: 'Everyone', role: 'Roles', user: 'People', channel: 'Channels' };
 function drawMentionMenu() {
   const mm = mentionMenu;
-  mm.el.replaceChildren(
-    ...mm.items.map((c, i) => {
-      if (c.kind === 'channel')
-        return h(
-          'div',
-          { class: 'mm-item' + (i === mm.index ? ' active' : ''), role: 'option', onmousedown: (e) => (e.preventDefault(), insertMention(i)), onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()) },
-          icon('hash', 'mm-hash'),
-          channelNameEl(c.name, S.server?.emojis, 'mm-name')
-        );
-      const p = c.kind === 'user' ? profileOf(c.id) : null;
-      const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : 'var(--muted)';
-      return h(
+  const holders = (id) => Object.values(S.server?.memberRoles || {}).filter((ids) => Array.isArray(ids) && ids.includes(id)).length;
+  const rows = [];
+  mm.items.forEach((c, i) => {
+    if (c.kind !== mm.items[i - 1]?.kind) rows.push(h('div', { class: 'mm-group', role: 'presentation' }, MM_GROUPS[c.kind]));
+    const attrs = {
+      class: 'mm-item' + (i === mm.index ? ' active' : ''),
+      role: 'option',
+      'aria-selected': String(i === mm.index),
+      onmousedown: (e) => (e.preventDefault(), insertMention(i)), // keep the focus in the composer
+      onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()),
+    };
+    if (c.kind === 'channel') return rows.push(h('div', attrs, icon('hash', 'mm-hash'), channelNameEl(c.name, S.server?.emojis, 'mm-name')));
+    const p = c.kind === 'user' ? profileOf(c.id) : null;
+    const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color) ? c.color : 'var(--muted)';
+    const n = c.kind === 'role' ? holders(c.id) : 0;
+    if (p && !isOnline(c.id)) attrs.class += ' offline';
+    rows.push(
+      h(
         'div',
-        {
-          class: 'mm-item' + (i === mm.index ? ' active' : '') + (p && !isOnline(c.id) ? ' offline' : ''),
-          role: 'option',
-          onmousedown: (e) => (e.preventDefault(), insertMention(i)), // keep the focus in the composer
-          onmousemove: () => mm.index !== i && ((mm.index = i), drawMentionMenu()),
-        },
+        attrs,
         p ? avatarEl(p, 20) : h('span', { class: 'mm-dot', style: { background: c.kind === 'role' ? color : 'var(--accent)' } }),
         h('span', { class: 'mm-name' }, '@' + (c.tag ? c.name.slice(0, -c.tag.length - 1) : c.name), c.tag ? h('span', { class: 'name-tag' }, '#' + c.tag) : null),
-        c.kind !== 'user' ? h('span', { class: 'mm-hint muted small' }, c.kind === 'role' ? 'Role' : 'Notify everyone') : null
-      );
-    })
+        h('span', { class: 'mm-hint' }, c.kind === 'role' ? `${n} ${n === 1 ? 'person' : 'people'}` : c.kind === 'everyone' ? 'Notifies everyone' : isOnline(c.id) ? 'online' : 'offline')
+      )
+    );
+  });
+  mm.el.replaceChildren(
+    h('div', { class: 'mm-list' }, rows),
+    h('div', { class: 'mm-foot', 'aria-hidden': 'true' }, h('span', {}, h('kbd', { class: 'key' }, '↑'), h('kbd', { class: 'key' }, '↓'), ' move'), h('span', {}, h('kbd', { class: 'key' }, 'Tab'), ' or ', h('kbd', { class: 'key' }, 'Enter'), ' pick'), h('span', {}, h('kbd', { class: 'key' }, 'Esc'), ' close'))
   );
   mm.el.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
 }
@@ -3707,7 +4255,7 @@ const canDeleteFile = (f) => f.by === me().id || can('manageFiles');
 async function deleteFilesPrompt(files, skipConfirm) {
   if (!files.length) return;
   const what = files.length === 1 ? `"${files[0].name}"` : `${files.length} files`;
-  if (!skipConfirm && !(await confirmModal('Delete file' + (files.length > 1 ? 's' : ''), `Permanently delete ${what} for everyone? This can't be undone.`))) return;
+  if (!skipConfirm && !(await confirmModal('Delete file' + (files.length > 1 ? 's' : ''), `Permanently delete ${what} for everyone? This can't be undone.`, files.length === 1 ? 'Delete file' : `Delete ${files.length} files`))) return;
   await doAct('file:delete', { ids: files.map((f) => f.id) });
 }
 
@@ -3772,8 +4320,8 @@ function renderAttachTray() {
         h(
           'button',
           {
-            class: 'x',
-            title: a.progress != null ? 'Cancel upload' : 'Remove',
+            class: 'icon-btn small attach-x',
+            title: (a.progress != null ? 'Cancel upload of ' : 'Remove ') + a.file.name,
             onclick: () => {
               a.xhr?.abort();
               if (a.preview) URL.revokeObjectURL(a.preview);
@@ -3781,7 +4329,7 @@ function renderAttachTray() {
               renderAttachTray();
             },
           },
-          '×'
+          icon('close')
         )
       );
     }),
@@ -3819,6 +4367,7 @@ function uploadFile(a, channelId) {
   });
 }
 
+const lightboxArgs = new WeakMap(); // an image in a message -> [url, file]: what the lightbox shows for it
 function attachmentEl(f) {
   const url = fileUrl(f);
   const kind = fileKind(f.type);
@@ -3831,7 +4380,11 @@ function attachmentEl(f) {
       h('div', { class: 'file-meta' }, h('a', { href: '#', class: 'file-name', title: f.name, onclick: (e) => (e.preventDefault(), downloadFile(f)) }, f.name), h('span', { class: 'muted small' }, fmtBytes(f.size))),
       h('button', { class: 'icon-btn', title: 'Download', onclick: () => downloadFile(f) }, icon('download'))
     );
-  if (kind === 'image') return h('div', { class: 'attachment media' }, h('img', { src: url, alt: f.name, loading: 'lazy', onclick: () => lightbox(url, f) }), del);
+  if (kind === 'image') {
+    const img = h('img', { src: url, alt: f.name, loading: 'lazy', onclick: (e) => lightbox(url, f, e.currentTarget) });
+    lightboxArgs.set(img, [url, f]); // so the lightbox can step to it from another image of the message
+    return h('div', { class: 'attachment media' }, img, del);
+  }
   if (kind === 'video') return h('div', { class: 'attachment media' }, h('video', { src: url, controls: true, preload: 'metadata' }), del);
   if (kind === 'audio') return h('div', { class: 'attachment file' }, card(), h('audio', { src: url, controls: true, preload: 'metadata' }), del);
   return h('div', { class: 'attachment file' }, card(), del);
@@ -3848,7 +4401,8 @@ function dmAttachmentEl(m, f) {
   DM.fileUrl(peerId, f.id).then((url) => {
     if (!url) return;
     img.src = url;
-    img.onclick = () => lightbox(url, { ...f, blobUrl: url });
+    lightboxArgs.set(img, [url, { ...f, blobUrl: url }]);
+    img.onclick = () => lightbox(url, { ...f, blobUrl: url }, img);
     el.classList.remove('loading');
     state.remove();
   });
@@ -3861,7 +4415,7 @@ function embedEl(e) {
   if (['image', 'video', 'audio'].includes(e.kind)) {
     const media = () =>
       e.kind === 'image'
-        ? h('img', { src: e.url, loading: 'lazy', alt: '', referrerpolicy: 'no-referrer', onclick: () => lightbox(e.url) })
+        ? ((img) => (lightboxArgs.set(img, [e.url, null]), img))(h('img', { src: e.url, loading: 'lazy', alt: '', referrerpolicy: 'no-referrer', onclick: (ev) => lightbox(e.url, null, ev.currentTarget) }))
         : h(e.kind, { src: e.url, controls: true, preload: 'metadata' });
     if (settings.get().loadLinkMedia) return h('div', { class: 'embed' }, media());
     let host = '';
@@ -3905,24 +4459,60 @@ function embedEl(e) {
   );
 }
 
-function lightbox(url, f) {
-  const close = () => (root.remove(), document.removeEventListener('keydown', onKey, true));
+// An image, over everything (D72): who sent it and the file at the top, ← and → between the images of
+// the same message, a click toggles its real size. `from` is the image clicked in the message.
+function lightbox(url, f, from) {
+  if (from) lightboxArgs.set(from, [url, f]);
+  const msgEl = from?.closest('.msg');
+  // Its siblings in the message: images that open here (they're registered on their first click, or are this one)
+  const list = msgEl ? [...msgEl.querySelectorAll('.attachment img, .embed img')].filter((x) => lightboxArgs.has(x)) : [];
+  let i = Math.max(0, list.indexOf(from));
+  const argsOf = (el) => lightboxArgs.get(el) || [el.currentSrc || el.src, null];
+  const m = msgEl && S.messages.get(S.channelId)?.find((x) => x.id === msgEl.dataset.id);
+  const author = m && profileOf(m.author, m.name);
+  const opener = document.activeElement;
+  const img = h('img', { alt: '', onclick: () => img.classList.toggle('actual') });
+  const stage = h('div', { class: 'lightbox-stage', onclick: (e) => e.target === stage && close() }, img);
+  const what = h('span', { class: 'lightbox-what' });
+  const dl = h('button', { class: 'icon-btn', title: 'Download' }, icon('download'));
+  const open = h('a', { class: 'icon-btn', title: 'Open original', target: '_blank', rel: 'noopener noreferrer' }, icon('jump'));
+  const count = h('span', { class: 'lightbox-count' });
+  const show = (n) => {
+    i = (n + list.length) % list.length || 0;
+    const [u, file] = list.length ? argsOf(list[i]) : [url, f];
+    img.src = u;
+    img.alt = file?.name || '';
+    img.classList.remove('actual');
+    what.replaceChildren(...[author && h('strong', {}, author.name), author && file && ' · ', file && `${file.name} · ${fmtBytes(file.size)}`].filter(Boolean)); // replaceChildren(null) would print "null"
+    dl.hidden = !file;
+    dl.onclick = () => file && downloadFile(file);
+    open.hidden = !!file;
+    open.href = u;
+    count.textContent = list.length > 1 ? `${i + 1} of ${list.length}` : '';
+  };
+  const close = () => {
+    root.remove();
+    document.removeEventListener('keydown', onKey, true);
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+  };
   // Capture phase, so Escape closes only the lightbox and not a modal under it
-  const onKey = (e) => e.key === 'Escape' && (e.stopPropagation(), close());
+  const onKey = (e) => {
+    if (e.key === 'Escape') (e.stopPropagation(), close());
+    else if (list.length > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) (e.preventDefault(), show(i + (e.key === 'ArrowLeft' ? -1 : 1)));
+  };
+  const nav = (dir, label) => (list.length > 1 ? h('button', { class: 'icon-btn lightbox-nav', title: label, onclick: () => show(i + dir) }, icon(dir < 0 ? 'chevronLeft' : 'chevronRight')) : null);
+  const closeBtn = h('button', { class: 'icon-btn', title: 'Close', onclick: () => close() }, icon('close'));
   const root = h(
     'div',
-    { class: 'lightbox', onclick: (e) => e.target === root && close() },
-    h('img', { src: url, alt: f?.name || '' }),
-    h(
-      'div',
-      { class: 'lightbox-bar' },
-      f ? h('span', {}, f.name, ' · ', fmtBytes(f.size)) : null,
-      f ? h('button', { class: 'btn small ghost', onclick: () => downloadFile(f) }, 'Download') : h('a', { class: 'btn small ghost', href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open original'),
-      h('button', { class: 'btn small ghost', onclick: close }, 'Close')
-    )
+    { class: 'lightbox', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Image' },
+    h('div', { class: 'lightbox-bar' }, author ? avatarEl(author, 24) : null, what, h('span', { class: 'spacer' }), open, dl, closeBtn),
+    h('div', { class: 'lightbox-body' }, nav(-1, 'Previous image'), stage, nav(1, 'Next image')),
+    count
   );
+  show(i);
   document.addEventListener('keydown', onKey, true);
   $('#modal-root').append(root);
+  closeBtn.focus({ preventScroll: true });
 }
 
 async function jumpToMessage(channelId, messageId) {
@@ -4222,7 +4812,13 @@ function drawSearch() {
         );
       })
     ),
-    st.results.length ? null : h('div', { class: 'search-empty muted' }, st.note || (st.idle ? 'Type to search. Filters narrow it down: from:name, has:image, before:2026-10-04…' : 'No messages match')),
+    st.results.length
+      ? null
+      : st.idle
+        ? h('div', { class: 'search-empty muted' }, st.note || 'Type to search. Filters narrow it down: from:name, has:image, before:2026-10-04…')
+        : st.note
+          ? emptyState('errorCircle', st.note)
+          : emptyState('search', 'No messages match', 'Try fewer words, or other filters.'),
     st.results.length && st.note ? h('div', { class: 'search-note muted small' }, st.note) : null,
     ].filter(Boolean) // replaceChildren(null) would insert the text "null"
   );
@@ -4254,7 +4850,7 @@ function openFileBrowser(channelId = '') {
     { onchange: () => ((view.kind = kindSel.value), draw()) },
     [['', 'All types'], ['image', 'Images'], ['video', 'Videos'], ['audio', 'Audio'], ['file', 'Other files']].map(([v, l]) => h('option', { value: v }, l))
   );
-  const search = h('input', { type: 'search', placeholder: 'Search by name or uploader', oninput: () => ((view.q = search.value.trim().toLowerCase()), draw()) });
+  const search = h('input', { type: 'search', 'aria-label': 'Search files', placeholder: 'Search by name or uploader', oninput: () => ((view.q = search.value.trim().toLowerCase()), draw()) });
   const usageBox = h('div', { class: 'storage' });
   const table = h('div', { class: 'file-table' });
   const bulk = h('div', { class: 'file-bulk' });
@@ -4298,7 +4894,7 @@ function openFileBrowser(channelId = '') {
       onchange: (e) => (list.forEach((f) => (e.target.checked ? view.selected.add(f.id) : view.selected.delete(f.id))), draw()),
     });
     bulk.replaceChildren(
-      h('span', { class: 'muted small' }, `${list.length} file${list.length === 1 ? '' : 's'} · ${fmtBytes(list.reduce((n, f) => n + f.size, 0))}`),
+      h('span', { class: 'muted small' }, (sel.length ? `${sel.length} selected · ` : '') + `${list.length} file${list.length === 1 ? '' : 's'} · ${fmtBytes(list.reduce((n, f) => n + f.size, 0))}`),
       h('span', {}, sel.length ? h('button', { class: 'btn small danger', onclick: () => deleteFilesPrompt(sel) }, `Delete selected (${sel.length})`) : null)
     );
     const showChannel = !view.scope;
@@ -4346,7 +4942,15 @@ function openFileBrowser(channelId = '') {
               )
             );
           })
-        : [h('p', { class: 'muted small file-empty' }, view.files.length ? 'No files match.' : view.scope ? 'No files in this channel yet. Drop some into the chat!' : 'No files on this server yet.')])
+        : !view.loaded
+          ? [0, 1, 2, 3].map(() => h('div', { class: 'file-row skel-row' }, h('span'), h('span', { class: 'skel' }), h('span', { class: 'skel' }), h('span', { class: 'skel' })))
+          : [
+              view.files.length
+                ? emptyState('search', 'No files match', 'Try another name, uploader or type.')
+                : view.scope
+                  ? emptyState('folder', `No files in #${channelById(view.scope)?.name || 'this channel'} yet`, 'Drop some into the chat.', h('button', { class: 'btn small ghost', onclick: () => ((scopeSel.value = view.scope = ''), load()) }, 'Show all channels'))
+                  : emptyState('folder', 'No files on this server yet', 'Files sent in any channel show up here.'),
+            ])
     );
   }
 
@@ -4356,6 +4960,7 @@ function openFileBrowser(channelId = '') {
     const r = await S.socket.emitWithAck('file:list', { channelId: view.scope });
     if (n !== seq || fileBrowser !== api) return;
     view.files = r.files || [];
+    view.loaded = true;
     if (r.storage) S.server.storage = r.storage;
     draw();
   }
@@ -4364,8 +4969,8 @@ function openFileBrowser(channelId = '') {
   fileBrowser?.close?.();
   const close = modal(
     'Files',
-    h('div', { class: 'file-browser' }, h('div', { class: 'file-toolbar' }, scopeSel, kindSel, search), usageBox, table, bulk),
-    { wide: true, onClose: () => fileBrowser === api && (fileBrowser = null) }
+    h('div', { class: 'file-browser' }, h('div', { class: 'file-toolbar' }, scopeSel, kindSel, search), usageBox, table),
+    { wide: true, actions: [bulk], onClose: () => fileBrowser === api && (fileBrowser = null) }
   );
   api.close = close;
   fileBrowser = api;
@@ -4445,12 +5050,12 @@ function openGifPicker(anchor, onPick) {
   let seq = 0;
   const run = async (q) => {
     const my = ++seq;
-    grid.replaceChildren(h('div', { class: 'muted center' }, 'Loading…'));
+    grid.replaceChildren(...[96, 140, 80, 120, 150, 90, 110, 70].map((px) => h('div', { class: 'gif-item skel', style: { height: px + 'px' }, 'aria-hidden': 'true' })));
     scroller.scrollTop = 0;
     try {
       const data = await searchGifs(q);
       if (my !== seq) return;
-      if (!data.length) return grid.replaceChildren(h('div', { class: 'muted center' }, 'No GIFs found'));
+      if (!data.length) return grid.replaceChildren(emptyState('image', 'No GIFs found', 'Try other words.'));
       grid.replaceChildren(
         ...data.map((g) => {
           const full = g.images.fixed_height;
@@ -4475,20 +5080,19 @@ function openGifPicker(anchor, onPick) {
       if (my !== seq) return;
       grid.replaceChildren(
         e.message === 'nokey'
-          ? h(
-              'div',
-              { class: 'gif-nokey' },
-              h('p', {}, 'GIFs need a free GIPHY API key.'),
-              h('p', { class: 'muted small' }, 'Get one at developers.giphy.com and paste it in Settings → Integrations.'),
+          ? emptyState(
+              'key',
+              'GIFs need a free GIPHY API key',
+              'Get one at developers.giphy.com and paste it in Settings → Integrations.',
               onPick ? null : h('button', { class: 'btn small', onclick: () => (pop.close(), openSettings('integrations')) }, 'Open settings')
             )
-          : h('div', { class: 'error-text center' }, e.message)
+          : emptyState('errorCircle', 'GIPHY didn’t answer', e.message, h('button', { class: 'btn small ghost', onclick: () => run(input.value.trim()) }, 'Try again'))
       );
     }
   };
   let t;
-  const input = h('input', { class: 'gif-search', placeholder: 'Search GIPHY', oninput: (e) => (clearTimeout(t), (t = setTimeout(() => run(e.target.value.trim()), 300))) });
-  const pop = popover(anchor, h('div', { class: 'gif-picker' }, input, scroller, h('div', { class: 'giphy-attr' }, 'Powered by GIPHY')), { className: 'gif-pop' });
+  const input = h('input', { class: 'gif-search', 'aria-label': 'Search GIPHY', placeholder: 'Search GIPHY', oninput: (e) => (clearTimeout(t), (t = setTimeout(() => run(e.target.value.trim()), 300))) });
+  const pop = popover(anchor, h('div', { class: 'gif-picker', role: 'dialog', 'aria-label': 'GIFs' }, input, scroller, h('div', { class: 'giphy-attr' }, 'Powered by GIPHY')), { className: 'gif-pop' });
   input.focus();
   run('');
 }
@@ -4578,6 +5182,10 @@ function openSoundboard(anchor) {
           {
             class: 'sound-tile' + (audio.isPlaying(s.id) ? ' playing' : ''),
             'data-id': s.id,
+            role: 'button',
+            tabindex: 0,
+            'aria-label': `Play ${s.name}`,
+            onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), playSound(s)),
             onclick: () => playSound(s),
             oncontextmenu: (e) => (e.preventDefault(), editSound(s, draw)),
             title: `${s.name}${s.hotkey ? ` (${s.hotkey})` : ''}\nRight-click to edit`,
@@ -4588,7 +5196,7 @@ function openSoundboard(anchor) {
           h('button', { class: 'sound-edit', title: 'Edit', onclick: (e) => (e.stopPropagation(), editSound(s, draw)) }, icon('edit'))
         )
       ),
-      h('button', { class: 'sound-tile add', onclick: () => fileInput.click() }, h('div', { class: 'sound-emoji' }, '＋'), h('div', { class: 'sound-name' }, 'Add sounds'))
+      h('button', { class: 'sound-tile add', onclick: () => fileInput.click() }, h('div', { class: 'sound-emoji' }, icon('plus')), h('div', { class: 'sound-name' }, 'Add sounds'))
     );
   };
   draw();
@@ -4598,6 +5206,7 @@ function openSoundboard(anchor) {
     max: 1,
     step: 0.01,
     value: settings.get().soundboardVolume,
+    'aria-label': 'Soundboard volume',
     oninput: (e) => {
       settings.set({ soundboardVolume: +e.target.value });
       audio.setSoundboardVolume(+e.target.value);
@@ -4607,6 +5216,8 @@ function openSoundboard(anchor) {
     'div',
     {
       class: 'soundboard',
+      role: 'dialog',
+      'aria-label': 'Soundboard',
       ondragover: (e) => (e.preventDefault(), panel.classList.add('drop')),
       ondragleave: () => panel.classList.remove('drop'),
       ondrop: async (e) => {
@@ -4639,23 +5250,7 @@ function openSoundboard(anchor) {
 
 function editSound(s, redraw) {
   const draft = { ...s };
-  const keyBtn = h('button', { class: 'btn ghost small hotkey-btn' }, draft.hotkey || 'Click to set');
-  keyBtn.onclick = () => {
-    keyBtn.textContent = 'Press a key… (Esc clears)';
-    const onKey = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (e.key === 'Escape') draft.hotkey = '';
-      else {
-        const c = comboFromEvent(e);
-        if (!c) return;
-        draft.hotkey = c;
-      }
-      keyBtn.textContent = draft.hotkey || 'Click to set';
-      window.removeEventListener('keydown', onKey, true);
-    };
-    window.addEventListener('keydown', onKey, true);
-  };
+  const keyBtn = hotkeyField(draft.hotkey || '', (v) => (draft.hotkey = v), { label: 'Hotkey' });
   const volLabel = h('span', {}, Math.round(draft.volume * 100) + '%');
   const close = modal(
     'Edit sound',
@@ -4665,13 +5260,13 @@ function editSound(s, redraw) {
       h(
         'div',
         { class: 'row' },
-        h('label', { class: 'field', style: { width: '80px' } }, h('span', {}, 'Emoji'), h('input', { value: draft.emoji, oninput: (e) => (draft.emoji = [...e.target.value.trim()].slice(0, 2).join('')) })),
+        h('label', { class: 'field emoji-field' }, h('span', {}, 'Emoji'), h('input', { value: draft.emoji, oninput: (e) => (draft.emoji = [...e.target.value.trim()].slice(0, 2).join('')) })),
         h('label', { class: 'field grow' }, h('span', {}, 'Name'), h('input', { value: draft.name, maxlength: 40, oninput: (e) => (draft.name = e.target.value) }))
       ),
       h(
         'label',
         { class: 'field' },
-        h('span', {}, 'Volume ', volLabel),
+        h('span', { class: 'field-head' }, 'Volume', volLabel),
         h('input', { type: 'range', min: 0, max: 2, step: 0.05, value: draft.volume, oninput: (e) => ((draft.volume = +e.target.value), (volLabel.textContent = Math.round(draft.volume * 100) + '%')) })
       ),
       h('div', { class: 'field' }, h('span', {}, 'Hotkey'), keyBtn),
@@ -4688,7 +5283,7 @@ function editSound(s, redraw) {
         h(
           'button',
           {
-            class: 'btn danger ghost',
+            class: 'btn danger ghost side',
             onclick: async () => {
               await sounds.remove(s.id);
               audio.forget(s.id);
@@ -4743,18 +5338,10 @@ function shareQualityFields(q, onChange) {
 
 function sharePopover(anchor) {
   const q = shareQuality();
-  popover(
-    anchor,
-    h(
-      'div',
-      { class: 'menu' },
-      shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q))),
-      h('div', { class: 'menu-sep' }),
-      h('button', { class: 'menu-item', onclick: () => (closePopover(), screenPicker({ switching: true })) }, 'Change source'),
-      h('button', { class: 'menu-item danger', onclick: () => (closePopover(), liveVoice()?.stopMedia('screen')) }, 'Stop sharing')
-    ),
-    { align: 'right' }
-  );
+  let p;
+  const menu = menuEl([{ label: 'Change source…', run: () => screenPicker({ switching: true }) }, { label: 'Stop sharing', danger: true, run: () => liveVoice()?.stopMedia('screen') }], () => p.close(), 'Screen share');
+  menu.prepend(shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q))), h('div', { class: 'menu-sep', role: 'separator' }));
+  p = popover(anchor, menu, { align: 'right', className: 'menu-pop' });
 }
 
 // `switching`: pick a new source for the share that's already live, without
@@ -4769,7 +5356,9 @@ async function screenPicker({ switching = false } = {}) {
   const audioBox = (label) =>
     h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (withAudio = e.target.checked) }), label);
   const q = shareQuality();
-  const quality = h('div', {}, shareQualityFields(q), DMCALL.voice ? null : h('p', { class: 'muted small' }, 'Only people who click LIVE receive it.'));
+  const quality = shareQualityFields(q);
+  quality.classList.add('share-quality-row');
+  const liveNote = DMCALL.voice ? null : h('span', { class: 'foot-note' }, 'Only people who click LIVE receive it.');
 
   if (!desktop) {
     const choice = (surface, ic, label, sub) =>
@@ -4782,7 +5371,8 @@ async function screenPicker({ switching = false } = {}) {
         h('div', { class: 'share-choices' }, choice('monitor', 'screen', 'Entire screen', 'A whole display'), choice('window', 'window', 'Window', 'One app window')),
         audioBox('Share audio'),
         quality
-      )
+      ),
+      { actions: [liveNote, h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel')].filter(Boolean) }
     );
     return;
   }
@@ -4797,14 +5387,10 @@ async function screenPicker({ switching = false } = {}) {
   let selected = null;
   const grid = h('div', { class: 'share-grid' });
   const tabs = h('div', { class: 'share-tabs' });
-  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio, quality: q })) }, switching ? 'Switch' : 'Go Live');
+  const tabSeg = segmented([['screen', 'Screens'], ['window', 'Windows']], tab, (k) => ((tab = k), draw()), 'Source type');
+  tabs.append(tabSeg);
+  const go = h('button', { class: 'btn', disabled: true, onclick: () => (close(), share({ sourceId: selected, withAudio: withAudio && info.systemAudio, quality: q })) }, icon('screen'), switching ? 'Switch' : 'Go Live');
   const draw = () => {
-    tabs.replaceChildren(
-      ...[
-        ['screen', 'Screens'],
-        ['window', 'Windows'],
-      ].map(([k, label]) => h('button', { class: k === tab ? 'active' : '', onclick: () => ((tab = k), draw()) }, label))
-    );
     const list = info.sources.filter((s) => s.type === tab);
     grid.replaceChildren(
       ...(list.length
@@ -4814,14 +5400,16 @@ async function screenPicker({ switching = false } = {}) {
               {
                 class: 'share-source' + (s.id === selected ? ' selected' : ''),
                 title: s.name,
+                'aria-pressed': String(s.id === selected),
                 onclick: () => ((selected = s.id), (go.disabled = false), draw()),
                 ondblclick: () => ((selected = s.id), go.click()),
               },
+              h('span', { class: 'pick-check', html: I.check }),
               s.thumbnail ? h('img', { src: s.thumbnail, alt: '' }) : h('div', { class: 'share-thumb-empty' }, icon(tab === 'screen' ? 'screen' : 'window')),
               h('span', { class: 'share-name' }, s.icon ? h('img', { src: s.icon, alt: '' }) : null, s.name)
             )
           )
-        : [h('p', { class: 'muted' }, tab === 'window' ? 'No windows found.' : 'No screens found.')])
+        : [emptyState(tab === 'window' ? 'window' : 'screen', tab === 'window' ? 'No windows found' : 'No screens found', tab === 'window' ? 'Open the app you want to share, then come back.' : null)])
     );
   };
   draw();
@@ -4831,14 +5419,18 @@ async function screenPicker({ switching = false } = {}) {
       'div',
       {},
       info.status !== 'granted'
-        ? h('p', { class: 'error-text small' }, 'friendspeak needs Screen Recording permission: System Settings → Privacy & Security → Screen & System Audio Recording. Restart the app after allowing it.')
+        ? h(
+            'div',
+            { class: 'alert danger', role: 'alert' },
+            icon('warn'),
+            h('div', {}, h('strong', {}, 'Screen Recording isn’t allowed. '), 'Allow friendspeak in System Settings → Privacy & Security → Screen & System Audio Recording, then restart it.')
+          )
         : null,
       tabs,
       grid,
-      info.systemAudio ? audioBox('Share system audio') : h('p', { class: 'muted small' }, 'System audio sharing isn’t supported on this OS; video only.'),
-      quality
+      h('div', { class: 'share-options' }, quality, info.systemAudio ? audioBox('Share system audio') : h('p', { class: 'muted small' }, 'System audio sharing isn’t supported on this OS; video only.'))
     ),
-    { wide: true, actions: [h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), go] }
+    { wide: true, actions: [liveNote, h('button', { class: 'btn ghost', onclick: () => close() }, 'Cancel'), go].filter(Boolean) }
   );
 }
 
@@ -5154,7 +5746,8 @@ function backgroundPicker(onRecapture) {
   const tile = (name, selected, onclick, { cls = '', image = '', children = [] } = {}) =>
     h(
       'div',
-      { class: 'bg-tile ' + cls + (selected ? ' selected' : ''), role: 'button', tabindex: 0, title: name, style: image ? { backgroundImage: image } : null, onclick, onkeydown: (e) => e.key === 'Enter' && onclick() },
+      { class: 'bg-tile ' + cls + (selected ? ' selected' : ''), role: 'button', tabindex: 0, 'aria-pressed': String(!!selected), title: name, style: image ? { backgroundImage: image } : null, onclick, onkeydown: (e) => (e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && (e.preventDefault(), onclick()) },
+      h('span', { class: 'pick-check', html: I.check }),
       children,
       h('span', { class: 'bg-name' }, name)
     );
@@ -5184,7 +5777,7 @@ function backgroundPicker(onRecapture) {
                 else render();
               },
             },
-            '×'
+            icon('close')
           ),
         })
       ),
@@ -5260,23 +5853,23 @@ async function switchMic(deviceId) {
 // Right-click on a mute button: pick the microphone
 const MIC_HINT = ' (right-click for microphones)';
 const micMenu = (e) => (e.preventDefault(), micPopover(e.currentTarget));
+// The arrow by Mute: the microphone and the output, with the voice settings below (D72)
 async function micPopover(anchor) {
   const devs = (await navigator.mediaDevices?.enumerateDevices().catch(() => [])) || [];
-  const mics = devs.filter((d) => d.kind === 'audioinput');
-  const cur = settings.get().inputDevice;
-  const pick = (id) => (closePopover(), switchMic(id));
-  popover(
+  const { inputDevice, outputDevice } = settings.get();
+  const list = (kind, word) => [{ deviceId: '', label: 'Default' }, ...devs.filter((d) => d.kind === kind && d.deviceId !== 'default')].map((d, i) => ({ ...d, label: d.label || `${word} ${i}` }));
+  menuPopover(
     anchor,
-    h(
-      'div',
-      { class: 'menu' },
-      h('div', { class: 'menu-label' }, 'Microphone'),
-      [{ deviceId: '', label: 'Default' }, ...mics].map((d, i) =>
-        h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Microphone ${i}`))
-      ),
-      h('div', { class: 'menu-sep' }),
-      h('button', { class: 'menu-item', onclick: () => (closePopover(), openSettings('voice')) }, 'Voice settings…')
-    )
+    [
+      { heading: 'Microphone' },
+      ...list('audioinput', 'Microphone').map((d) => ({ label: d.label, selected: d.deviceId === inputDevice, run: () => switchMic(d.deviceId) })),
+      '-',
+      { heading: 'Output' },
+      ...list('audiooutput', 'Speakers').map((d) => ({ label: d.label, selected: d.deviceId === outputDevice, run: () => (settings.set({ outputDevice: d.deviceId }), applyOutputDevice(d.deviceId)) })),
+      '-',
+      { label: 'Voice settings…', icon: 'gear', run: () => openSettings('voice') },
+    ],
+    { label: 'Audio devices' }
   );
 }
 
@@ -5285,27 +5878,21 @@ async function cameraPopover(anchor) {
   const cams = devs.filter((d) => d.kind === 'videoinput');
   const cur = settings.get().videoDevice;
   const pick = async (id) => {
-    closePopover();
     settings.set({ videoDevice: id });
     if (liveVoice()?.local.camera) {
       liveVoice().stopMedia('camera', true);
       await startCamera();
     }
   };
-  popover(
+  menuPopover(
     anchor,
-    h(
-      'div',
-      { class: 'menu' },
-      cams.length
-        ? [{ deviceId: '', label: 'Default camera' }, ...cams].map((d, i) =>
-            h('button', { class: 'menu-item' + (d.deviceId === cur ? ' active' : ''), onclick: () => pick(d.deviceId) }, (d.deviceId === cur ? '✓ ' : '') + (d.label || `Camera ${i}`))
-          )
-        : h('div', { class: 'muted small', style: { padding: '8px' } }, 'No cameras found'),
-      h('div', { class: 'menu-sep' }),
-      h('button', { class: 'menu-item', onclick: () => (closePopover(), cameraDialog()) }, 'Preview and background…')
-    ),
-    { align: 'right' }
+    [
+      { heading: 'Camera' },
+      ...(cams.length ? [{ deviceId: '', label: 'Default camera' }, ...cams].map((d, i) => ({ label: d.label || `Camera ${i}`, selected: d.deviceId === cur, run: () => pick(d.deviceId) })) : [{ note: 'No cameras found' }]),
+      '-',
+      { label: 'Preview and background…', run: () => cameraDialog() },
+    ],
+    { align: 'end', label: 'Camera' }
   );
 }
 
@@ -5591,11 +6178,18 @@ function openStatsPanel(st, anchor) {
       toast('Could not copy the stats', 'error');
     }
   };
-  const panel = h('div', { class: 'stats-panel-inner' }, h('div', { class: 'stats-head' }, h('strong', {}, 'Stream stats'), h('div', { class: 'spacer' }), h('button', { class: 'btn small', onclick: copy }, 'Copy')), body);
+  const what = h('span', { class: 'muted small' });
+  const panel = h(
+    'div',
+    { class: 'stats-panel-inner', role: 'dialog', 'aria-label': 'Stream stats' },
+    h('div', { class: 'stats-head' }, h('strong', {}, 'Stream stats'), what, h('div', { class: 'spacer' }), h('button', { class: 'btn small', onclick: copy }, 'Copy samples'), h('button', { class: 'icon-btn small', title: 'Close', onclick: () => pop.close() }, icon('close'))),
+    body
+  );
   const pop = popover(anchor, panel, { align: 'start', className: 'stats-panel', onClose: () => st.statsPanel === api && (st.statsPanel = null) });
   const api = {
     close: () => pop.close(),
     update(tile, info) {
+      what.textContent = tile ? `${st.statsSrc.name(tile.sid) || 'someone'} · ${tile.kind}` : '';
       body.replaceChildren(statsView(tile, info, st.statsSrc.name));
       pop.place();
     },
@@ -5614,11 +6208,12 @@ function statsView(tile, info, nameOf) {
       ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps, QP ${f(info.qp, 0)}`],
       ['Shown at', info.view ? (info.view.hidden ? 'hidden' : size(info.view.w, info.view.h)) : '–'],
       ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
-      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`],
-      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`],
-      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`],
+      ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`, info.freezes > 0],
+      ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`, info.jitterMs > 30],
+      ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`, info.pathRtt > 250],
     ];
-    return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))));
+    // A value past a limit worth knowing about is drawn in yellow (D72)
+    return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v, warn]) => h('tr', { class: warn ? 'warn' : null }, h('th', {}, k), h('td', {}, v)))));
   }
   if (!info.length) return h('p', { class: 'muted small' }, 'No viewers yet.');
   const cols = ['Viewer', 'Capture', 'Rung', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path', 'Viewer size'];
@@ -5655,14 +6250,32 @@ function statsView(tile, info, nameOf) {
   );
 }
 
-// Right-click on the video grid: who gets a tile
+// Right-click on the video grid: the tile under the pointer (focus, full screen, its sound), then
+// who gets a tile, then the window and the stats (D72)
 function stageMenu(e) {
   const st = settings.get();
+  const s = S.stage;
   const flip = (key) => () => (settings.set({ [key]: !settings.get()[key] }), syncStage());
-  contextMenu(e, [
-    { label: 'Show non-video participants', checked: st.stageNonVideo, run: flip('stageNonVideo') },
-    { label: 'Show my own video', checked: st.stageOwnVideo, run: flip('stageOwnVideo') },
-  ]);
+  const tile = s && [...s.tiles.values()].find((t) => t.el?.contains(e.target));
+  const name = tile && (S.call?.users.find((u) => u.sid === tile.sid)?.name || 'someone');
+  const theirs = tile?.kind === 'screen' && tile.live && tile.sid !== S.call?.sid;
+  contextMenu(
+    e,
+    [
+      tile && { heading: name + (tile.kind === 'screen' ? ' · screen' : tile.kind === 'camera' ? ' · camera' : '') },
+      tile && { label: s.focus === tile.key ? 'Back to the grid' : 'Focus', run: () => setStageFocus(tile.key) },
+      tile?.video && { label: 'Full screen', icon: 'expand', run: () => tile.el.requestFullscreen?.().catch(() => {}) },
+      theirs && { label: 'Mute stream', checked: s.muted.has(tile.sid), run: () => (s.muted.has(tile.sid) ? s.muted.delete(tile.sid) : s.muted.add(tile.sid), syncStage()) },
+      theirs && { label: 'Stop watching', run: () => watchScreen(tile.sid, false) },
+      '-',
+      { label: 'Show non-video participants', checked: st.stageNonVideo, run: flip('stageNonVideo') },
+      { label: 'Show my own video', checked: st.stageOwnVideo, run: flip('stageOwnVideo') },
+      '-',
+      s && !s.pop && { label: 'Open in a window', icon: 'jump', run: () => popOutStage() },
+      s && !s.pop && { label: 'Stream stats', run: () => openStatsPanel(s, s.stats) },
+    ],
+    'Video'
+  );
 }
 
 // Reconcile the stage with who is in the channel, sharing, or on camera.
@@ -5737,7 +6350,9 @@ function syncStage() {
           : fu?.name || 'someone'
   );
   const pop = st.pop?.ready ? st.pop : null;
-  if (pop) pop.win.document.title = st.title.textContent;
+  // The window says which call it is, so it can be told apart in the taskbar and Alt-Tab (D72)
+  const callCh = S.call?.server?.channels.find((c) => c.id === S.call.voiceChannel);
+  if (pop) pop.win.document.title = [st.title.textContent, callCh?.name, S.call?.server?.name].filter(Boolean).join(' · ');
   st.popBtns.replaceChildren(
     ...(pop
       ? [
@@ -6062,7 +6677,7 @@ function banner(kind, text, { link, action, onClose } = {}) {
     h('span', { class: 'grow' }, text),
     link && h('a', { href: link, target: '_blank', rel: 'noreferrer' }, 'What’s new'),
     action,
-    onClose && h('button', { class: 'x', title: 'Dismiss', onclick: () => (onClose(), renderBanners()) }, '×')
+    onClose && h('button', { class: 'icon-btn small', title: 'Dismiss', onclick: () => (onClose(), renderBanners()) }, icon('close'))
   );
 }
 
@@ -6177,24 +6792,33 @@ async function startAppUpdates() {
 
 function openSettings(tab = 'profile') {
   const body = h('div', { class: 'settings-body' });
+  // In two groups: about you, and about the app (D72)
   const tabs = {
-    profile: ['My profile', settingsProfile],
-    appearance: ['Appearance', settingsAppearance],
-    voice: ['Voice & video', settingsVoice],
-    notifications: ['Notifications', settingsNotifications],
-    integrations: ['Integrations', settingsIntegrations],
-    about: ['About & updates', settingsAbout],
+    profile: ['My profile', settingsProfile, 'You'],
+    appearance: ['Appearance', settingsAppearance, 'You'],
+    voice: ['Voice & video', settingsVoice, 'You'],
+    notifications: ['Notifications', settingsNotifications, 'You'],
+    integrations: ['Integrations', settingsIntegrations, 'App'],
+    about: ['About & updates', settingsAbout, 'App'],
   };
   let cleanup = null;
-  const nav = h('div', { class: 'settings-nav' });
+  const nav = h('nav', { class: 'settings-nav', 'aria-label': 'Settings' });
   const show = (key) => {
     cleanup?.();
     cleanup = null;
-    for (const b of nav.children) b.classList.toggle('active', b.dataset.tab === key);
+    for (const b of nav.querySelectorAll('button')) {
+      b.classList.toggle('active', b.dataset.tab === key);
+      b.setAttribute('aria-current', b.dataset.tab === key ? 'page' : 'false');
+    }
     body.replaceChildren();
+    body.scrollTop = 0;
     cleanup = tabs[key][1](body) || null;
   };
-  nav.append(...Object.entries(tabs).map(([k, [label]]) => h('button', { 'data-tab': k, onclick: () => show(k) }, label)));
+  let group = null;
+  for (const [k, [label, , g]] of Object.entries(tabs)) {
+    if (g !== group) nav.append(h('div', { class: 'nav-group' }, (group = g)));
+    nav.append(h('button', { 'data-tab': k, onclick: () => show(k) }, label));
+  }
   modal('Settings', h('div', { class: 'settings' }, nav, body), { wide: true, onClose: () => cleanup?.() });
   show(tab);
 }
@@ -6202,6 +6826,7 @@ function openSettings(tab = 'profile') {
 function settingsProfile(body) {
   const p = me();
   const { el, draft } = profileEditor(p);
+  const redraw = () => settingsProfile(body.replaceChildren() || body);
   const importInput = h('input', {
     type: 'file',
     accept: '.json',
@@ -6209,56 +6834,65 @@ function settingsProfile(body) {
     onchange: async () => {
       try {
         const np = await importProfile(importInput.files[0], askPassphrase);
-        toast(`Imported ${np.name}`);
+        toast(`Imported ${np.name}`, 'success');
         warnIfKeyless(np);
         switchProfile(np.id);
-        settingsProfile(body.replaceChildren() || body);
+        redraw();
       } catch (e) {
         toast(e.message, 'error');
       }
     },
   });
+  // The one tab that needs a save: it says when there is something to save (D72)
+  const KEYS = ['name', 'status', 'color', 'avatar', 'banner'];
+  const unsaved = h('span', { class: 'muted small', hidden: true }, 'Unsaved changes');
+  const discard = h('button', { class: 'btn small ghost', hidden: true, onclick: redraw }, 'Discard');
+  const dirtyTimer = setInterval(() => {
+    const dirty = KEYS.some((k) => (draft[k] || '') !== (me()[k] || ''));
+    unsaved.hidden = discard.hidden = !dirty;
+  }, 250);
+  const save = () => {
+    if (!draft.name.trim()) return toast('Name required', 'error');
+    if (!saveProfile(() => profiles.save({ ...draft, name: draft.name.trim() }))) return;
+    applyProfileChange();
+    toast('Profile saved', 'success');
+  };
+  const others = profiles.all().length > 1;
   body.append(
+    h('h3', {}, 'My profile'),
     el,
-    h(
-      'div',
-      { class: 'row end' },
-      h('button', {
-        class: 'btn',
-        onclick: () => {
-          if (!draft.name.trim()) return toast('Name required', 'error');
-          if (!saveProfile(() => profiles.save({ ...draft, name: draft.name.trim() }))) return;
-          applyProfileChange();
-          toast('Profile saved');
-        },
-      }, 'Save profile')
-    ),
+    h('div', { class: 'row end save-row' }, unsaved, discard, h('button', { class: 'btn small', onclick: save }, 'Save profile')),
     h('h3', {}, 'Saved profiles'),
-    h('p', { class: 'muted small' }, 'Profiles live only on this device. Export one to use it on another device.'),
+    h('p', { class: 'muted small' }, 'Profiles live only on this device. Export one to use it on another device. Keep the file private: whoever has it can be you.'),
     h(
       'div',
       { class: 'profile-list' },
       profiles.all().map((x) =>
         h(
           'div',
-          { class: 'profile-row' + (x.id === p.id ? ' current' : '') },
+          { class: 'setting-row profile-row' + (x.id === p.id ? ' current' : '') },
           avatarEl(x, 32),
-          h('span', { class: 'grow' }, x.name, x.id === p.id ? h('span', { class: 'badge' }, 'active') : null),
-          x.id !== p.id ? h('button', { class: 'btn small ghost', onclick: () => (switchProfile(x.id), settingsProfile(body.replaceChildren() || body)) }, 'Use') : null,
-          h('button', { class: 'btn small ghost', onclick: () => exportDialog(x) }, 'Export'),
-          profiles.all().length > 1
+          h('div', { class: 'sr-label' }, h('div', { class: 'sr-title' }, x.name), h('div', { class: 'sr-help' }, x.id === p.id ? 'In use' : 'On this device')),
+          x.id !== p.id ? h('button', { class: 'btn small ghost', onclick: () => (switchProfile(x.id), redraw()) }, 'Use') : null,
+          h('button', { class: 'btn small ghost', onclick: () => exportDialog(x) }, 'Export…'),
+          others
             ? h(
                 'button',
                 {
                   class: 'btn small ghost danger',
                   onclick: async () => {
-                    if (!(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys and its server list go with it: unless you've exported it, you can't connect as it again to servers that know it.`))) return;
+                    if (
+                      !(await confirmModal('Delete profile', `Delete profile "${x.name}" from this device? Its keys and its server list go with it: unless you've exported it, you can't connect as it again to servers that know it.`, 'Delete profile', {
+                        side: { label: 'Export first…', run: () => exportDialog(x) },
+                      }))
+                    )
+                      return;
                     profiles.remove(x.id);
                     if (x.id === p.id) switchProfile(profiles.all()[0].id);
-                    settingsProfile(body.replaceChildren() || body);
+                    redraw();
                   },
                 },
-                'Delete'
+                'Delete…'
               )
             : null
         )
@@ -6267,12 +6901,12 @@ function settingsProfile(body) {
     h(
       'div',
       { class: 'row' },
-      h('button', { class: 'btn small', onclick: () => (switchProfile(profiles.create({ name: 'new friend' }).id), settingsProfile(body.replaceChildren() || body)) }, 'New profile'),
+      h('button', { class: 'btn small secondary', onclick: () => (switchProfile(profiles.create({ name: 'new friend' }).id), redraw()) }, 'New profile'),
       h('button', { class: 'btn small ghost', onclick: () => importInput.click() }, 'Import…'),
       importInput
-    ),
-    h('p', { class: 'muted small' }, 'Keep the file private; whoever has it can impersonate you.')
+    )
   );
+  return () => clearInterval(dirtyTimer);
 }
 
 function settingsAppearance(body) {
@@ -6287,7 +6921,11 @@ function settingsAppearance(body) {
   const sync = () => {
     const now = settings.get();
     const colors = paletteOf(now);
-    for (const t of tiles) t.el.classList.toggle('selected', t.theme ? now.theme === t.theme : now.theme === 'custom' && samePalette(colors, t.colors));
+    for (const t of tiles) {
+      const on = t.theme ? now.theme === t.theme : now.theme === 'custom' && samePalette(colors, t.colors);
+      t.el.classList.toggle('selected', on);
+      t.el.setAttribute('aria-pressed', String(on));
+    }
     for (const p of pickers) {
       p.input.value = colors[p.key];
       p.hex.textContent = colors[p.key];
@@ -6304,6 +6942,7 @@ function settingsAppearance(body) {
     const el = h(
       'button',
       { class: 'theme-tile theme-scope', title: name, onclick: () => update(theme ? { theme } : { theme: 'custom', themeColors: colors }) },
+      h('span', { class: 'pick-check', html: I.check }),
       h(
         'div',
         { class: 'tt-preview' },
@@ -6330,18 +6969,19 @@ function settingsAppearance(body) {
     el.value = options[st[key]] ? st[key] : Object.keys(options)[0];
     return el;
   };
-  const fontCustom = h(
-    'label',
-    { class: 'field', hidden: st.font !== 'custom' },
-    h('span', {}, 'Font name'),
-    h('input', { value: st.fontCustom, placeholder: 'A font installed on this computer, e.g. Fira Sans', oninput: (e) => update({ fontCustom: e.target.value }) })
+  const fontCustom = settingRow(
+    'Font name',
+    'A font installed on this computer, e.g. Fira Sans.',
+    h('input', { value: st.fontCustom, 'aria-label': 'Font name', placeholder: 'Fira Sans', oninput: (e) => update({ fontCustom: e.target.value }) })
   );
+  fontCustom.hidden = st.font !== 'custom';
   const fontSel = select('font', FONTS);
+  fontSel.setAttribute('aria-label', 'Font');
   fontSel.addEventListener('change', () => (fontCustom.hidden = fontSel.value !== 'custom'));
-  const sizeVal = h('span', {}, st.fontSize + 'px');
-  const sizeIn = h('input', { type: 'range', min: FONT_SIZE.min, max: FONT_SIZE.max, step: FONT_SIZE.step, value: st.fontSize, oninput: (e) => (update({ fontSize: +e.target.value }), (sizeVal.textContent = e.target.value + 'px')) });
-  const scaleVal = h('span');
-  const scaleIn = h('input', { type: 'range', min: 0, max: UI_SCALES.length - 1, step: 1, oninput: (e) => update({ uiScale: UI_SCALES[e.target.value] }) });
+  const sizeVal = h('span', { class: 'value' }, st.fontSize + 'px');
+  const sizeIn = h('input', { type: 'range', 'aria-label': 'Text size', min: FONT_SIZE.min, max: FONT_SIZE.max, step: FONT_SIZE.step, value: st.fontSize, oninput: (e) => (update({ fontSize: +e.target.value }), (sizeVal.textContent = e.target.value + 'px')) });
+  const scaleVal = h('span', { class: 'value' });
+  const scaleIn = h('input', { type: 'range', 'aria-label': 'UI size', min: 0, max: UI_SCALES.length - 1, step: 1, oninput: (e) => update({ uiScale: UI_SCALES[e.target.value] }) });
   const mod = desktop?.platform === 'darwin' ? '⌘' : 'Ctrl';
 
   body.append(
@@ -6353,23 +6993,16 @@ function settingsAppearance(body) {
     h('h3', {}, 'Colors', customBadge),
     h('p', { class: 'muted small' }, 'Changing a color makes a custom theme from the one in use.'),
     ...COLOR_GROUPS.flatMap(([title, colors]) => [h('div', { class: 'color-group' }, title), h('div', { class: 'color-grid' }, colors.map(picker))]),
-    h('h3', {}, 'Size'),
-    h('p', { class: 'muted small' }, `${mod} + and ${mod} − change UI size too.`),
-    h(
-      'div',
-      { class: 'field' },
-      h('span', {}, 'UI size ', scaleVal),
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, scaleIn), h('button', { class: 'btn small ghost', onclick: () => update({ uiScale: 100 }) }, 'Reset'))
+    h('h3', {}, 'Size and spacing'),
+    settingRow('UI size', `Zooms the whole window (${mod} + and ${mod} −).`, h('div', { class: 'sr-control' }, scaleVal, scaleIn, h('button', { class: 'btn small ghost', onclick: () => update({ uiScale: 100 }) }, 'Reset'))),
+    settingRow(
+      'Text size',
+      'Messages and lists.',
+      h('div', { class: 'sr-control' }, sizeVal, sizeIn, h('button', { class: 'btn small ghost', onclick: () => (update({ fontSize: FONT_SIZE.base }), (sizeIn.value = FONT_SIZE.base), (sizeVal.textContent = FONT_SIZE.base + 'px')) }, 'Reset'))
     ),
-    h('h3', {}, 'Font and spacing'),
-    h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Font'), fontSel), h('label', { class: 'field grow' }, h('span', {}, 'Density'), select('density', DENSITIES))),
-    fontCustom,
-    h(
-      'div',
-      { class: 'field' },
-      h('span', {}, 'Text size ', sizeVal),
-      h('div', { class: 'row' }, h('div', { class: 'grow' }, sizeIn), h('button', { class: 'btn small ghost', onclick: () => (update({ fontSize: FONT_SIZE.base }), (sizeIn.value = FONT_SIZE.base), (sizeVal.textContent = FONT_SIZE.base + 'px')) }, 'Reset'))
-    )
+    settingRow('Density', 'The space around rows and messages.', segmented(Object.entries(DENSITIES).map(([k, [label]]) => [k, label]), DENSITIES[st.density] ? st.density : 'cozy', (v) => update({ density: v }), 'Density')),
+    settingRow('Font', null, fontSel),
+    fontCustom
   );
   sync();
   showUiScale = sync;
@@ -6436,7 +7069,7 @@ function settingsVoice(body) {
   // Mic test: your mic is played back to you and everything else goes quiet
   // (audio.setMicTest). It also keeps the mic from friends, who see you muted.
   let testing = false;
-  const testBtn = h('button', { class: 'btn small ghost' }, 'Test mic');
+  const testBtn = h('button', { class: 'btn small secondary' }, 'Test mic');
   const setTest = (on) => {
     testing = on;
     const done = audio.setMicTest(on); // restarts a running mic when the test changes its echo cancellation
@@ -6461,7 +7094,7 @@ function settingsVoice(body) {
     }
     busy = false;
   };
-  const micNote = h('p', { class: 'muted small', hidden: true });
+  const micNote = h('p', { class: 'alert warn small', role: 'status', hidden: true });
   // Noise gate, like Discord's input sensitivity: the bar is the mic's level
   // before the gate, and the slider on it is the level the gate opens at. At
   // the slider's bottom there is no gate.
@@ -6507,132 +7140,108 @@ function settingsVoice(body) {
     micNote.hidden = !note;
   }, 60);
 
-  const pttBtn = h('button', { class: 'btn ghost small hotkey-btn' }, st.pttKey.replace(/^Key|^Digit/, ''));
-  pttBtn.onclick = () => {
-    pttBtn.textContent = 'Press a key…';
-    const onKey = (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      settings.set({ pttKey: e.code });
-      pttBtn.textContent = e.code.replace(/^Key|^Digit/, '');
-      window.removeEventListener('keydown', onKey, true);
-    };
-    window.addEventListener('keydown', onKey, true);
-  };
-  const hotkeyBtn = (key) => {
-    const btn = h('button', { class: 'btn ghost small hotkey-btn' }, st[key] || 'Click to set');
-    btn.onclick = () => {
-      btn.textContent = 'Press a key… (Esc clears)';
-      const onKey = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const c = e.key === 'Escape' ? '' : comboFromEvent(e);
-        if (c === null) return; // a modifier on its own
-        settings.set({ [key]: c });
-        syncHotkeys();
-        btn.textContent = c || 'Click to set';
-        window.removeEventListener('keydown', onKey, true);
-      };
-      window.addEventListener('keydown', onKey, true);
-    };
-    return btn;
-  };
-  const check = (key, label, after) =>
-    h(
-      'label',
-      { class: 'check-row' },
-      h('input', { type: 'checkbox', checked: st[key], onchange: (e) => (settings.set({ [key]: e.target.checked }), after?.(e.target.checked)) }),
-      h('span', {}, label)
-    );
+  const pttBtn = hotkeyField(st.pttKey, (v) => settings.set({ pttKey: v }), { label: 'Push-to-talk key', read: (e) => e.code, show: (v) => v.replace(/^Key|^Digit/, ''), clearable: false });
+  const pttRow = settingRow('Push-to-talk key', null, pttBtn, { dim: !st.ptt });
+  const hotkeyBtn = (key, label) => hotkeyField(st[key] || '', (v) => (settings.set({ [key]: v }), syncHotkeys()), { label });
+  // An option that applies at once: a setting row with a switch (D72)
+  const check = (key, label, after, help) => settingRow(label, help, switchEl(st[key], (on) => (settings.set({ [key]: on }), after?.(on)), label));
   const select = (key, options, after) => {
     const el = h('select', { onchange: (e) => (settings.set({ [key]: e.target.value }), after?.(e.target.value)) }, Object.entries(options).map(([k, label]) => h('option', { value: k }, label)));
     el.value = st[key];
     return el;
   };
-  const slider = (key, label, max, after) => {
-    const val = h('span', {}, Math.round(st[key] * 100) + '%');
-    return h(
-      'label',
-      { class: 'field' },
-      h('span', {}, label, ' ', val),
-      h('input', { type: 'range', min: 0, max, step: 0.01, value: st[key], oninput: (e) => (settings.set({ [key]: +e.target.value }), (val.textContent = Math.round(e.target.value * 100) + '%'), after(+e.target.value)) })
+  const slider = (key, label, max, after, help) => {
+    const val = h('span', { class: 'value' }, Math.round(st[key] * 100) + '%');
+    return settingRow(
+      label,
+      help,
+      h(
+        'div',
+        { class: 'sr-control' },
+        val,
+        h('input', { type: 'range', 'aria-label': label, min: 0, max, step: 0.01, value: st[key], oninput: (e) => (settings.set({ [key]: +e.target.value }), (val.textContent = Math.round(e.target.value * 100) + '%'), after(+e.target.value)) })
+      )
     );
   };
-  // Noise suppression strength: the most the noise is turned down by. The top of the slider is no limit.
-  const limitText = (v) => (v > DENOISE_LIMIT.max ? 'maximum' : `up to ${v} dB quieter`);
-  const limitVal = h('span', {}, limitText(st.noiseSuppressionLimit));
-  const denoiseLimit = h(
-    'label',
-    { class: 'field' },
-    h('span', {}, 'Strength: ', limitVal),
-    h('input', {
-      type: 'range',
-      min: DENOISE_LIMIT.min,
-      max: DENOISE_LIMIT.max + DENOISE_LIMIT.step,
-      step: DENOISE_LIMIT.step,
-      value: Math.min(st.noiseSuppressionLimit, DENOISE_LIMIT.max + DENOISE_LIMIT.step),
-      oninput: (e) => {
-        const v = +e.target.value > DENOISE_LIMIT.max ? DENOISE_LIMIT.none : +e.target.value;
-        settings.set({ noiseSuppressionLimit: v });
-        limitVal.textContent = limitText(v);
-        applyDenoise();
-      },
-    })
+  // Noise suppression (D47): one slider. Its left end is off; then the most the noise is turned down
+  // by, from 6 to 40 dB; its right end is no limit. Bands name the range: None, Light, Normal, Strong (D72).
+  const DL = DENOISE_LIMIT;
+  const OFF = DL.min - DL.step;
+  const TOP = DL.max + DL.step;
+  const bandOf = (v) => (v <= OFF ? 'None' : v <= 14 ? 'Light' : v <= 28 ? 'Normal' : 'Strong');
+  const denoiseText = (v) => (v <= OFF ? 'off' : v >= TOP ? 'maximum' : `up to ${v} dB quieter`);
+  const denoiseVal = (now = settings.get()) => (!now.noiseSuppression ? OFF : Math.min(now.noiseSuppressionLimit, TOP));
+  const denoiseBand = h('b', { class: 'band' });
+  const denoiseAmount = h('span', { class: 'amount' });
+  const pos = (v) => (v - OFF) / (TOP - OFF);
+  // Each band's name under the middle of its stretch of the track
+  const bands = rangeTicks([[0, 'None'], [(pos(DL.min) + pos(14)) / 2, 'Light'], [(pos(16) + pos(28)) / 2, 'Normal'], [1, 'Strong']]);
+  bands.classList.add('denoise-bands');
+  for (const el of bands.children) el.dataset.band = el.textContent;
+  const showDenoise = (v) => {
+    denoiseBand.textContent = bandOf(v);
+    denoiseAmount.textContent = ' · ' + denoiseText(v);
+    denoiseSlider.setAttribute('aria-valuetext', `${bandOf(v)}, ${denoiseText(v)}`);
+    for (const el of bands.children) el.classList.toggle('on', el.dataset.band === bandOf(v));
+  };
+  const denoiseSlider = h('input', {
+    type: 'range',
+    'aria-label': 'Noise suppression strength',
+    min: OFF,
+    max: TOP,
+    step: DL.step,
+    value: denoiseVal(),
+    oninput: (e) => {
+      const v = +e.target.value;
+      denoiseOn = v > OFF;
+      settings.set(denoiseOn ? { noiseSuppression: true, noiseSuppressionLimit: v >= TOP ? DL.none : v } : { noiseSuppression: false });
+      showDenoise(v);
+      applyDenoise();
+    },
+  });
+  const denoiseControl = h(
+    'div',
+    { class: 'denoise' },
+    h('div', { class: 'denoise-head' }, h('span', { class: 'muted small' }, 'Strength'), h('span', { class: 'denoise-now' }, denoiseBand, denoiseAmount)),
+    denoiseSlider,
+    rangeTicks([[0, 'off'], [pos(10), '10 dB'], [pos(20), '20'], [pos(30), '30'], [1, 'max']]),
+    bands
   );
+  showDenoise(denoiseVal());
 
+  inSel.setAttribute('aria-label', 'Input device');
+  outSel.setAttribute('aria-label', 'Output device');
+  camSel.setAttribute('aria-label', 'Camera');
   body.append(
-    h('div', { class: 'row' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
-    h('div', { class: 'field' }, h('span', {}, 'Mic level'), h('div', { class: 'row' }, meter, testBtn)),
-    h(
-      'div',
-      { class: 'alert danger', role: 'alert' },
-      icon('head'),
-      h('div', {}, h('strong', {}, 'Only test your mic with headphones on. '), 'On speakers your mic picks up its own playback and makes a loud feedback screech.')
-    ),
-    h('p', { class: 'muted small' }, 'While it runs you hear nobody else, and nobody hears you.'),
+    h('h3', {}, 'Devices'),
+    h('div', { class: 'row two' }, h('label', { class: 'field grow' }, h('span', {}, 'Input device'), inSel), h('label', { class: 'field grow' }, h('span', {}, 'Output device'), outSel)),
+    h('div', { class: 'field' }, h('span', { class: 'field-head' }, 'Mic level and noise gate', h('span', { class: 'muted' }, gateVal)), gateBox),
+    h('p', { class: 'muted small' }, 'The bar shows how loud your mic is, in a call or a mic test. Set the marker above your background noise and below your voice, or all the way left for no gate.'),
+    h('div', { class: 'row test-row' }, testBtn, h('span', { class: 'muted small grow' }, 'Only test with headphones on: on speakers your mic hears its own playback and screeches. While it runs you hear nobody else, and nobody hears you.')),
+    micNote,
+    h('h3', {}, 'Microphone'),
+    slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
+    check('autoGain', 'Automatic gain', restartMic, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
+    check('echoCancellation', 'Echo cancellation', restartMic, 'Keeps your speakers out of your mic. With headphones on you can turn it off.'),
+    settingRow('Noise suppression', 'Takes keyboards, fans and other background noise out of your mic, on this device. Turn it down if it cuts sounds you want heard.', denoiseControl),
+    h('h3', {}, 'Push to talk'),
+    check('ptt', 'Use push to talk', (on) => (audio.updateGate(), pttRow.classList.toggle('dim', !on)), 'Instead of an open mic. Works while friendspeak is the focused window.'),
+    pttRow,
+    h('h3', {}, 'Shortcuts'),
+    settingRow('Mute', null, hotkeyBtn('muteHotkey', 'Mute shortcut')),
+    settingRow('Deafen', null, hotkeyBtn('deafenHotkey', 'Deafen shortcut')),
+    h('p', { class: 'muted small' }, desktop ? 'Shortcuts with Ctrl/Alt/Cmd, F-keys or the numpad work even while other apps are focused.' : 'Shortcuts work while friendspeak is the focused window.'),
+    h('h3', {}, 'Volume'),
+    slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall()), 'Covers everything except the game.'),
+    slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v), 'Click someone in a voice channel to change only their volume.'),
+    h('h3', {}, 'Soundboard'),
+    slider('soundboardVolume', 'Soundboard volume', 1, (v) => audio.setSoundboardVolume(v)),
+    check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened)),
     h('h3', {}, 'Camera'),
     h('label', { class: 'field' }, h('span', {}, 'Camera'), camSel),
     h('div', { class: 'field' }, h('span', {}, 'Background'), picker.el),
     h('div', { class: 'field' }, h('div', { class: 'row' }, previewBtn), preview.el),
-    ...streamingSettings(check),
-    h('h3', {}, 'Volume'),
-    slider('masterVolume', 'Master volume', 1, (v) => (audio.setMasterVolume(v), syncStage(), renderDmCall())),
-    slider('voiceVolume', 'Voices', MAX_VOICES_VOLUME, (v) => audio.setVoiceVolume(v)),
-    h('p', { class: 'muted small' }, 'Covers everything except the game. Click someone in a voice channel to change only their volume.'),
-    h('h3', {}, 'Microphone'),
-    slider('micVolume', 'Mic volume', MAX_MIC_VOLUME, (v) => audio.setMicVolume(v)),
-    check('autoGain', 'Automatic gain', restartMic),
-    h('p', { class: 'muted small' }, 'Brings a quiet mic up (and a loud one down) to a steady speaking level.'),
-    check('echoCancellation', 'Echo cancellation', restartMic),
-    h('p', { class: 'muted small' }, 'Keeps your speakers out of your mic. With headphones on you can turn it off.'),
-    check('noiseSuppression', 'Noise suppression', (on) => ((denoiseOn = on), applyDenoise())),
-    denoiseLimit,
-    h(
-      'p',
-      { class: 'muted small' },
-      'Takes keyboards, fans and other background noise out of your mic, on this device. Turn the strength down if it cuts sounds you want heard.'
-    ),
-    h('div', { class: 'field' }, h('span', {}, 'Noise gate: ', gateVal), gateBox),
-    h(
-      'p',
-      { class: 'muted small' },
-      'Silences your mic while it is quieter than the marker. The bar shows how loud your mic is, in a call or a mic test: set the marker above your background noise and below your voice, or all the way left for no gate.'
-    ),
-    micNote,
-    h('h3', {}, 'Push to talk'),
-    check('ptt', 'Use push-to-talk instead of an open mic', () => audio.updateGate()),
-    h('div', { class: 'field' }, h('span', {}, 'Push-to-talk key'), pttBtn),
-    h('p', { class: 'muted small' }, 'Browsers only see keys while the friendspeak window is focused.'),
-    h('h3', {}, 'Shortcuts'),
-    h('div', { class: 'row' }, h('div', { class: 'field grow' }, h('span', {}, 'Mute'), hotkeyBtn('muteHotkey')), h('div', { class: 'field grow' }, h('span', {}, 'Deafen'), hotkeyBtn('deafenHotkey'))),
-    h(
-      'p',
-      { class: 'muted small' },
-      desktop ? 'Shortcuts with Ctrl/Alt/Cmd, F-keys or the numpad work even while other apps are focused.' : 'Shortcuts work while friendspeak is the focused window.'
-    ),
-    h('h3', {}, 'Soundboard'),
-    slider('soundboardVolume', 'Soundboard volume', 1, (v) => audio.setSoundboardVolume(v)),
-    check('soundboardMonitor', 'Hear my own soundboard', (on) => audio.setMonitor(on && !S.deafened))
+    ...streamingSettings(check)
   );
   return () => {
     closed = true;
@@ -6648,8 +7257,8 @@ function settingsVoice(body) {
 function streamingSettings(check) {
   if (!desktop?.media) return [];
   const status = h('p', { class: 'muted small' }, 'Checking what this computer can do…');
-  const restart = h('p', { class: 'muted small', hidden: true }, 'Restart friendspeak to apply this everywhere.');
-  const hwBox = h('input', { type: 'checkbox', checked: true });
+  const restart = h('p', { class: 'alert warn small', hidden: true }, 'Restart friendspeak to apply this everywhere.');
+  const hwBox = switchEl(true, () => {}, 'Hardware acceleration');
   const describe = (caps, prefs) => {
     const hw = prefs.hardwareAcceleration;
     const enc = caps ? (hw && caps.hardware.length ? `${caps.hardware.join(', ')} (hardware H.264)` : 'OpenH264 (software H.264)') : null;
@@ -6661,16 +7270,14 @@ function streamingSettings(check) {
     restart.hidden = hw === prefs.atStart;
   };
   Promise.all([nativeMedia.load(), desktop.prefs()]).then(([caps, prefs]) => {
-    hwBox.checked = prefs.hardwareAcceleration;
+    hwBox.setAttribute('aria-checked', String(!!prefs.hardwareAcceleration));
     describe(caps, prefs);
-    hwBox.onchange = async () => describe(caps, await desktop.prefs({ hardwareAcceleration: hwBox.checked }));
+    hwBox.addEventListener('click', async () => describe(caps, await desktop.prefs({ hardwareAcceleration: hwBox.getAttribute('aria-checked') === 'true' })));
   });
   return [
     h('h3', {}, 'Streaming'),
-    check('nativeStreaming', 'Native streaming'),
-    h('p', { class: 'muted small' }, 'Smoother, sharper screen shares and camera.'),
-    h('label', { class: 'check-row' }, hwBox, h('span', {}, 'Hardware acceleration')),
-    h('p', { class: 'muted small' }, 'Uses the graphics card. Turn it off if streams or the window show glitches.'),
+    check('nativeStreaming', 'Native streaming', null, 'Smoother, sharper screen shares and camera.'),
+    settingRow('Hardware acceleration', 'Uses the graphics card. Turn it off if streams or the window show glitches.', hwBox),
     status,
     restart,
   ];
@@ -6680,14 +7287,7 @@ function settingsNotifications(body) {
   const draw = () => {
     const st = settings.get();
     const set = (patch) => (settings.set(patch), draw());
-    const check = (key, label, { disabled = false, note = '' } = {}) =>
-      h(
-        'label',
-        { class: 'check-row' + (disabled ? ' disabled' : '') },
-        h('input', { type: 'checkbox', checked: st[key], disabled, onchange: (e) => set({ [key]: e.target.checked }) }),
-        h('span', {}, label),
-        note ? h('span', { class: 'muted small' }, note) : null
-      );
+    const sw = (key, label, help, { disabled = false } = {}) => settingRow(label, help, switchEl(st[key], (on) => set({ [key]: on }), label, { disabled }), { dim: disabled });
     const people = Object.entries(st.notifyMutedUsers);
     const muted = Object.keys(st.notifyMutedServers);
     const unmute = (key, id) => {
@@ -6696,46 +7296,51 @@ function settingsNotifications(body) {
       renderRail();
       renderChannels();
     };
-    const mutedRow = (label, onclick) => h('div', { class: 'row muted-row' }, h('span', { class: 'grow' }, label), h('button', { class: 'btn small ghost', onclick }, 'Unmute'));
+    const mutedRow = (who, onclick) => settingRow(who, null, h('button', { class: 'btn small ghost', onclick }, 'Unmute'));
     const offFor = { dm: !st.notify || !st.notifyDms, mention: !st.notify || !st.notifyMentions };
     // The slider keeps its place while you drag: it doesn't redraw the tab
-    const volume = h('span', {}, Math.round(st.cueVolume * 100) + '%');
+    const volume = h('span', { class: 'value' }, Math.round(st.cueVolume * 100) + '%');
     body.replaceChildren(
       h('h3', {}, 'Desktop notifications'),
-      check('notify', 'All notifications'),
-      check('notifyMentions', 'Mentions & replies', { disabled: !st.notify }),
-      check('notifyDms', 'Direct messages & calls', { disabled: !st.notify }),
-      h('p', { class: 'muted small' }, 'Only mentions and DMs notify you. They show an unread badge even when muted.'),
+      sw('notify', 'Show notifications', 'Only mentions and DMs notify you. They show an unread badge even when muted.'),
+      sw('notifyMentions', 'Mentions & replies', null, { disabled: !st.notify }),
+      sw('notifyDms', 'Direct messages & calls', null, { disabled: !st.notify }),
       h('h3', {}, 'Muted people'),
-      ...(people.length ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id))) : [h('p', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”.')]),
+      ...(people.length
+        ? people.map(([id, name]) => mutedRow(name || 'unknown', () => unmute('notifyMutedUsers', id)))
+        : [h('div', { class: 'empty boxed small-empty' }, h('span', { class: 'muted small' }, 'Nobody. Right-click someone and choose “Mute notifications”.'))]),
       h('h3', {}, 'Muted servers'),
       ...(muted.length
         ? muted.map((id) => {
-            const s = servers.get(id);
-            return mutedRow(s ? serverLabel(s) : 'A server you removed', () => unmute('notifyMutedServers', id));
+            const sv = servers.get(id);
+            return mutedRow(sv ? serverLabel(sv) : 'A server you removed', () => unmute('notifyMutedServers', id));
           })
-        : [h('p', { class: 'muted small' }, 'None. Right-click a server in the left bar and choose “Mute notifications”.')]),
+        : [h('div', { class: 'empty boxed small-empty' }, h('span', { class: 'muted small' }, 'None. Right-click a server in the left bar and choose “Mute notifications”.'))]),
       h('h3', {}, 'Sounds'),
-      check('cues', 'Play sounds'),
-      h(
-        'label',
-        { class: 'field' },
-        h('span', {}, 'Sound volume ', volume),
-        h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: st.cueVolume, oninput: (e) => (settings.set({ cueVolume: +e.target.value }), (volume.textContent = Math.round(e.target.value * 100) + '%'), audio.setCueVolume(+e.target.value)) })
+      sw('cues', 'Play sounds', 'Joins, leaves, messages and mentions.'),
+      settingRow(
+        'Sound volume',
+        null,
+        h(
+          'div',
+          { class: 'sr-control' },
+          volume,
+          h('input', { type: 'range', 'aria-label': 'Sound volume', min: 0, max: 1, step: 0.01, value: st.cueVolume, oninput: (e) => (settings.set({ cueVolume: +e.target.value }), (volume.textContent = Math.round(e.target.value * 100) + '%'), audio.setCueVolume(+e.target.value)) })
+        ),
+        { dim: !st.cues }
       ),
       ...CUES.map(({ kind, label }) => {
         const off = !!offFor[kind];
-        return h(
-          'div',
-          { class: 'row sound-row' },
+        return settingRow(
+          label,
+          off ? 'Off: its notifications are off' : null,
           h(
-            'label',
-            { class: 'check-row grow' + (off ? ' disabled' : '') },
-            h('input', { type: 'checkbox', checked: !off && st.sounds[kind] !== false, disabled: off, onchange: (e) => set({ sounds: { ...settings.get().sounds, [kind]: e.target.checked } }) }),
-            h('span', {}, label),
-            off ? h('span', { class: 'muted small' }, 'Off: notifications are off') : null
+            'div',
+            { class: 'sr-control' },
+            h('button', { class: 'btn small ghost', title: `Play the ${label.toLowerCase()} sound`, onclick: () => audio.preview(kind) }, 'Play'),
+            switchEl(!off && st.sounds[kind] !== false, (on) => set({ sounds: { ...settings.get().sounds, [kind]: on } }), label, { disabled: off })
           ),
-          h('button', { class: 'btn small ghost', title: 'Play this sound', onclick: () => audio.preview(kind) }, 'Play')
+          { dim: off || !st.cues }
         );
       })
     );
@@ -6752,22 +7357,19 @@ function settingsIntegrations(body) {
       { class: 'muted small' },
       'GIF search uses GIPHY. Create a free API key at developers.giphy.com and paste it here. It is stored only on this device. If you leave it empty, the server host’s key (GIPHY_API_KEY) is used if they set one.'
     ),
-    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
+    h('label', { class: 'field' }, h('span', {}, 'GIPHY API key'), h('input', { value: st.giphyKey, placeholder: 'paste key', spellcheck: 'false', autocomplete: 'off', oninput: (e) => settings.set({ giphyKey: e.target.value.trim() }) })),
     h('h3', {}, 'Steam'),
-    h(
-      'label',
-      { class: 'check-row' + (desktop?.steamGame ? '' : ' disabled') },
-      h('input', { type: 'checkbox', checked: st.steamPlaying, disabled: !desktop?.steamGame, onchange: (e) => (settings.set({ steamPlaying: e.target.checked }), pollSteam()) }),
-      h('span', {}, 'Show the Steam game I’m playing'),
-      h('span', { class: 'muted small' }, 'While a Steam game runs on this computer, its name shows next to yours on your servers and in your DMs. It is read from Steam here: no Steam sign-in.')
+    settingRow(
+      'Show the Steam game I’m playing',
+      desktop?.steamGame ? 'While a Steam game runs on this computer, its name shows next to yours on your servers and in your DMs. It is read from Steam here: no Steam sign-in.' : 'Needs the desktop app.',
+      switchEl(st.steamPlaying, (on) => (settings.set({ steamPlaying: on }), pollSteam()), 'Show the Steam game I’m playing', { disabled: !desktop?.steamGame }),
+      { dim: !desktop?.steamGame }
     ),
     h('h3', {}, 'Links'),
-    h(
-      'label',
-      { class: 'check-row' },
-      h('input', { type: 'checkbox', checked: st.loadLinkMedia, onchange: (e) => settings.set({ loadLinkMedia: e.target.checked }) }),
-      h('span', {}, 'Load pictures, video and audio from links without asking'),
-      h('span', { class: 'muted small' }, 'The site a link points to sees your address when its file loads. Off, each one waits for a click.')
+    settingRow(
+      'Load pictures, video and audio from links without asking',
+      'The site a link points to sees your address when its file loads. Off, each one waits for a click.',
+      switchEl(st.loadLinkMedia, (on) => settings.set({ loadLinkMedia: on }), 'Load media from links without asking')
     )
   );
 }
@@ -6791,7 +7393,7 @@ function settingsAbout(body) {
         ? h('button', { class: 'btn small', onclick: () => desktop.downloadUpdate() }, u.canInstall ? 'Update' : 'Download')
         : u?.status === 'ready'
           ? h('button', { class: 'btn small', onclick: () => desktop.installUpdate() }, 'Restart now')
-          : u && h('button', { class: 'btn small ghost', disabled: ['checking', 'downloading'].includes(u.status), onclick: () => desktop.checkForUpdates() }, 'Check for updates');
+          : u && h('button', { class: 'btn small secondary', disabled: ['checking', 'downloading'].includes(u.status), onclick: () => desktop.checkForUpdates() }, 'Check for updates');
 
     const su = S.connected && S.server?.update;
     const serverStatus =
@@ -6808,14 +7410,26 @@ function settingsAbout(body) {
               ? `Version ${su.latest.version} installs ${windowTime(su.at)} (in ${countdown(su.at - Date.now())}). The server is offline for a minute or two.`
               : `Version ${su.latest.version} is available. The host can update it.`);
 
+    // A version card: the logo, the version, where the update stands, a bar while it downloads (D72)
+    const busy = u && ['checking', 'downloading'].includes(u.status);
     body.replaceChildren(...[
       h('h3', {}, 'friendspeak app'),
-      h('div', { class: 'about-row' }, h('strong', {}, u ? `Version ${u.current}` : 'Version unknown'), action),
-      h('p', { class: 'muted small' }, status),
+      h(
+        'div',
+        { class: 'version-card' },
+        h('div', { class: 'rail-logo' }, 'fs'),
+        h(
+          'div',
+          { class: 'grow' },
+          h('strong', {}, u ? `Version ${u.current}` : 'Version unknown'),
+          h('div', { class: 'muted small vc-status', role: 'status' }, busy ? spinner() : null, status),
+          u?.status === 'downloading' ? h('div', { class: 'progress', role: 'progressbar', 'aria-valuenow': u.progress, 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('div', { style: { width: (u.progress || 0) + '%' } })) : null
+        ),
+        action
+      ),
       desktop?.openReleases && h('p', {}, h('a', { href: '#', onclick: (e) => (e.preventDefault(), desktop.openReleases()) }, 'Release notes and downloads')),
       S.connected && h('h3', {}, 'This server'),
-      S.connected && h('div', { class: 'about-row' }, h('strong', {}, `${S.server.name}: version ${su?.version || 'unknown (older than 1.1)'}`)),
-      serverStatus && h('p', { class: 'muted small' }, serverStatus),
+      S.connected && settingRow(`${S.server.name} · version ${su?.version || 'unknown (older than 1.1)'}`, serverStatus || null, null),
       desktop?.logs && logsSection(),
     ].filter(Boolean));
   };
@@ -6829,16 +7443,25 @@ function settingsAbout(body) {
 // servers and web pages), so it only ever goes in through textContent.
 function logsSection() {
   const logs = desktop.logs;
-  const status = h('p', { class: 'muted small' }, '…');
+  const status = h('div', { class: 'log-summary' }, '…');
   const when = (ts) => new Date(ts).toLocaleString();
   const draw = async () => {
     const s = await logs.summary().catch(() => null);
     if (!s) return status.replaceChildren('Logs are not available.');
     const crash = s.crashes[0];
-    status.textContent =
-      (s.errors ? `${s.errors} error${s.errors === 1 ? '' : 's'} in the last 7 days.` : 'No errors in the last 7 days.') +
-      (crash ? ` Last crash: ${when(crash.ts)}.` : '') +
-      ` (${fmtBytes(s.bytes)} on disk)`;
+    const bad = s.errors || crash;
+    status.className = 'log-summary' + (bad ? ' alert danger' : ' muted small');
+    status.replaceChildren(
+      ...[
+      bad ? icon('warn') : null,
+      h(
+        'span',
+        { class: 'grow' },
+        (s.errors ? `${s.errors} error${s.errors === 1 ? '' : 's'} in the last 7 days.` : 'No errors in the last 7 days.') + (crash ? ` Last crash: ${when(crash.ts)}.` : '') + ` (${fmtBytes(s.bytes)} on disk)`
+      ),
+      bad ? h('button', { class: 'btn small ghost', onclick: () => viewLogs() }, 'View log') : null,
+      ].filter(Boolean)
+    );
   };
   const run = (fn) => async () => {
     try {
@@ -6858,26 +7481,27 @@ function logsSection() {
     h(
       'div',
       { class: 'about-row' },
-      h('button', { class: 'btn small', onclick: () => viewLogs() }, 'View log'),
+      h('button', { class: 'btn small secondary', onclick: () => viewLogs() }, 'View log'),
       h('button', { class: 'btn small ghost', onclick: run(async () => {
         const r = await logs.save();
         if (r.error) toast('Could not save the report: ' + r.error, 'error');
-        else if (r.saved) toast('Report saved');
+        else if (r.saved) toast('Report saved', 'success');
       }) }, 'Save report…'),
       h('button', { class: 'btn small ghost', onclick: run(async () => {
         await navigator.clipboard.writeText(await logs.report());
-        toast('Report copied');
+        toast('Report copied', 'success');
       }) }, 'Copy report'),
       h('button', { class: 'btn small ghost', onclick: run(async () => {
         const r = await logs.reveal();
         if (r?.error) toast(r.error, 'error');
       }) }, 'Open folder'),
-      h('button', { class: 'btn small ghost', onclick: run(async () => {
-        if (!(await confirmModal('Clear logs', 'Delete all logs and crash reports from this computer?', 'Clear'))) return;
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn small ghost danger', onclick: run(async () => {
+        if (!(await confirmModal('Clear logs', 'Delete all logs and crash reports from this computer?', 'Clear logs'))) return;
         await logs.clear();
-        toast('Logs cleared');
+        toast('Logs cleared', 'success');
         draw();
-      }) }, 'Clear')
+      }) }, 'Clear logs…')
     )
   );
 }
@@ -6888,14 +7512,13 @@ function viewLogs() {
   const RANK = { debug: 0, info: 1, warn: 2, error: 3 };
   let lines = [];
   let more = false;
-  const level = h('select', { onchange: () => draw() }, h('option', { value: '3' }, 'Errors'), h('option', { value: '2' }, 'Warnings and errors'), h('option', { value: '0' }, 'Everything'));
-  level.value = '2';
-  const find = h('input', { type: 'search', placeholder: 'Filter', oninput: () => draw() });
+  let min = 2;
+  const level = segmented([[3, 'Errors'], [2, 'Warnings'], [0, 'Everything']], min, (v) => ((min = +v), draw()), 'Level');
+  const find = h('input', { type: 'search', 'aria-label': 'Filter the log', placeholder: 'Filter', oninput: () => draw() });
   const crashBox = h('div', { class: 'log-crashes' });
   const box = h('div', { class: 'log-lines' });
   const olderBtn = h('button', { class: 'btn small ghost', onclick: () => load(true) }, 'Load older');
   const draw = () => {
-    const min = Number(level.value);
     const q = find.value.trim().toLowerCase();
     const shown = lines.filter((l) => RANK[l.level] >= min && (!q || `${l.source} ${l.text} ${l.stack || ''}`.toLowerCase().includes(q)));
     box.replaceChildren(
@@ -6911,7 +7534,7 @@ function viewLogs() {
           l.stack && h('details', {}, h('summary', {}, 'stack'), h('pre', {}, l.stack))
         )
       ),
-      ...(shown.length ? [] : [h('p', { class: 'muted small' }, lines.length ? 'Nothing matches.' : 'The log is empty.')])
+      ...(shown.length ? [] : [lines.length ? emptyState('search', 'Nothing matches', 'Try another word or level.') : emptyState('file', 'The log is empty')])
     );
   };
   const load = async (older) => {
@@ -6956,18 +7579,9 @@ const PERM_INFO = [
   ['createInvites', 'Create invites', 'Make invites and see who joined with them.'],
 ];
 
-// Inherit / Allow / Deny for a setting that may be unset (true, false or undefined)
-function triSelect(value, onChange, { disabled = false, inherit = 'Inherit' } = {}) {
-  const sel = h(
-    'select',
-    { class: 'tri', disabled, onchange: () => onChange(sel.value === 'allow' ? true : sel.value === 'deny' ? false : undefined) },
-    h('option', { value: 'inherit' }, inherit),
-    h('option', { value: 'allow' }, 'Allow'),
-    h('option', { value: 'deny' }, 'Deny')
-  );
-  sel.value = value === true ? 'allow' : value === false ? 'deny' : 'inherit';
-  return sel;
-}
+// Inherit / Allow / Deny for a setting that may be unset (true, false or undefined): a three-part
+// control rather than a select per cell, so a table of overrides reads at a glance (D72)
+const triSelect = (value, onChange, { disabled = false, inherit = 'Inherit', label = 'Permission' } = {}) => triState(value, onChange, label, { disabled, inherit });
 
 // A checklist popover for someone's roles: ticks are saved as they're made
 function rolesPopover(anchor, pid, align = 'right') {
@@ -6977,12 +7591,13 @@ function rolesPopover(anchor, pid, align = 'right') {
     const may = new Set(grantableRoles(pid).map((r) => r.id));
     const have = new Set(S.server.memberRoles?.[pid] || []);
     const roles = S.server.roles || [];
+    const locked = roles.filter((r) => !may.has(r.id));
     body.replaceChildren(
-      h('div', { class: 'cat' }, `Roles for ${name}`),
+      h('div', { class: 'menu-label' }, `Roles for ${name}`),
       ...roles.map((r) =>
         h(
           'label',
-          { class: 'check-row' + (may.has(r.id) ? '' : ' disabled'), title: may.has(r.id) ? '' : 'You can’t change this role' },
+          { class: 'check-row' + (may.has(r.id) ? '' : ' disabled') },
           h('input', {
             type: 'checkbox',
             checked: have.has(r.id),
@@ -6994,13 +7609,17 @@ function rolesPopover(anchor, pid, align = 'right') {
               draw();
             },
           }),
-          roleTag(r)
+          roleTag(r),
+          may.has(r.id) ? null : icon('lock', 'lock-icon')
         )
       ),
+      locked.length ? h('p', { class: 'muted small roles-note' }, `You can’t change ${locked.map((r) => r.name).join(', ')}.`) : null,
       roles.length ? null : h('p', { class: 'muted small' }, 'This server has no roles yet.')
     );
   };
   draw();
+  body.setAttribute('role', 'group');
+  body.setAttribute('aria-label', `Roles for ${name}`);
   popover(anchor, body, { align, className: 'roles-popover' });
 }
 
@@ -7016,6 +7635,7 @@ function memberItems(pid, anchor, align = 'right') {
     if (can('forceMute') && (self ? fm : canActOn(pid))) items.push({ label: fm ? 'Lift force mute' : 'Force mute', run: () => doAct('voice:forcemute', { profileId: pid, muted: !fm }) });
     if (grantableRoles(pid).length) items.push({ label: 'Roles…', run: () => rolesPopover(anchor, pid, align) });
   }
+  items.push('-'); // what can't be undone goes last (contextMenu drops a separator with nothing after it)
   if (!self && can('kick') && canActOn(pid)) items.push({ label: 'Remove from server…', danger: true, run: () => removePrompt(pid) });
   if (!self && can('ban') && canActOn(pid) && !isBanned(pid)) items.push({ label: 'Ban…', danger: true, run: () => banPrompt(pid) });
   return items;
@@ -7039,16 +7659,16 @@ function channelPermsDialog(ch) {
     h(
       'div',
       {},
-      h('p', { class: 'muted small' }, 'Inherit keeps the server-wide setting.'),
-      S.conn.perms?.open ? h('p', { class: 'muted small' }, 'Permissions are off on this server, so these only take effect once someone is an administrator.') : null,
+      h('p', { class: 'muted small' }, '/ (inherit) keeps the server-wide setting; ✓ allows, ✕ denies.'),
+      S.conn.perms?.open ? h('p', { class: 'banner-note' }, 'Permissions are off on this server, so these only take effect once someone is an administrator.') : null,
       h(
         'div',
         { class: 'perm-table' },
         h('span', {}),
         ...cols.map(([, label]) => h('span', { class: 'perm-col' }, label)),
         ...rows.flatMap((r) => [
-          r.id === 'everyone' ? h('span', { class: 'perm-who' }, 'everyone') : h('span', { class: 'perm-who' }, roleTag(r)),
-          ...cols.map(([key]) => triSelect(ov[r.id]?.[key], (v) => set(r.id, key, v))),
+          r.id === 'everyone' ? h('span', { class: 'perm-who strong' }, 'Everyone') : h('span', { class: 'perm-who' }, roleTag(r)),
+          ...cols.map(([key, label]) => triSelect(ov[r.id]?.[key], (v) => set(r.id, key, v), { label: `${r.id === 'everyone' ? 'Everyone' : r.name}: ${label}` })),
         ])
       )
     ),
@@ -7067,6 +7687,7 @@ function channelPermsDialog(ch) {
           'Save'
         ),
       ],
+      className: 'perms',
     }
   );
 }
@@ -7090,11 +7711,24 @@ function openServerSettings(tab = 'overview') {
     ...(S.conn.perms?.createInvites ? { invites: ['Invites', serverInvites] } : {}),
   };
   let cur = pages[tab] ? tab : 'overview';
-  const nav = h('div', { class: 'settings-nav' });
+  const nav = h('nav', { class: 'settings-nav', 'aria-label': 'Server settings' });
+  // How many of each, next to the page's name (D72)
+  const counts = () => ({
+    roles: S.server?.roles?.length,
+    members: Object.keys(S.server?.profiles || {}).filter((pid) => !isBanned(pid)).length,
+    emojis: S.server?.emojis?.length,
+    bans: S.server?.bans?.length,
+    invites: st.invites?.filter((v) => inviteStatus(v) === 'active').length,
+  });
   const show = (key, keepScroll) => {
     const top = keepScroll ? body.scrollTop : 0;
     cur = key;
-    for (const b of nav.children) b.classList.toggle('active', b.dataset.tab === key);
+    const n = counts();
+    for (const b of nav.children) {
+      b.classList.toggle('active', b.dataset.tab === key);
+      b.setAttribute('aria-current', b.dataset.tab === key ? 'page' : 'false');
+      b.querySelector('.n').textContent = n[b.dataset.tab] || '';
+    }
     body.replaceChildren();
     pages[key][1](body, { st, redraw: () => show(cur, true) });
     body.scrollTop = top;
@@ -7112,8 +7746,9 @@ function openServerSettings(tab = 'overview') {
   socket.on('invites', onInvites);
   const gone = () => close();
   socket.on('disconnect', gone);
-  nav.append(...Object.entries(pages).map(([k, [label]]) => h('button', { 'data-tab': k, onclick: () => show(k) }, label)));
-  const close = modal('Server settings', h('div', { class: 'settings' }, nav, body), {
+  nav.append(...Object.entries(pages).map(([k, [label]]) => h('button', { 'data-tab': k, onclick: () => show(k) }, h('span', {}, label), h('span', { class: 'n' }))));
+  const title = [h('span', { class: 'title-img' }, S.server.icon ? h('img', { src: S.server.icon, alt: '', referrerpolicy: 'no-referrer' }) : initials(S.server.name)), S.server.name, h('span', { class: 'title-sub' }, 'Server settings')];
+  const close = modal(title, h('div', { class: 'settings' }, nav, body), {
     wide: true,
     onClose: () => {
       for (const ev of events) socket.off(ev, redraw);
@@ -7142,10 +7777,9 @@ function serverOverview(body) {
   serverName.addEventListener('keydown', (e) => e.key === 'Enter' && saveName());
   // Game on/off: can only be switched on when the server has the game assets
   const g = S.server.game || {};
-  const gameToggle = h('input', { type: 'checkbox', checked: !!g.enabled, disabled: ro || !g.available });
-  gameToggle.onchange = async () => (await update({ game: gameToggle.checked })) || (gameToggle.checked = !!S.server.game?.enabled);
+  const gameToggle = switchEl(!!g.enabled, async (on) => (await update({ game: on })) || gameToggle.setAttribute('aria-checked', String(!!S.server.game?.enabled)), 'Club Penguin', { disabled: ro || !g.available });
   // Voice quality: the bitrate everyone sends their voice at in this server's channels
-  const quality = h('select', { disabled: ro, onchange: async () => (await update({ audioQuality: quality.value })) || (quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max') }, Object.entries(VOICE_QUALITIES).map(([k, label]) => h('option', { value: k }, label)));
+  const quality = h('select', { disabled: ro, 'aria-label': 'Voice quality', onchange: async () => (await update({ audioQuality: quality.value })) || (quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max') }, Object.entries(VOICE_QUALITIES).map(([k, label]) => h('option', { value: k }, label)));
   quality.value = AUDIO_QUALITY[S.server.audioQuality] ? S.server.audioQuality : 'max';
   body.append(
     h('h3', {}, 'Overview'),
@@ -7171,23 +7805,24 @@ function serverOverview(body) {
               h('button', { class: 'btn small ghost danger', onclick: () => S.server.icon && update({ icon: '' }) }, 'Remove')
             )
       ),
-      h('label', { class: 'field grow' }, h('span', {}, 'Server name'), serverName),
-      ro ? null : h('button', { class: 'btn', style: { alignSelf: 'flex-end' }, onclick: saveName }, 'Save')
+      h(
+        'div',
+        { class: 'grow server-name-col' },
+        h('label', { class: 'field' }, h('span', {}, 'Server name'), serverName),
+        ro ? null : h('div', { class: 'row end' }, h('button', { class: 'btn small', onclick: saveName }, 'Save name'))
+      )
     ),
     h('h3', {}, 'Voice'),
-    h('label', { class: 'field' }, h('span', {}, 'Voice quality'), quality),
-    h('p', { class: 'muted small' }, 'Lower it if a big channel strains someone’s upload.'),
+    settingRow('Voice quality', 'Lower it if a big channel strains someone’s upload.', quality),
     h('h3', {}, 'Games'),
-    h('label', { class: 'check-row' + (gameToggle.disabled ? ' disabled' : '') }, gameToggle, h('span', {}, 'Club Penguin')),
-    h('p', { class: 'muted small' }, g.available ? 'Shows Club Penguin under Games for everyone on this server.' : g.reason || 'Club Penguin is not available on this server.'),
+    settingRow('Club Penguin', g.available ? 'Shows Club Penguin under Games for everyone on this server.' : g.reason || 'Club Penguin is not available on this server.', gameToggle, { dim: !g.available }),
     ...(S.server.storage
       ? [
           h('h3', {}, 'Files'),
-          h(
-            'div',
-            { class: 'row' },
-            h('p', { class: 'muted small grow' }, `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used.`),
-            h('button', { class: 'btn small', onclick: () => openFileBrowser() }, 'Browse files')
+          settingRow(
+            `${fmtBytes(S.server.storage.used)} of ${fmtBytes(S.server.storage.max)} used`,
+            h('div', { class: 'storage-bar' + (S.server.storage.used / S.server.storage.max > 0.9 ? ' full' : '') }, h('div', { style: { width: Math.min(100, (S.server.storage.used / (S.server.storage.max || 1)) * 100) + '%' } })),
+            h('button', { class: 'btn small secondary', onclick: () => openFileBrowser() }, 'Browse files')
           ),
         ]
       : [])
@@ -7214,7 +7849,7 @@ function serverRoles(body, { st, redraw }) {
     'div',
     { class: 'roles-list' },
     h('button', { class: 'roles-item' + (st.role === 'default' ? ' active' : ''), onclick: () => pick('default') }, 'Default permissions'),
-    h('div', { class: 'cat' }, 'Roles, highest first'),
+    h('div', { class: 'nav-group' }, 'Roles, highest first'),
     ...roles.map((r) => h('button', { class: 'roles-item' + (st.role === r.id ? ' active' : ''), onclick: () => pick(r.id) }, dot(r), h('span', { class: 'name' }, r.name))),
     canMake ? h('button', { class: 'btn small', onclick: newRole }, 'New role') : null
   );
@@ -7250,21 +7885,19 @@ function serverRoles(body, { st, redraw }) {
       h('h3', {}, 'Default permissions'),
       h('p', { class: 'muted small' }, 'What everyone can do unless a role or channel says otherwise.' + (admin || open ? '' : ' Only administrators can change them.')),
       ...PERM_INFO.map(([key, label, desc]) =>
-        h(
-          'label',
-          { class: 'check-row perm-row' + (!admin ? ' disabled' : '') },
-          h('input', {
-            type: 'checkbox',
-            checked: !!dp[key],
-            disabled: !admin,
-            onchange: async (e) => {
-              const on = e.target.checked;
-              if (key === 'admin' && on && !(await confirmModal('Make everyone an administrator', 'Everyone on this server, including people who join later, would have every permission. Do this only if you mean it.', 'Make everyone an administrator'))) return redraw();
+        settingRow(
+          label,
+          desc,
+          switchEl(
+            !!dp[key],
+            async (on) => {
+              if (key === 'admin' && on && !(await confirmModal('Make everyone an administrator', 'Everyone on this server, including people who join later, would have every permission. Do this only if you mean it.', 'Make everyone admin'))) return redraw();
               const r = await doAct('perms:default', { perms: { [key]: on } });
               if (r?.error) redraw();
             },
-          }),
-          h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc))
+            label,
+            { disabled: !admin }
+          )
         )
       ),
       dp.manageRoles ? [h('h3', {}, 'Roles everyone can hand out'), grantNote, grantList(sv.defaultGrantable || [], !admin, (ids) => doAct('perms:default', { grantable: ids }))] : null
@@ -7274,7 +7907,7 @@ function serverRoles(body, { st, redraw }) {
     const idx = roles.indexOf(r);
     const canEdit = !open && (admin || (p.manageRoles && isAesthetic(r)));
     const name = h('input', { maxlength: 32, value: r.name, disabled: !canEdit });
-    const color = h('input', { type: 'color', value: /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : '#8b6cf6', disabled: !canEdit });
+    const color = h('input', { type: 'color', 'aria-label': 'Role color', value: /^#[0-9a-f]{6}$/i.test(r.color) ? r.color : '#8b6cf6', disabled: !canEdit });
     const save = () => name.value.trim() && doAct('role:update', { id: r.id, name: name.value.trim(), color: color.value });
     name.addEventListener('keydown', (e) => e.key === 'Enter' && save());
     const setPerms = (key, v) => {
@@ -7290,10 +7923,10 @@ function serverRoles(body, { st, redraw }) {
       h('h3', {}, 'Role'),
       h(
         'div',
-        { class: 'row' },
+        { class: 'row form-row' },
         h('label', { class: 'field grow' }, h('span', {}, 'Name'), name),
         h('label', { class: 'field' }, h('span', {}, 'Color'), color),
-        canEdit ? h('button', { class: 'btn', style: { alignSelf: 'flex-end', marginBottom: '14px' }, onclick: save }, 'Save') : null
+        canEdit ? h('button', { class: 'btn', onclick: save }, 'Save') : null
       ),
       canEdit || admin
         ? h(
@@ -7302,17 +7935,21 @@ function serverRoles(body, { st, redraw }) {
             admin && !open ? h('button', { class: 'btn small ghost', disabled: idx === 0, onclick: () => doAct('role:update', { id: r.id, position: idx - 1 }) }, 'Move up') : null,
             admin && !open ? h('button', { class: 'btn small ghost', disabled: idx === roles.length - 1, onclick: () => doAct('role:update', { id: r.id, position: idx + 1 }) }, 'Move down') : null,
             canEdit
-              ? h('button', { class: 'btn small ghost danger', onclick: async () => (await confirmModal('Delete role', `Delete "${r.name}"? Everyone who has it loses it.`)) && doAct('role:delete', { id: r.id }) }, 'Delete role')
+              ? h('button', { class: 'btn small ghost danger push-end', onclick: async () => (await confirmModal('Delete role', `Delete "${r.name}"? Everyone who has it loses it.`, 'Delete role')) && doAct('role:delete', { id: r.id }) }, 'Delete role…')
               : null
           )
         : h('p', { class: 'muted small' }, 'You can’t edit this role.'),
       h('p', { class: 'muted small' }, holders.length ? `Held by ${holders.join(', ')}.` : 'Nobody has this role yet. Give it to people from the Members page.'),
       h('h3', {}, 'Permissions'),
-      h('p', { class: 'muted small' }, 'Inherit uses the default permissions. With several roles, the highest one wins.' + (admin && !open ? '' : ' Only administrators can change these.')),
+      h('p', { class: 'muted small' }, '/ inherits the default permissions; ✓ allows, ✕ denies. With several roles, the highest one wins.' + (admin && !open ? '' : ' Only administrators can change these.')),
       ...PERM_INFO.map(([key, label, desc]) =>
-        key === 'admin'
-          ? h('label', { class: 'check-row perm-row' + (!admin || open ? ' disabled' : '') }, h('input', { type: 'checkbox', checked: !!r.perms?.admin, disabled: !admin || open, onchange: (e) => setPerms('admin', e.target.checked ? true : undefined) }), h('span', {}, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)))
-          : h('div', { class: 'perm-row' }, h('span', { class: 'grow' }, h('strong', {}, label), h('span', { class: 'muted small' }, ' ' + desc)), triSelect(r.perms?.[key], (v) => setPerms(key, v), { disabled: !admin || open }))
+        settingRow(
+          label,
+          desc,
+          key === 'admin'
+            ? switchEl(!!r.perms?.admin, (on) => setPerms('admin', on ? true : undefined), label, { disabled: !admin || open })
+            : triSelect(r.perms?.[key], (v) => setPerms(key, v), { disabled: !admin || open, label })
+        )
       ),
       r.perms?.manageRoles === true
         ? [h('h3', {}, 'Roles this role can hand out'), grantNote, grantList(r.grantable || [], !admin || open, (ids) => doAct('role:update', { id: r.id, grantable: ids }))]
@@ -7325,53 +7962,63 @@ function serverRoles(body, { st, redraw }) {
   );
 }
 
-function serverMembers(body) {
+// Everyone who has joined: roles, whether they're here, and the member menu on each row (D72)
+function serverMembers(body, { st }) {
   const sv = S.server;
+  const online = new Set(S.users.map((u) => u.id));
+  const q = (st.memberQuery || '').toLowerCase();
   const people = Object.entries(sv.profiles || {})
     .filter(([pid]) => !isBanned(pid))
     .map(([pid, p]) => ({ ...p, id: pid }))
     .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-  body.append(
-    h('h3', {}, 'Members'),
-    h(
-      'div',
-      { class: 'emoji-list' },
-      people.length
-        ? people.map((u) => {
+  const list = h('div', { class: 'member-list' });
+  const draw = () => {
+    const shown = people.filter((u) => !q || (u.name || '').toLowerCase().includes(q) || rolesOf(u.id).some((r) => r.name.toLowerCase().includes(q)));
+    list.replaceChildren(
+      ...(shown.length
+        ? shown.map((u) => {
             const rs = rolesOf(u.id);
+            const more = memberItems(u.id, null, 'left').filter((it) => it !== '-' && !/^Roles/.test(it.label));
             return h(
               'div',
-              { class: 'emoji-row' },
+              { class: 'setting-row member-row' },
               avatarEl(u, 28),
-              h('strong', {}, u.name),
-              isAdminPid(u.id) ? h('span', { class: 'role-tag admin-tag' }, 'Administrator') : null,
-              h('span', { class: 'role-tags grow member-role-tags' }, rs.map(roleTag)),
-              grantableRoles(u.id).length ? h('button', { class: 'btn small ghost', onclick: (e) => rolesPopover(e.currentTarget, u.id) }, 'Roles…') : null
+              h(
+                'div',
+                { class: 'sr-label' },
+                h('div', { class: 'sr-title' }, u.name),
+                h('div', { class: 'sr-help' }, u.id === me().id ? 'You' : online.has(u.id) ? 'Online' : u.seen ? 'Last seen ' + fmtTime(u.seen) : 'Offline')
+              ),
+              h('span', { class: 'role-tags member-role-tags' }, isAdminPid(u.id) ? h('span', { class: 'role-tag admin-tag' }, 'Administrator') : null, rs.map(roleTag)),
+              grantableRoles(u.id).length ? h('button', { class: 'btn small ghost', onclick: (e) => rolesPopover(e.currentTarget, u.id) }, 'Roles…') : null,
+              more.length ? h('button', { class: 'icon-btn small', title: `More for ${u.name}`, onclick: (e) => menuPopover(e.currentTarget, memberItems(u.id, e.currentTarget, 'left'), { align: 'end', label: u.name }) }, icon('more')) : null
             );
           })
-        : h('p', { class: 'muted small' }, 'Nobody yet.')
-    )
-  );
+        : [emptyState('people', q ? 'Nobody matches' : 'Nobody yet', q ? 'Try another name or role.' : null)])
+    );
+  };
+  const search = h('input', { type: 'search', class: 'head-search', placeholder: 'Search members', 'aria-label': 'Search members', value: st.memberQuery || '', oninput: () => ((st.memberQuery = search.value), serverMembers(body.replaceChildren() || body, { st }), body.querySelector('.head-search')?.focus()) });
+  body.append(h('div', { class: 'page-head' }, h('h3', {}, 'Members'), search), list);
+  draw();
 }
 
 function serverEmojis(body) {
   const ok = can('manageEmojis');
-  const nameIn = h('input', { placeholder: 'party_parrot', maxlength: 32 });
-  const fileIn = h('input', { type: 'file', accept: 'image/*' });
+  const nameIn = h('input', { placeholder: 'party_parrot', maxlength: 32, spellcheck: 'false' });
+  const fileIn = h('input', { type: 'file', accept: 'image/*', 'aria-label': 'Emoji image' });
   body.append(
     ...[h('h3', {}, 'Custom emojis'),
     h('p', { class: 'muted small' }, 'Use them as :name: or from the emoji picker.' + (ok ? ' GIFs must be under 256KB.' : ' Adding them needs the Manage emojis permission.')),
     ok
       ? h(
           'div',
-          { class: 'row' },
+          { class: 'row form-row upload-box' },
           h('label', { class: 'field grow' }, h('span', {}, 'Name'), nameIn),
           h('label', { class: 'field grow' }, h('span', {}, 'Image'), fileIn),
           h(
             'button',
             {
               class: 'btn',
-              style: { alignSelf: 'flex-end' },
               onclick: async () => {
                 const f = fileIn.files[0];
                 if (!f) return toast('Choose an image', 'error');
@@ -7405,7 +8052,7 @@ function serverEmojis(body) {
               ok ? h('button', { class: 'btn small ghost danger', onclick: () => doAct('emoji:remove', { name: e.name }) }, 'Remove') : null
             )
           )
-        : [h('p', { class: 'muted small' }, 'No custom emojis yet.')]
+        : [emptyState('smile', 'No custom emojis yet', ok ? 'Upload one above.' : null)]
     )].filter(Boolean)
   );
 }
@@ -7429,7 +8076,7 @@ function serverBans(body) {
               ok ? h('button', { class: 'btn small ghost', onclick: () => doAct('ban:remove', { id: b.id }) }, 'Unban') : null
             )
           )
-        : [h('p', { class: 'muted small' }, 'Nobody is banned.')]
+        : [emptyState('shield', 'Nobody is banned')]
     )
   );
 }
@@ -7449,16 +8096,20 @@ function serverInvites(body, { st, redraw }) {
   const copy = (text, what) => navigator.clipboard.writeText(text).then(() => toast(what + ' copied'), () => toast('Could not copy', 'error'));
 
   // Whether joining takes an invite at all: administrators
-  const required = h('input', { type: 'checkbox', checked: S.server.inviteOnly !== false, disabled: !p.admin });
-  required.onchange = async () => {
-    const r = await socket.emitWithAck('server:update', { inviteOnly: required.checked });
-    if (r.error) (toast(r.error, 'error'), (required.checked = S.server.inviteOnly !== false));
-  };
+  const required = switchEl(
+    S.server.inviteOnly !== false,
+    async (on) => {
+      const r = await socket.emitWithAck('server:update', { inviteOnly: on });
+      if (r.error) (toast(r.error, 'error'), required.setAttribute('aria-checked', String(S.server.inviteOnly !== false)));
+    },
+    'Require an invite to join',
+    { disabled: !p.admin }
+  );
 
   // A new invite
   st.inviteType ||= 'permanent';
   const note = h('input', { maxlength: 40, placeholder: 'Who it is for (optional)', value: st.inviteNote || '', oninput: () => (st.inviteNote = note.value) });
-  const type = h('select', { onchange: () => ((st.inviteType = type.value), redraw()) }, INVITE_TYPES.map(([k, label]) => h('option', { value: k }, label)));
+  const type = h('select', { 'aria-label': 'Invite type', onchange: () => ((st.inviteType = type.value), redraw()) }, INVITE_TYPES.map(([k, label]) => h('option', { value: k }, label)));
   type.value = st.inviteType;
   const uses = h('input', { type: 'number', min: 2, max: 10000, value: st.inviteUses || 5, oninput: () => (st.inviteUses = uses.value) });
   const lasts = h('select', { onchange: () => (st.inviteLasts = lasts.value) }, INVITE_DURATIONS.map(([ms, label]) => h('option', { value: ms }, label)));
@@ -7471,12 +8122,13 @@ function serverInvites(body, { st, redraw }) {
     const r = await socket.emitWithAck('invite:create', payload);
     if (r.error) return toast(r.error, 'error');
     st.inviteNote = '';
-    toast('Invite created');
+    st.justMade = r.invite?.id || null; // highlighted in the list (D72)
+    toast('Invite created', 'success');
     redraw();
   };
   const remove = async (v) => {
     const active = inviteStatus(v) === 'active';
-    if (active && !(await confirmModal('Revoke invite', 'Nobody can join with it any more. People who already joined with it stay.', 'Revoke'))) return;
+    if (active && !(await confirmModal('Revoke invite', 'Nobody can join with it any more. People who already joined with it stay.', 'Revoke invite'))) return;
     doAct('invite:remove', { id: v.id });
   };
 
@@ -7486,14 +8138,15 @@ function serverInvites(body, { st, redraw }) {
     const mine = p.admin || v.by.id === me().id;
     return h(
       'div',
-      { class: 'invite-row' },
+      { class: 'invite-row' + (active ? '' : ' inactive') + (st.justMade === v.id ? ' fresh' : '') },
       h(
         'div',
         { class: 'row' },
         h('strong', {}, v.label || 'Invite'),
-        h('span', { class: 'invite-status' + (active ? ' active' : ''), title: v.revoked ? `Revoked by ${v.revoked.by}, ${fmtTime(v.revoked.ts)}` : null }, i.status),
+        h('span', { class: 'invite-status' + (active ? ' active' : '') }, i.status),
+        st.justMade === v.id ? h('span', { class: 'muted small' }, 'Just created') : null,
         h('span', { class: 'grow' }),
-        mine ? h('button', { class: 'btn small ghost' + (active ? ' danger' : ''), onclick: () => remove(v) }, active ? 'Revoke' : 'Remove') : null
+        mine ? h('button', { class: 'btn small ghost' + (active ? ' danger' : ''), onclick: () => remove(v) }, active ? 'Revoke…' : 'Remove') : null
       ),
       // A working invite's token: every one for an administrator, your own otherwise
       v.token ? h('div', { class: 'row tight' }, h('span', { class: 'invite-token' }, v.token), h('button', { class: 'btn small', onclick: () => copy(v.token, 'Invite') }, 'Copy')) : null,
@@ -7501,7 +8154,9 @@ function serverInvites(body, { st, redraw }) {
         'div',
         { class: 'muted small' },
         `${i.type} · made by ${v.by.name}, ${fmtTime(v.ts)} · used ${i.uses}${v.maxUses ? '' : v.uses === 1 ? ' time' : ' times'} · `,
-        h('span', { title: v.expires ? new Date(v.expires).toLocaleString() : null }, v.expires ? (active ? `${i.left} left` : 'time ended') : 'no time limit')
+        h('span', { title: v.expires ? new Date(v.expires).toLocaleString() : null }, v.expires ? (active ? `${i.left} left` : 'time ended') : 'no time limit'),
+        // Why it no longer works, in the open rather than in a tooltip (D72)
+        v.revoked ? ` · revoked by ${v.revoked.by}, ${fmtTime(v.revoked.ts)}` : ''
       ),
       v.joins.length
         ? h(
@@ -7518,8 +8173,7 @@ function serverInvites(body, { st, redraw }) {
   body.append(
     h('h3', {}, 'Invites'),
     h('p', { class: 'muted small' }, 'A token someone enters once to join this server.'),
-    h('label', { class: 'check-row' + (required.disabled ? ' disabled' : '') }, required, h('span', {}, 'Require an invite to join')),
-    h('p', { class: 'muted small' }, p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.'),
+    settingRow('Require an invite to join', p.admin ? 'Off: anyone who knows the address can join.' : 'Only an administrator can change this.', required, { dim: !p.admin }),
     h('h3', {}, 'New invite'),
     h(
       'div',
@@ -7533,7 +8187,7 @@ function serverInvites(body, { st, redraw }) {
     h('h3', {}, 'This server’s invites'),
     st.invitesError
       ? h('p', { class: 'muted small' }, st.invitesError)
-      : h('div', { class: 'emoji-list' }, st.invites.length ? [...st.invites].reverse().map(row) : [h('p', { class: 'muted small' }, 'No invites yet.')])
+      : h('div', { class: 'emoji-list' }, st.invites.length ? [...st.invites].reverse().map(row) : [emptyState('key', 'No invites yet', 'Make one above and send it to a friend.')])
   );
 }
 

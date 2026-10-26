@@ -142,6 +142,10 @@ async function trustServer(address) {
   if (!cert || cert.authorized || !cert.fingerprint || isTrusted(host, cert.fingerprint)) return true;
 
   const previous = readTrust()[host];
+  // On two lines in the form the server prints it, so it can be read and compared (D72). It stays the
+  // system's dialog: a page can't click it, so nothing running in the app's page can trust a certificate.
+  const bytes = cert.fingerprint.split(':');
+  const fingerprint = [bytes.slice(0, 16), bytes.slice(16)].map((b) => b.join(':')).join('\n');
   const { response } = await dialog.showMessageBox(win, {
     type: 'warning',
     title: 'friendspeak',
@@ -150,7 +154,7 @@ async function trustServer(address) {
       (previous
         ? 'This can mean the host reinstalled friendspeak or deleted its data folder, or that someone is intercepting your connection. Only continue if the host confirms the new fingerprint.\n\n'
         : 'This server uses a self-signed certificate. Ask the host to check that this fingerprint matches the one the server printed on startup.\n\n') +
-      `SHA-256 fingerprint:\n${cert.fingerprint}`,
+      `SHA-256 fingerprint:\n${fingerprint}`,
     buttons: ['Cancel', previous ? 'Trust new certificate' : 'Trust'],
     defaultId: 0,
     cancelId: 0,
