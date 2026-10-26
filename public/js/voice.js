@@ -1182,6 +1182,14 @@ export class VoiceClient {
     };
   }
 
+  // The longest round trip (ms) to anyone in the call, from each link's selected candidate pair;
+  // null while no one is connected
+  async roundTrip() {
+    const live = [...this.peers.values()].filter((p) => p.pc.connectionState === 'connected');
+    const rtts = (await Promise.all(live.map((p) => this.pathStats(new Map(), p.pc).then((x) => x.pathRtt)))).filter((v) => v != null);
+    return rtts.length ? Math.max(...rtts) : null;
+  }
+
   mediaOf(sid, kind) {
     return sid === this.socket.id ? this.local[kind] : this.peers.get(sid)?.in[kind]?.stream || null;
   }

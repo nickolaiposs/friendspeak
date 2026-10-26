@@ -18,6 +18,7 @@ applyAppearance(); // before the first render
 const S = {
   entry: null, // server bookmark in view
   conn: null, // its connection (see openSocket)
+  callRtt: null, // the call's longest round trip to anyone in it, ms (signalOf)
   call: null, // the connection the voice call is on: `conn`, or another server's kept open in the background
   channelId: null, // a text channel, or "dm:<profileId>" while the DM view is open
   messages: new Map(), // channelId -> []
@@ -77,6 +78,22 @@ if (desktop?.titleBar) {
   root.style.setProperty('--titlebar-h', desktop.titleBar.height + 'px');
   document.getElementById('titlebar').hidden = false;
   desktop.titleBar.onFullscreen((on) => root.classList.toggle('fullscreen', on));
+  // Dimmed while the window is in the background, as the system's own title bars are. The game's
+  // iframe taking the focus blurs this window but not the app, so ask the document rather than the event.
+  const focused = () => root.classList.toggle('window-blurred', !document.hasFocus());
+  addEventListener('blur', () => setTimeout(focused));
+  addEventListener('focus', focused);
+}
+
+// Where you are, in the title bar and the window's title (the taskbar, Alt-Tab): the server and channel,
+// the DM's name, or the app's name on the home screen
+let windowTitle = 'friendspeak';
+function updateTitle() {
+  const ch = S.channelId && chatById(S.channelId);
+  windowTitle = !ch ? 'friendspeak' : ch.type === 'dm' ? profileOf(ch.with).name : S.server?.name ? `${S.server.name} · #${ch.name}` : 'friendspeak';
+  const name = document.querySelector('#titlebar .titlebar-name');
+  if (name) (name.textContent = windowTitle), (name.title = windowTitle);
+  if (!document.title.startsWith('(•)')) document.title = windowTitle;
 }
 // What a plain http server means, where the address is typed and on the mark in the server's header
 const UNENCRYPTED = 'Not encrypted: this server uses plain http, so anyone on the network between you and it can read and change what you send, your invite included. Fine on a network you trust; over the internet, ask the host to turn on HTTPS.';
@@ -115,11 +132,24 @@ function chatById(id) {
 const isOnline = (pid) => S.users.some((u) => u.id === pid);
 // What of a `users` entry a member row shows, and a row in the channel list (voice, game)
 const MEMBER_ROW = ['sid', 'id', 'name', 'color', 'avatar', 'status', 'voice', 'sharing', 'camera', 'playing', 'game'];
-// The Steam game someone is playing (D59), as the member list and DMs word it
-const playingText = (game) => (game && typeof game === 'string' ? '🎮 ' + game : '');
-// The same, with the game's icon from Steam in place of the controller when there is one (D59)
-const playingEl = (game, icon) =>
-  game && typeof game === 'string' && isImage(icon) ? h('span', { class: 'game-playing' }, h('img', { class: 'game-icon', src: icon, alt: '', referrerpolicy: 'no-referrer' }), game) : playingText(game);
+// The Steam game someone is playing (D59), as tooltips word it
+const playingText = (game) => (game && typeof game === 'string' ? 'Playing ' + game : '');
+// One part of a "what they are doing" line: an icon and its text
+const actPart = (iconEl, text, cls = '') => h('span', { class: 'act' + (cls ? ' ' + cls : '') }, iconEl, text);
+// The same for the game, with its icon from Steam in place of the controller when there is one (D59)
+const playingEl = (game, src) =>
+  game && typeof game === 'string'
+    ? actPart(isImage(src) ? h('img', { class: 'steam-icon', src, alt: '', referrerpolicy: 'no-referrer' }) : icon('gamepad', 'act-icon'), game, 'act-game')
+    : '';
+// What someone is doing, as the member list and profile cards show it: voice, sharing, camera, games
+const activityParts = (u) =>
+  [
+    u.voice && actPart(icon('speaker', 'act-icon'), channelById(u.voice)?.name || '', 'act-voice'),
+    u.sharing && h('span', { class: 'live-badge act-live' }, 'LIVE'),
+    u.camera && h('span', { class: 'act', role: 'img', 'aria-label': 'Camera on', title: 'Camera on' }, icon('cam', 'act-icon')),
+    u.playing && actPart(icon('penguin', 'act-icon'), 'Club Penguin'),
+    playingEl(u.game, u.gameIcon),
+  ].filter(Boolean);
 // Parts of a "what they are doing" line (text or elements), with dots between
 const dotted = (parts) => parts.filter(Boolean).flatMap((p, i) => (i ? [' · ', p] : [p]));
 const VOICE_ROW = [...MEMBER_ROW, 'muted', 'deafened', 'forceMuted'];
@@ -216,6 +246,10 @@ const I = {
   search: '<svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>',
   link: '<svg viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>',
+  gamepad: '<svg viewBox="0 0 24 24"><path d="M21 6H3a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2zm-10 7H8v3H6v-3H3v-2h3V8h2v3h3v2zm4.5 2a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm4-3a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>',
+  penguin: '<svg viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 2C8.7 2 6.5 4.6 6.5 8v3.2C5 12.6 4 14.8 4 17c0 2.8 3.6 5 8 5s8-2.2 8-5c0-2.2-1-4.4-2.5-5.8V8c0-3.4-2.2-6-5.5-6zm0 8c-2.2 0-4 2.4-4 5.3 0 2.3 1.8 4.2 4 4.2s4-1.9 4-4.2c0-2.9-1.8-5.3-4-5.3zM10 5.6a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2zm4 0a1.1 1.1 0 1 0 0 2.2 1.1 1.1 0 0 0 0-2.2zM12 8l-1.4 1.2h2.8z"/></svg>',
+  // the call's connection: bars beyond its quality are dimmed (.vp-signal)
+  signal: '<svg viewBox="0 0 24 24"><rect class="bar1" x="3" y="15" width="4" height="6" rx="1"/><rect class="bar2" x="10" y="10" width="4" height="11" rx="1"/><rect class="bar3" x="17" y="4" width="4" height="17" rx="1"/></svg>',
   expand: '<svg viewBox="0 0 24 24"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>',
 };
 const icon = (name, cls = '') => h('span', { class: 'icon ' + cls, html: I[name] });
@@ -443,7 +477,7 @@ const DM = new DirectMessages({
       const p = profileOf(peerId);
       notify({ kind: 'dm', from: peerId, title: p.name, body: plainText(m.text, m), icon: p.avatar, inView: watching(cid), open: () => selectChannel(cid) });
     }
-    if (!mine && document.hidden) document.title = `(•) friendspeak`;
+    if (!mine && document.hidden) document.title = `(•) ${windowTitle}`;
     renderRail();
     if (inDmView()) renderChannels();
   },
@@ -721,7 +755,7 @@ function renderDmCall() {
       }
       if (ringing === 'ringing') {
         notify({ kind: 'call', from: c.peerId, title: p.name, body: c.video ? 'Incoming video call' : 'Incoming call', icon: p.avatar, open: () => selectChannel('dm:' + c.peerId) });
-        if (document.hidden) document.title = `(•) friendspeak`;
+        if (document.hidden) document.title = `(•) ${windowTitle}`;
       }
     }
   }
@@ -1299,7 +1333,8 @@ function profilePopover(anchor, u, align = 'right') {
   const live = S.users.find((x) => x.id === p.id);
   // a DM contact may not be on the server in view
   const game = live?.game ? playingEl(live.game, live.gameIcon) : playingEl(DM.gameOf(p.id), DM.gameIconOf(p.id));
-  const doing = dotted(live ? [live.voice && '🔊 ' + (channelById(live.voice)?.name || ''), live.sharing && '🖥️ Live', live.playing && '🐧 Club Penguin', game] : [game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '')]);
+  // the game comes from the DM link when the contact isn't on this server; the camera is left out, as before
+  const doing = live ? [...activityParts({ ...live, camera: false, game: null }), game].filter(Boolean) : [game || (p.seen && p.id !== me()?.id ? 'Last seen ' + fmtTime(p.seen) : '')].filter(Boolean);
   const other = S.connected && p.id && p.id !== me()?.id && S.server?.profiles?.[p.id];
   const roles = rolesOf(p.id);
   const pop = popover(
@@ -1972,7 +2007,7 @@ function openSocket(entry, rejoinVoice = null) {
         open: () => openChannel(entry, channelId),
       });
     }
-    if (document.hidden && !mine) document.title = `(•) friendspeak`;
+    if (document.hidden && !mine) document.title = `(•) ${windowTitle}`;
   });
 
   socket.on('msg:update', ({ channelId, message }) => {
@@ -2090,6 +2125,7 @@ function endCall(silent = false) {
   c.voice.leave(silent);
   c.voiceChannel = c.rejoinVoice = null;
   S.call = null;
+  S.callRtt = null;
   if (c !== S.conn) dropConn(c);
 }
 
@@ -2435,7 +2471,7 @@ function gamesSection() {
         title: `Play Club Penguin on ${g.world} with everyone on this server`,
         onclick: () => openGame(),
       },
-      h('span', { class: 'game-icon' }, '🐧'),
+      icon('penguin'),
       h('span', { class: 'name' }, 'Club Penguin'),
       players.length ? h('span', { class: 'count' }, players.length) : null
     ),
@@ -2699,6 +2735,7 @@ function renderVoicePanel() {
   const serverName = c.server.name || serverLabel(c.entry);
   const where = ch.name + ' / ' + serverName;
   const video = live && c.users.some((u) => u.voice === c.voiceChannel && (u.camera || u.sharing));
+  const q = live && !c.voice.micError ? signalOf(S.callRtt) : null;
   const buttons = [
     // On its own row: the way back to the server the call is on
     away ? h('button', { class: 'vp-channel vp-jump', title: `Go to ${serverName}`, onclick: () => connectTo(c.entry) }, icon('jump'), h('span', {}, where)) : null,
@@ -2707,11 +2744,13 @@ function renderVoicePanel() {
       { class: 'vp-info' },
       h(
         'div',
-        { class: 'vp-status' + (live ? '' : ' pending') },
-        !live ? 'Reconnecting…' : c.voice.micError ? 'Listen-only' : 'Voice Connected',
+        { class: 'vp-status' + (live ? '' : ' pending') + (q ? ' q' + q.level : '') },
+        q ? h('span', { class: 'icon vp-signal q' + q.level, role: 'img', 'aria-label': q.label, html: I.signal }) : null,
+        !live ? 'Reconnecting…' : c.voice.micError ? 'Listen-only' : q?.level === 1 ? 'Poor connection' : 'Voice Connected',
         c.voice.local.screen ? h('span', { class: 'live-badge' }, 'LIVE') : null
       ),
-      away ? null : h('div', { class: 'vp-channel' }, where)
+      // the round trip first: the place is the part that may not fit
+      away ? null : h('div', { class: 'vp-channel', title: where }, q ? h('span', { class: 'vp-rtt' }, `${Math.round(S.callRtt)} ms · `) : null, where)
     ),
     // The channel list has this button too, but that list now shows another server
     away && video ? h('button', { class: 'icon-btn' + (S.stage ? ' sharing' : ''), title: 'Open video grid', onclick: () => openStage() }, icon('expand')) : null,
@@ -2738,11 +2777,26 @@ function renderVoicePanel() {
           icon(c.voice.local.camera ? 'cam' : 'camOff')
         )
       : null,
-    h('button', { class: 'icon-btn', title: 'Soundboard', onclick: (e) => openSoundboard(e.currentTarget) }, icon('board')),
+    // The soundboard is in the user panel, just below
     h('button', { class: 'icon-btn danger', title: 'Disconnect', onclick: leaveVoice }, icon('hangup')),
   ];
   p.replaceChildren(...buttons.filter(Boolean)); // replaceChildren(null) would print "null"
 }
+
+// The call's connection, from the longest round trip to anyone in it (ms): 3 bars under 150, 2 under 300
+const signalOf = (rtt) => (rtt == null ? null : rtt < 150 ? { level: 3, label: 'Good connection' } : rtt < 300 ? { level: 2, label: 'Slow connection' } : { level: 1, label: 'Poor connection' });
+// Measured every few seconds while in a call. The panel is drawn again only when the bars change
+// (redrawing takes the focus off its buttons); the number is updated in place.
+setInterval(async () => {
+  const c = S.call;
+  const rtt = c?.voiceChannel ? await c.voice.roundTrip().catch(() => null) : null;
+  if (c !== S.call) return;
+  const before = signalOf(S.callRtt)?.level;
+  S.callRtt = rtt;
+  const rttEl = $('#voice-panel .vp-rtt');
+  if (signalOf(rtt)?.level !== before || (rtt != null && !rttEl)) renderVoicePanel();
+  else if (rttEl && rtt != null) rttEl.textContent = `${Math.round(rtt)} ms · `;
+}, 3000);
 
 function renderUserPanel() {
   const p = me();
@@ -2849,7 +2903,7 @@ function renderMembers() {
   };
   const row = (u) => {
     const roles = rolesOf(u.id);
-    const doing = dotted([u.voice && '🔊 ' + (channelById(u.voice)?.name || ''), u.sharing && '🖥️ Live', u.camera && '📷 Camera', u.playing && '🐧 Club Penguin', playingEl(u.game, u.gameIcon)]);
+    const doing = activityParts(u);
     return h(
       'div',
       { class: 'member' + (u.offline ? ' offline' : ''), onclick: (e) => profilePopover(e.currentTarget, u, 'left'), oncontextmenu: menu(u) },
@@ -2898,6 +2952,7 @@ function renderMembers() {
 const spinner = (big = false) => h('span', { class: 'spinner' + (big ? ' big' : ''), role: 'status', 'aria-label': 'Loading' });
 
 function renderMain(error) {
+  updateTitle();
   const main = $('#main');
   mentionMenu = null; // its element goes with the composer
   search = null; // and the search field with the header
@@ -2948,7 +3003,8 @@ function renderMain(error) {
     oninput: onComposerInput,
     onclick: (e) => updateMentionMenu(e.target),
     onkeyup: (e) => (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') && updateMentionMenu(e.target),
-    onblur: closeMentionMenu,
+    onfocus: renderTyping,
+    onblur: () => (closeMentionMenu(), renderTyping()),
     onpaste: (e) => {
       const files = [...(e.clipboardData?.files || [])];
       if (files.length && canUpload) (e.preventDefault(), addAttachments(files));
@@ -3060,6 +3116,7 @@ function refreshChatTitle() {
   if (!ch || !head) return;
   head.querySelectorAll(':scope > .icon:first-child, :scope > .dm-av, :scope > .chat-title').forEach((el) => el.remove());
   head.prepend(...chatTitle(ch));
+  updateTitle();
   const status = head.querySelector('.dm-status');
   if (status && ch.type === 'dm') status.replaceChildren(...[dmStatus(ch.with)].flat()); // text, or parts with the game's icon
   const conflict = head.querySelector('.dm-conflict');
@@ -3102,7 +3159,37 @@ async function selectChannel(id) {
 }
 
 function isGrouped(m, prev) {
-  return prev && prev.author === m.author && m.ts - prev.ts < 5 * 60e3 && !m.replyTo && new Date(m.ts).getDate() === new Date(prev.ts).getDate();
+  return prev && prev.author === m.author && m.ts - prev.ts < 5 * 60e3 && !m.replyTo && sameDay(m.ts, prev.ts);
+}
+
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+// A day divider's words: Today, Yesterday, a weekday this week, or the date
+function dayLabel(ts) {
+  const d = new Date(ts);
+  const today = new Date();
+  const days = Math.round((new Date(today.toDateString()) - new Date(d.toDateString())) / 864e5);
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  return d.toLocaleDateString([], { weekday: days < 7 ? 'long' : 'short', month: days < 7 ? undefined : 'long', day: days < 7 ? undefined : 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+// A divider before the first message of each day in the list. Run after any change to which
+// messages are drawn: it only adds, moves or removes dividers, never the messages.
+function syncDays(box = $('#messages')) {
+  if (!box) return;
+  let prevTs = null;
+  const want = new Map(); // .msg element -> its day's label, for the first of each day
+  for (const el of box.querySelectorAll(':scope > .msg[data-ts]')) {
+    const ts = +el.dataset.ts;
+    if (prevTs == null || !sameDay(ts, prevTs)) want.set(el, dayLabel(ts));
+    prevTs = ts;
+  }
+  for (const sep of box.querySelectorAll(':scope > .day-sep')) {
+    const next = sep.nextElementSibling;
+    if (want.get(next) === sep.dataset.day) want.delete(next);
+    else sep.remove();
+  }
+  for (const [el, day] of want) el.before(h('div', { class: 'day-sep', role: 'separator', 'data-day': day, 'aria-label': day }, h('span', {}, day)));
 }
 
 // formatText(), but a text it can't draw is shown plain: one message must never take the whole list down
@@ -3138,6 +3225,7 @@ function messageEl(m, prev) {
     {
       class: 'msg' + (grouped ? ' grouped' : '') + (mentioned ? ' mentioned' : '') + (m.pending ? ' pending' : '') + (m.mailed ? ' mailed' : '') + (m.note ? ' note' : ''),
       'data-id': m.id,
+      'data-ts': m.ts,
       title: m.mailed ? 'Waiting in their mailbox' : m.pending ? 'Not delivered yet' : null,
     },
     m.replyTo
@@ -3265,6 +3353,7 @@ function renderMessages(keepScroll = false) {
     );
   list.forEach((m, i) => frag.append(messageEl(m, list[i - 1])));
   box.replaceChildren(frag);
+  syncDays(box);
   if (!keepScroll || atBottom) box.scrollTop = box.scrollHeight;
   else box.scrollTop = prevTop;
   // re-stick once images load
@@ -3279,6 +3368,7 @@ function redrawMessages(match) {
   const list = S.messages.get(S.channelId);
   if (!list || !$('#messages')) return;
   list.forEach((m, i) => match(m, i) && messageNode(m.id)?.replaceWith(messageEl(m, list[i - 1])));
+  syncDays();
 }
 
 function appendMessage(m, force) {
@@ -3296,6 +3386,7 @@ function appendMessage(m, force) {
   }
   const el = messageEl(m, list[list.length - 2]);
   box.append(el);
+  syncDays(box);
   if (atBottom || force) {
     box.scrollTop = box.scrollHeight;
     for (const img of $$('img', el)) img.addEventListener('load', () => (box.scrollTop = box.scrollHeight), { once: true });
@@ -3572,6 +3663,12 @@ function renderTyping() {
   const now = Date.now();
   const map = S.typing.get(S.channelId);
   const names = map ? [...map.values()].filter((t) => t.until > now).map((t) => t.name) : [];
+  // Nobody typing: the keys, while the composer has focus
+  if (!names.length && document.activeElement?.id === 'composer-input') {
+    if (!el.querySelector('.typing-hint'))
+      el.replaceChildren(h('span', { class: 'typing-hint' }, h('kbd', {}, 'Enter'), ' send', h('kbd', {}, 'Shift+Enter'), ' new line'));
+    return;
+  }
   el.textContent = !names.length
     ? ''
     : names.length === 1
@@ -5814,7 +5911,7 @@ async function openGame() {
     h(
       'header',
       { class: 'chat-header' },
-      h('span', { class: 'game-icon' }, '🐧'),
+      icon('penguin'),
       h('span', { class: 'chat-title' }, 'Club Penguin'),
       h('span', { class: 'muted small' }, `${g.world} · playing as ${res.username}`),
       h('div', { class: 'spacer' }),
@@ -5924,7 +6021,7 @@ window.addEventListener('keydown', (e) => {
 });
 window.addEventListener('keyup', handleKeyUp);
 window.addEventListener('blur', () => !S.game.open && audio.setPttHeld(false));
-document.addEventListener('visibilitychange', () => !document.hidden && (document.title = 'friendspeak'));
+document.addEventListener('visibilitychange', () => !document.hidden && (document.title = windowTitle));
 
 // ---------------------------------------------------------------- app updates and server maintenance (D29)
 
@@ -5995,8 +6092,33 @@ function maintenanceBanner() {
   );
 }
 
+// With the app's own title bar the update is a small pill at its end instead of a banner over the app
+function renderUpdatePill() {
+  const bar = $('#titlebar');
+  if (!bar || bar.hidden) return false;
+  const u = appUpdate;
+  const show = u && ['available', 'downloading', 'ready'].includes(u.status);
+  const pill = !show
+    ? null
+    : u.status === 'downloading'
+      ? h('span', { class: 'update-pill busy', role: 'status' }, `Updating… ${u.progress}%`)
+      : h(
+          'button',
+          {
+            class: 'update-pill',
+            title: u.status === 'ready' ? `friendspeak ${u.version} is downloaded. It installs when you restart the app.` : `friendspeak ${u.version} is available (you have ${u.current}).`,
+            onclick: () => (u.status === 'ready' ? desktop.installUpdate() : desktop.downloadUpdate()),
+          },
+          u.status === 'ready' ? 'Restart to update' : u.canInstall ? `Update to ${u.version}` : `Download ${u.version}`
+        );
+  bar.querySelector('.update-pill')?.remove();
+  if (pill) bar.append(pill);
+  return true;
+}
+
 function appUpdateBanner() {
   const u = appUpdate;
+  if (renderUpdatePill()) return null;
   if (!u || !['available', 'downloading', 'ready'].includes(u.status) || dismissed('app:' + u.version)) return null;
   const text = {
     available: `friendspeak ${u.version} is available (you have ${u.current}).` + (u.canInstall ? '' : ' Download it from the release page and install it over this one.'),

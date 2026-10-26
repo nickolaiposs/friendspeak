@@ -100,6 +100,11 @@ const readable = (c, bg, min, toward) => {
 };
 // Text on a filled surface: white, as in the default theme, unless the fill is too light for it
 const onColor = (fill) => (contrast('#ffffff', fill) >= 2.5 ? '#ffffff' : '#0c0d10');
+// A color deepened (away from its text color) until text on it reads at 4.5:1: filled buttons, badges, counts
+const fillOf = (c) => {
+  const on = onColor(c);
+  return readable(c, on, 4.5, on === '#ffffff' ? '#000000' : '#ffffff');
+};
 
 // ---------- palettes ----------
 
@@ -148,6 +153,10 @@ export const samePalette = (a, b) => COLOR_KEYS.every((k) => a[k] === b[k]);
 export function setColors(el, colors) {
   for (const k of COLOR_KEYS) el.style.setProperty('--' + k, colors[k]);
   for (const k of ['accent', 'green', 'red', 'yellow']) el.style.setProperty('--on-' + k, onColor(colors[k]));
+  const fill = fillOf(colors.accent);
+  el.style.setProperty('--accent-fill', fill);
+  el.style.setProperty('--accent-fill-hover', mix(fill, onColor(colors.accent) === '#ffffff' ? '#000000' : '#ffffff', 0.12));
+  el.style.setProperty('--red-fill', fillOf(colors.red));
   el.style.colorScheme = isDark(colors['bg-2']) ? 'dark' : 'light'; // native scrollbars and form controls
 }
 
