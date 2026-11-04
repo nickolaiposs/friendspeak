@@ -52,6 +52,7 @@ servers link to it. Newest first.
   reverse proxy
 - Releases are now started by hand from `main`. The Docker image builds the
   SFU's media worker from source, with its build tools pinned
+- Server image: Node 24.22.2 and newer body-parser and qs, for security fixes
 
 ## 1.1.9 - 2026-10-07
 
