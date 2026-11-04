@@ -4929,6 +4929,9 @@ VoiceClient.onNativeLost = (v, kind, source, reason) => {
     else stream?.getTracks().forEach((t) => t.stop());
   }).then(renderVoicePanel);
 };
+// Our upload can't carry the screen share and the camera together (D71): the camera went down to its smallest layer
+VoiceClient.onWeakUplink = (v, weak) =>
+  liveVoice() === v && weak && toast('Your upload is too slow for your screen and camera. Turn off the camera to keep the screen smooth.', 'info', 10_000);
 // Software encoding (no hardware encoder, or one that failed) holds a share to 1440p60 (D70)
 VoiceClient.onClamped = (v, kind, tier) => liveVoice() === v && toast(`Your ${kind === 'screen' ? 'share' : 'camera'} is held to ${tier.height}p${Math.round(tier.fps)}: it is encoded in software`, 'info', 6000);
 
@@ -5304,6 +5307,12 @@ function openStage({ screen } = {}) {
     S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), muted: new Set(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
+    // A strip that scrolls takes tiles out of view and brings others in (D71)
+    grid.addEventListener('scroll', reportTiles, { passive: true });
+    // Stills of streams that aren't decoded follow the sharer's newest one
+    S.stage.stillTimer = setInterval(() => {
+      for (const t of S.stage?.tiles.values() || []) if (t.still && !t.still.hidden) refreshStill(t);
+    }, 10_000);
     // The focused (or first) screen share or camera
     startStats(S.stage, { tile: statsTile, voice: () => S.voice, name: (sid) => S.call?.users.find((u) => u.sid === sid)?.name });
     S.stage.el = h(
@@ -5421,6 +5430,7 @@ function setStageFocus(key) {
   if (!st) return;
   st.focus = st.focus === key ? null : key;
   syncStage();
+  reportTiles(); // which one is focused is part of what the SFU is told (D71)
 }
 
 // kind: 'screen' (live video, or a "Watch stream" card), 'camera' or 'user' (avatar)
@@ -5482,10 +5492,18 @@ function stageTile(key, sid, kind, live) {
       )
     );
   }
+  if (!mine) {
+    // A stream that isn't decoded right now (past the decode budget, or paused by the server for our link) shows
+    // its sharer's preview still, refreshed every 10 s, instead of a frozen frame
+    tile.still = h('img', { class: 'tile-still', alt: '', hidden: true });
+    tile.stillNote = h('span', { class: 'tile-still-note', hidden: true });
+    extras.push(tile.still, tile.stillNote);
+  }
   tile.el = h('div', attrs, video, tile.status, label, ...extras);
   if (!mine) {
     // Tell the sender how many device pixels we show, so their encoder for us
-    // is no bigger than that (and pauses while this window is hidden).
+    // is no bigger than that (and pauses while this window is hidden, the tile
+    // is out of view, or it is past the decode budget and not hovered: D71).
     let timer;
     tile.report = () => {
       clearTimeout(timer);
@@ -5496,15 +5514,53 @@ function stageTile(key, sid, kind, live) {
         const dpr = doc.defaultView?.devicePixelRatio || 1;
         const w = video.clientWidth * dpr;
         const h = video.clientHeight * dpr;
-        if (w && h) S.voice?.view(sid, kind, { w, h, hidden: doc.hidden });
-        else if (doc.hidden) S.voice?.view(sid, kind, { hidden: true });
+        const hidden = doc.hidden || (tile.capped && !tile.hover) || outOfView(tile);
+        if (w && h) S.voice?.view(sid, kind, { w, h, hidden, focus: S.stage?.focus === key });
+        else if (hidden) S.voice?.view(sid, kind, { hidden: true });
+        updateStill(tile);
       }, 300);
     };
     tile.ro = new ResizeObserver(tile.report);
     tile.ro.observe(video);
+    // Past the decode budget, a tile plays while the pointer is on it
+    tile.el.addEventListener('mouseenter', () => ((tile.hover = true), tile.capped && tile.report()));
+    tile.el.addEventListener('mouseleave', () => ((tile.hover = false), tile.capped && tile.report()));
   }
   if (kind === 'camera' && !mine) S.voice?.watch(sid, 'camera', true);
   return tile;
+}
+
+// The decode budget (D71): the focused stream and this many more are decoded at once. The rest show their preview
+// still and play while hovered or once focused. A big grid then costs no more to watch than a small one.
+const DECODE_MORE = 6;
+
+// Whether a tile is out of view: off its window, or outside the part of the grid or strip that shows
+function outOfView(tile) {
+  const win = tile.video?.ownerDocument.defaultView;
+  if (!win || !tile.video.isConnected) return false;
+  const r = tile.video.getBoundingClientRect();
+  const meets = (b) => r.right > b.left && r.left < b.right && r.bottom > b.top && r.top < b.bottom;
+  const box = tile.el.parentElement?.getBoundingClientRect();
+  return !!r.width && (!meets({ left: 0, top: 0, right: win.innerWidth, bottom: win.innerHeight }) || (!!box && !meets(box)));
+}
+
+// The preview still over a tile that isn't decoded: past the decode budget, or paused by the server for our link (D71)
+function updateStill(tile) {
+  if (!tile.still) return;
+  const why =
+    tile.capped && !tile.hover ? 'Paused: too many videos at once. Point at it to play.' : S.voice?.starved?.(tile.sid, tile.kind) ? 'Paused: your connection can’t carry every stream' : '';
+  tile.still.hidden = tile.stillNote.hidden = !why;
+  tile.stillNote.textContent = why;
+  if (why && !tile.stillAt) refreshStill(tile);
+  if (!why) tile.stillAt = 0;
+}
+
+async function refreshStill(tile) {
+  tile.stillAt = Date.now();
+  const p = await S.call?.previews?.get(tile.sid, tile.kind).catch(() => null);
+  if (!p || !tile.still.isConnected) return p && URL.revokeObjectURL(p.url);
+  if (tile.stillUrl) URL.revokeObjectURL(tile.stillUrl);
+  tile.stillUrl = tile.still.src = p.url;
 }
 
 function dropTile(key) {
@@ -5512,6 +5568,7 @@ function dropTile(key) {
   const tile = st?.tiles.get(key);
   if (!tile) return;
   st.tiles.delete(key);
+  if (tile.stillUrl) URL.revokeObjectURL(tile.stillUrl);
   if (tile.kind === 'camera' && tile.sid !== S.call?.sid && S.call?.connected) S.voice.watch(tile.sid, 'camera', false);
   if (tile.video) tile.video.srcObject = null;
   tile.ro?.disconnect();
@@ -5585,7 +5642,8 @@ function statsView(tile, info, nameOf) {
       ...(info.layer !== undefined ? [['Layer', info.layer == null ? 'none yet' : `${info.layer} (the server picks it for your tile and your connection)`]] : []),
       ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps, QP ${f(info.qp, 0)}`],
       ['Shown at', info.view ? (info.view.hidden ? 'hidden' : size(info.view.w, info.view.h)) : '–'],
-      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
+      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms per frame${info.jbTargetMs != null ? ` (target ${f(info.jbTargetMs, 0)} ms)` : ''}`],
+      ...(info.starved ? [['Paused', 'by the server: your connection can’t carry this stream with the others you watch']] : []),
       ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`],
       ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`],
       ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`],
@@ -5707,6 +5765,15 @@ function syncStage() {
   st.body.classList.toggle('focused', !!focused);
   for (const t of st.tiles.values()) t.el.classList.toggle('focus', t === focused);
 
+  // The decode budget (D71): the focused stream first, then the others in the grid's order
+  const rank = new Map(want.map((w, i) => [w.key, i]));
+  const decoded = [...st.tiles.values()].filter((t) => t.report).sort((a, b) => (b === focused) - (a === focused) || rank.get(a.key) - rank.get(b.key));
+  decoded.forEach((t, i) => {
+    const capped = i > DECODE_MORE;
+    if (t.capped !== capped) (t.capped = capped), t.report();
+    else updateStill(t);
+  });
+
   for (const t of st.tiles.values()) {
     if (!t.video) continue;
     const src = S.voice.mediaOf(t.sid, t.kind === 'screen' ? 'screen' : 'camera');
@@ -5795,6 +5862,7 @@ function closeStage({ nav = false } = {}) {
   const st = S.stage;
   if (!st || (nav && st.pop)) return;
   clearInterval(st.timer);
+  clearInterval(st.stillTimer);
   st.timer = null;
   st.statsPanel?.close();
   st.ro.disconnect();

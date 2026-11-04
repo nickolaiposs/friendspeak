@@ -21,12 +21,26 @@ const LOW: usize = 360; // the layer grid tiles get
 const LOW_FPS: f32 = 30.0;
 const SHARP_FPS: f32 = 30.0; // sharp's best layer
 const SHARP_LOWER_FPS: f32 = 15.0; // and the layers below it
+const CAMERA_LOW: usize = 180; // a camera's lowest layer, for thin links
+const CAMERA_LOW_FPS: f32 = 15.0;
 
 // The layers for a ceiling of w×h at up to fps, lowest first. The middle layer is 1080p under a 2160p
 // ceiling and 720p under anything from 1080p to 1440p; a ceiling of 720p or less has two layers, and one
-// of 360p or less only one.
-pub fn layers(sharp: bool, w: usize, h: usize, fps: f32) -> Vec<Rung> {
+// of 360p or less only one. A camera's are 180p at 15, 360p at 30 and the ceiling (D71): a viewer on a thin
+// link still gets a moving picture of everyone, for little.
+pub fn layers(sharp: bool, camera: bool, w: usize, h: usize, fps: f32) -> Vec<Rung> {
     let at = |hh: usize, f: f32| Rung { w: even(hh * w / h), h: even(hh), fps: f };
+    if camera {
+        let mut out = Vec::new();
+        if h > CAMERA_LOW {
+            out.push(at(CAMERA_LOW, fps.min(CAMERA_LOW_FPS)));
+        }
+        if h > LOW {
+            out.push(at(LOW, fps.min(LOW_FPS)));
+        }
+        out.push(at(h, fps));
+        return out;
+    }
     let (top_fps, lower_fps, low_fps) = if sharp { (fps.min(SHARP_FPS), fps.min(SHARP_LOWER_FPS), fps.min(SHARP_LOWER_FPS)) } else { (fps, fps, fps.min(LOW_FPS)) };
     let mut out = Vec::new();
     if h > LOW {
@@ -58,11 +72,16 @@ mod tests {
     #[test]
     fn layers_by_ceiling() {
         let hs = |v: Vec<Rung>| v.iter().map(|r| (r.h, r.fps as u32)).collect::<Vec<_>>();
-        assert_eq!(hs(layers(false, 3840, 2160, 60.0)), vec![(360, 30), (1080, 60), (2160, 60)]);
-        assert_eq!(hs(layers(false, 2560, 1440, 60.0)), vec![(360, 30), (720, 60), (1440, 60)]);
-        assert_eq!(hs(layers(false, 1280, 720, 30.0)), vec![(360, 30), (720, 30)]);
-        assert_eq!(hs(layers(true, 2560, 1440, 60.0)), vec![(360, 15), (720, 15), (1440, 30)]);
-        assert_eq!(hs(layers(false, 640, 360, 60.0)), vec![(360, 60)]);
-        assert!(layers(false, 3840, 2160, 60.0).len() <= MAX_LAYERS);
+        assert_eq!(hs(layers(false, false, 3840, 2160, 60.0)), vec![(360, 30), (1080, 60), (2160, 60)]);
+        assert_eq!(hs(layers(false, false, 2560, 1440, 60.0)), vec![(360, 30), (720, 60), (1440, 60)]);
+        assert_eq!(hs(layers(false, false, 1280, 720, 30.0)), vec![(360, 30), (720, 30)]);
+        assert_eq!(hs(layers(true, false, 2560, 1440, 60.0)), vec![(360, 15), (720, 15), (1440, 30)]);
+        assert_eq!(hs(layers(false, false, 640, 360, 60.0)), vec![(360, 60)]);
+        assert!(layers(false, false, 3840, 2160, 60.0).len() <= MAX_LAYERS);
+        // Cameras: 180p15 at the bottom
+        assert_eq!(hs(layers(false, true, 1920, 1080, 60.0)), vec![(180, 15), (360, 30), (1080, 60)]);
+        assert_eq!(hs(layers(false, true, 1280, 720, 30.0)), vec![(180, 15), (360, 30), (720, 30)]);
+        assert_eq!(hs(layers(false, true, 640, 360, 30.0)), vec![(180, 15), (360, 30)]);
+        assert_eq!(hs(layers(false, true, 320, 180, 15.0)), vec![(180, 15)]);
     }
 }

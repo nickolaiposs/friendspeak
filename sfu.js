@@ -30,8 +30,21 @@ const MAX_LAYERS = 3;
 const UP_AFTER_DOWN_MS = 2000; // a consumer moves up no sooner than this after it moved down
 const MAX_INCOMING = 60e6; // bits per second a send transport takes (2160p60 at its ceiling, with room)
 const START_BITRATE = 4_000_000; // where the estimate of a viewer's link starts (see transport())
+// A viewer whose link can't carry the lowest layer of everything they watch (D71). Their streams are served in order
+// of priority (the stream they enlarged, other screens, cameras), and while the estimate stays under what the
+// lowest layers need for STARVE_AFTER_MS, their lowest-priority camera is paused, one at a time; it comes back once
+// the estimate has room for it, with FEED_ROOM to spare, for FEED_AFTER_MS.
+const PRIORITY = { focus: 3, screen: 2, camera: 1 };
+const STARVE_AFTER_MS = 3000;
+const FEED_AFTER_MS = 10_000;
+const FEED_ROOM = 1.2;
+const LOW_BPP = 0.04; // bits per pixel a layer needs (the sidecar's ladder::need for smooth)
+const LOW_MIN_BPS = 150_000;
+const LOW_GUESS_BPS = 300_000; // a lowest layer whose size the publisher didn't say
 
-function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = console, emit, who = (sid) => sid, channelName = (id) => id }) {
+// deadTransportMs: how long a transport may be without a path (its ICE disconnected) before it is closed, with its
+// producers, so the room doesn't keep what an app gave up on (0: never)
+function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTransportMs = 30_000, log = console, emit, who = (sid) => sid, channelName = (id) => id }) {
   let mediasoup;
   const pool = []; // { worker, server, port, index, routers: Set(channelId) }
   const rooms = new Map();
@@ -176,12 +189,33 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
       throw new Error('left the channel');
     }
     if (direction === 'send') await t.setMaxIncomingBitrate(MAX_INCOMING).catch(() => {});
-    peer.transports.set(t.id, { transport: t, owner, direction });
+    // The estimate of a viewer's link, as it changes: whether it carries the lowest layers of what they watch (D71)
+    if (direction === 'recv') {
+      await t.enableTraceEvent(['bwe']).catch(() => {});
+      t.on('trace', (tr) => tr.type === 'bwe' && feed(peer, tr.info?.availableBitrate));
+    }
+    const entry = { transport: t, owner, direction, dead: null };
+    peer.transports.set(t.id, entry);
+    const what = direction === 'send' ? (owner === 'page' ? 'publishing' : `${owner} (sidecar)`) : 'watching';
     t.on('dtlsstatechange', (state) => {
-      if (state === 'failed') log.warn(`[sfu] ${who(sid)}: a ${direction === 'send' ? 'publishing' : 'watching'} connection failed (DTLS)`);
+      if (state === 'failed') log.warn(`[sfu] ${who(sid)}: a ${what} connection failed (DTLS)`);
     });
+    // A transport without a path is given deadTransportMs to find one again (the app restarts ICE, D71); after that
+    // it is closed with its producers, so its viewers are told and the room doesn't keep it (D71)
     t.on('icestatechange', (state) => {
-      if (state === 'disconnected') console.debug(`[sfu] ${who(sid)}: a connection lost its path`);
+      if (state === 'disconnected') {
+        console.debug(`[sfu] ${who(sid)}: a ${what} connection lost its path`);
+        if (deadTransportMs && !entry.dead)
+          entry.dead = setTimeout(() => {
+            if (peer.transports.get(t.id) !== entry || t.closed || peers.get(sid) !== peer) return;
+            log.log(`[sfu] ${who(sid)}: closed a ${what} connection that had no path for ${Math.round(deadTransportMs / 1000)} s`);
+            closeTransport(peer, t.id);
+            changed();
+          }, deadTransportMs);
+      } else if (state === 'connected' || state === 'completed') {
+        clearTimeout(entry.dead);
+        entry.dead = null;
+      }
     });
     changed();
     return { id: t.id, iceParameters: t.iceParameters, iceCandidates: candidates(t.iceCandidates, host), dtlsParameters: t.dtlsParameters };
@@ -210,10 +244,27 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
   function closeTransport(peer, id) {
     const t = peer.transports.get(id);
     if (!t) return;
+    clearTimeout(t.dead);
     peer.transports.delete(id);
     for (const [pid, p] of [...peer.producers]) if (p.transportId === id) closeProducer(peer, pid);
     for (const [cid, c] of [...peer.consumers]) if (c.transportId === id) peer.consumers.delete(cid);
     t.transport.close();
+  }
+
+  // The app is done with a transport of its own (a sidecar's share ended): it goes with what it carried
+  function dropTransport(sid, transportId) {
+    const peer = peers.get(sid);
+    if (!peer?.transports.has(transportId)) return false;
+    closeTransport(peer, transportId);
+    changed();
+    return true;
+  }
+
+  // New ICE credentials for a transport that lost its path; the app checks again with them (D71)
+  async function restartIce(sid, transportId) {
+    const t = peers.get(sid)?.transports.get(transportId);
+    if (!t) throw new Error('No such transport');
+    return t.transport.restartIce();
   }
 
   async function connect(sid, transportId, dtlsParameters) {
@@ -302,8 +353,10 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
       consumer.close();
       throw new Error('left the channel');
     }
-    const c = { consumer, producerId, transportId: recv.transport.id, from: found.peer.sid, kind: found.p.kind, view: null, layer: 0, downAt: 0 };
+    // appPaused: the app paused it (it starts paused); starved: the server did, for the viewer's link (D71)
+    const c = { consumer, producerId, transportId: recv.transport.id, from: found.peer.sid, kind: found.p.kind, view: null, layer: 0, downAt: 0, focus: false, appPaused: true, starved: false };
     peer.consumers.set(consumer.id, c);
+    if (video) prioritize(c);
     const gone = () => {
       if (peer.consumers.get(consumer.id) === c) peer.consumers.delete(consumer.id);
       changed();
@@ -327,13 +380,64 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
   async function resume(sid, consumerId) {
     const c = consumerOf(sid, consumerId);
     if (!c) throw new Error('No such consumer');
-    await c.consumer.resume();
+    c.appPaused = false;
+    if (!c.starved) await c.consumer.resume();
   }
 
   async function pause(sid, consumerId) {
     const c = consumerOf(sid, consumerId);
     if (!c) throw new Error('No such consumer');
+    c.appPaused = true;
     await c.consumer.pause();
+  }
+
+  // Who gets the viewer's link first when it can't carry everything (mediasoup hands out the estimate by priority)
+  function prioritize(c) {
+    c.consumer.setPriority(c.focus ? PRIORITY.focus : PRIORITY[c.kind] || 1).catch(() => {});
+  }
+
+  // What the lowest layer of a stream needs, from the size its publisher gives
+  function lowest(c) {
+    const l = producerIn(peers.get(c.consumer.appData.sid)?.channelId, c.producerId)?.p.layers?.[0];
+    return l?.w && l?.h ? Math.max(LOW_MIN_BPS, l.w * l.h * Math.max(l.fps || 30, 1) * LOW_BPP) : LOW_GUESS_BPS;
+  }
+
+  // A viewer's link estimate (D71): their lowest-priority camera is paused when the estimate stays below what the
+  // lowest layers of everything they watch need, and comes back when there is room for it again. At most one
+  // change a second; the app is told (sfu:starved), so the tile shows the preview still instead of a frozen frame.
+  function feed(peer, avail) {
+    if (!Number.isFinite(avail) || peers.get(peer.sid) !== peer) return;
+    const now = Date.now();
+    if (now - (peer.fedAt || 0) < 1000) return;
+    peer.fedAt = now;
+    const video = [...peer.consumers.values()].filter((c) => c.consumer.kind === 'video' && !c.appPaused && !c.consumer.closed && c.from !== peer.sid);
+    const live = video.filter((c) => !c.starved);
+    const need = live.reduce((a, c) => a + lowest(c), 0);
+    const byPriority = (a, b) => (b.focus ? 3 : PRIORITY[b.kind]) - (a.focus ? 3 : PRIORITY[a.kind]);
+    const victim = live.filter((c) => c.kind === 'camera' && !c.focus).sort(byPriority).at(-1);
+    if (avail < need && victim) {
+      peer.feedSince = null;
+      peer.starveSince ??= now;
+      if (now - peer.starveSince < STARVE_AFTER_MS) return;
+      peer.starveSince = now; // the next one no sooner than STARVE_AFTER_MS from now
+      starve(peer, victim, true, avail, need);
+      return;
+    }
+    peer.starveSince = null;
+    const next = video.filter((c) => c.starved).sort(byPriority)[0];
+    if (!next || avail < (need + lowest(next)) * FEED_ROOM) return void (peer.feedSince = null);
+    peer.feedSince ??= now;
+    if (now - peer.feedSince < FEED_AFTER_MS) return;
+    peer.feedSince = null;
+    starve(peer, next, false, avail, need);
+  }
+
+  function starve(peer, c, on, avail, need) {
+    c.starved = on;
+    console.debug(`[sfu] ${who(peer.sid)}: ${on ? 'paused' : 'resumed'} ${who(c.from)}’s camera for their link (${(avail / 1e6).toFixed(1)} Mbit/s, the lowest layers need ${(need / 1e6).toFixed(1)})`);
+    (on ? c.consumer.pause() : c.appPaused ? Promise.resolve() : c.consumer.resume()).catch(() => {});
+    emit.to([peer.sid], 'sfu:starved', { consumerId: c.consumer.id, starved: on });
+    changed();
   }
 
   // mediasoup limits how often a producer is asked
@@ -353,10 +457,15 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
 
   // The viewer's tile, in device pixels: the smallest layer at least that tall (with a little slack, as the
   // sidecar's ladder::cap did), the top one when none is. Down at once, up no sooner than 2 s after a move down.
-  function view(sid, consumerId, w, h) {
+  // `focus`: the tile the stage shows large, served first on a thin link (D71).
+  function view(sid, consumerId, w, h, focus = false) {
     const c = consumerOf(sid, consumerId);
     if (!c || c.consumer.kind !== 'video') return false;
     c.view = { w, h };
+    if (c.focus !== focus) {
+      c.focus = focus;
+      prioritize(c);
+    }
     pick(c);
     return true;
   }
@@ -442,6 +551,9 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
           current: c.consumer.currentLayers?.spatialLayer ?? null,
           preferred: c.consumer.preferredLayers?.spatialLayer ?? null,
           view: c.view,
+          focus: c.focus,
+          priority: c.consumer.priority,
+          starved: c.starved,
           score: c.consumer.score?.score ?? null,
         }));
         members.push({ sid, transports, producers, consumers });
@@ -463,6 +575,8 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', log = co
     start,
     caps,
     transport,
+    dropTransport,
+    restartIce,
     connect,
     produce,
     setLayers,

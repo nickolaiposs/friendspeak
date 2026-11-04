@@ -679,6 +679,9 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .bg-remove { position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; border-radius: 50%; display: none; place-items: center; font-size: 14px; line-height: 1; color: #fff; background: rgba(0, 0, 0, .65); }
 .bg-tile:hover .bg-remove, .bg-remove:focus-visible { display: grid; }
 .bg-remove:hover { background: var(--red); }
+.tile-still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.tile-still:not([src]) { visibility: hidden; }
+.tile-still-note { position: absolute; left: 8px; right: 8px; top: 8px; text-align: center; color: white; background: rgba(0,0,0,.6); font-size: calc(12px * var(--font-scale)); padding: 2px 8px; border-radius: 4px; justify-self: center; }
 .tile-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.6); color: white; font-size: calc(12.5px * var(--font-scale)); font-weight: 600; padding: 2px 8px; border-radius: 4px; }
 .cam-badge { width: 20px; height: 18px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); margin-left: 4px; flex: none; }
 .cam-badge .icon { width: 16px; height: 16px; }

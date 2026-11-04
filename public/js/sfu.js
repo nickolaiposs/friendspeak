@@ -29,11 +29,43 @@ const PREVIEW_W = 320;
 const PREVIEW_H = 180;
 const PREVIEW_MAX = 24 * 1024 - 28; // bytes of picture, so the encrypted blob stays under the server's cap
 const NATIVE_WAIT_MS = 20_000; // the sidecar's share has this long to be connected to the SFU
+// A connection that lost its path (D71): "disconnected" gets this long to come back by itself; then (or at once on
+// "failed") new ICE credentials, and this long to connect with them before the session starts over (reset)
+const DISCONNECTED_MS = 5000;
+const RESTART_WAIT_MS = 10_000;
+const RETRY_MS = [2000, 4000, 8000, 15_000]; // between tries while it stays down, then every 15 s
+const NATIVE_RETRY_FOR_MS = 180_000; // a sidecar share that lost its connection is published again for this long
+// How far behind live a stream we watch plays (its jitter buffer's target, D71): a screen share gives a little delay
+// for smooth playback; a camera, part of a conversation, stays close to real time
+const SCREEN_BUFFER_MS = 200;
+const CAMERA_BUFFER_MS = 60;
+// An upload that can't carry a screen share and a camera together (D71): while the estimate stays under WEAK_ROOM
+// times what the screen's lower layers and the camera's lowest need, for WEAK_FOR_MS, the camera sends only its
+// lowest layer (180p15), and the sharer is told once. It goes back once the estimate covers the screen's lower
+// layers and the whole camera STRONG_ROOM times over, for STRONG_FOR_MS.
+const UPLINK_EVERY_MS = 2000;
+const WEAK_ROOM = 1.2;
+const WEAK_FOR_MS = 10_000;
+const STRONG_ROOM = 1.5;
+const STRONG_FOR_MS = 30_000;
+const LOW_CAMERA = { tier: { width: 320, height: 180, fps: 15 }, mode: 'smooth' };
 
 // socket.io's emitWithAck never settles if the socket drops mid-call; a timeout turns that into an answer
 const ask = (socket, event, payload = {}) => socket.timeout(10_000).emitWithAck(event, payload).catch(() => ({ error: 'The server did not answer' }));
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// What each layer of a share of ours needs, in bits per second, lowest first: the sidecar says for its own; the
+// browser engine's layers carry it (voice.js simulcastLayers)
+const needsOf = (p) => (p.native ? (p.stats?.layers || []).map((l) => (l.needMbps || 0) * 1e6) : (p.layers || []).map((l) => l.need || 0)).filter((x) => x > 0);
+// Whether a mediasoup-client transport is connected within `ms`
+const connectedWithin = (t, ms) =>
+  new Promise((resolve) => {
+    if (t.connectionState === 'connected') return resolve(true);
+    const done = (ok) => (clearTimeout(timer), t.off?.('connectionstatechange', on), resolve(ok));
+    const on = (state) => (state === 'connected' ? done(true) : state === 'closed' ? done(false) : null);
+    const timer = setTimeout(() => done(false), ms);
+    t.on('connectionstatechange', on);
+  });
 
 // Cards and the keys two profiles share, verified and derived once per session
 function keyring(profile) {
@@ -77,6 +109,12 @@ export class SfuSession {
     this.worker = new Worker(new URL('./e2ee-worker.js', import.meta.url), { type: 'module' });
     this.worker.onmessage = ({ data }) => data?.t === 'fail' && this.undecryptable(data.sender);
     this.closed = false;
+    this.tries = 0; // recoveries in a row without a connection coming back (D71)
+    this.renative = { screen: null, camera: null }; // a sidecar share being published again after its connection broke
+    // The jitter buffer each kind of stream we watch plays with, in ms (null: the browser's own). D71.
+    this.buffer = { screen: SCREEN_BUFFER_MS, camera: CAMERA_BUFFER_MS };
+    this.uplink = { weak: false, weakSince: null, strongSince: null, told: false }; // D71
+    this.uplinkTimer = setInterval(() => this.checkUplink().catch((e) => console.debug('sfu uplink', e.message)), UPLINK_EVERY_MS);
     for (const p of producers || []) this.producers.set(p.producerId, p);
     this.on = {
       'sfu:produced': (p) => this.produced(p),
@@ -86,7 +124,16 @@ export class SfuSession {
       'sfu:layer': ({ consumerId, spatialLayer }) => {
         for (const w of this.watching.values()) for (const c of w.consumers.values()) if (c.id === consumerId) w.layer = spatialLayer;
       },
-      'sfu:reset': () => this.reset(),
+      // Our link can't carry this stream with the others we watch: the server paused it, or let it go again (D71)
+      'sfu:starved': ({ consumerId, starved }) => {
+        for (const w of this.watching.values())
+          for (const c of w.consumers.values())
+            if (c.id === consumerId && w.starved !== !!starved) {
+              w.starved = !!starved;
+              this.ctx.onChange(w.sid, w.kind);
+            }
+      },
+      'sfu:reset': () => this.reset().catch((e) => log.warn(`sfu: could not start over: ${e.message}`)),
       'sfu:preview:want': ({ from }) => {
         for (const kind of ['screen', 'camera']) if (this.pub[kind]?.preview) this.sealPreviewKey(from, kind).catch(() => {});
       },
@@ -108,9 +155,15 @@ export class SfuSession {
     await this.sendKey([...this.members]);
   }
 
+  // Asks the server to close something of ours. Not once the session is closed: leaving the channel closed it all there.
+  closeOnServer(what) {
+    if (!this.closed) ask(this.socket, 'sfu:close', what);
+  }
+
   close() {
     if (this.closed) return;
     this.closed = true;
+    clearInterval(this.uplinkTimer);
     for (const [ev, fn] of Object.entries(this.on)) this.socket.off(ev, fn);
     for (const kind of ['screen', 'camera']) this.unpublish(kind, true);
     for (const w of this.watching.values()) for (const c of w.consumers.values()) c.close();
@@ -226,10 +279,49 @@ export class SfuSession {
     t.on('connect', ({ dtlsParameters }, ok, bad) =>
       ask(this.socket, 'sfu:connect', { transportId: t.id, dtlsParameters }).then((r) => (r.error ? bad(new Error(r.error)) : ok()))
     );
-    t.on('connectionstatechange', (state) => {
-      if (state === 'failed') log.warn(`sfu: a ${t.direction === 'send' ? 'publishing' : 'watching'} connection failed (is the server's UDP port open?)`);
-    });
+    t.on('connectionstatechange', (state) => this.pathChanged(t, state));
     return t;
+  }
+
+  // A connection that loses its path (a dropped Wi-Fi, a link down for half a minute) comes back by itself, with
+  // new ICE credentials, or by the session starting over (D71)
+  pathChanged(t, state) {
+    if (this.closed || t.closed) return;
+    clearTimeout(t.appData.lost);
+    if (state === 'connected') {
+      if (t.appData.down) log.info(`sfu: a ${t.direction === 'send' ? 'publishing' : 'watching'} connection is back`);
+      t.appData.down = false;
+      this.tries = 0;
+    } else if (state === 'disconnected') t.appData.lost = setTimeout(() => this.recover(t), DISCONNECTED_MS);
+    else if (state === 'failed') {
+      if (!t.appData.down) log.warn(`sfu: a ${t.direction === 'send' ? 'publishing' : 'watching'} connection failed (is the server's UDP port open?)`);
+      this.recover(t);
+    }
+  }
+
+  // New ICE credentials from the server, and the browser checks again with them. When that can't work (a server
+  // from before it, a transport the server has closed) or doesn't within RESTART_WAIT_MS, the session starts
+  // over. While nothing comes back it keeps trying, further apart (RETRY_MS), as long as the socket is connected.
+  async recover(t) {
+    if (this.closed || t.closed || t.appData.recovering || t.connectionState === 'connected') return;
+    t.appData.recovering = true;
+    t.appData.down = true;
+    try {
+      const n = this.tries++;
+      if (n) await sleep(RETRY_MS[Math.min(n - 1, RETRY_MS.length - 1)]);
+      if (this.closed || t.closed || t.connectionState === 'connected' || !this.socket.connected) return;
+      const r = await ask(this.socket, 'sfu:restartIce', { transportId: t.id });
+      if (r.error) throw new Error(r.error);
+      await t.restartIce({ iceParameters: r.iceParameters });
+      if (await connectedWithin(t, RESTART_WAIT_MS)) return;
+      throw new Error('it did not connect again');
+    } catch (e) {
+      if (this.closed || t.closed || !this.socket.connected) return;
+      log.warn(`sfu: a ${t.direction === 'send' ? 'publishing' : 'watching'} connection could not be restarted (${e.message}); starting over`);
+      this.reset('a connection to the media relay could not be restarted').catch((err) => log.warn(`sfu: could not start over: ${err.message}`));
+    } finally {
+      t.appData.recovering = false;
+    }
   }
 
   recvTransport() {
@@ -265,7 +357,8 @@ export class SfuSession {
     const t = await this.sendTransport();
     const p = (this.pub[kind] = { native: false, kind, stream, video: null, audio: null, preview: null, layers });
     const track = stream.getVideoTracks()[0];
-    const codecs = this.device.rtpCapabilities.codecs.filter((c) => c.mimeType === 'video/H264' && c.parameters?.['packetization-mode'] === 1);
+    // What this machine can send: without a hardware encoder that has no High profile, though it can still receive one
+    const codecs = this.device.sendRtpCapabilities.codecs.filter((c) => c.mimeType === 'video/H264' && c.parameters?.['packetization-mode'] === 1);
     const codec = codecs.find((c) => /^64/.test(c.parameters['profile-level-id'] || '')) || codecs[0];
     p.video = await t.produce({
       track,
@@ -302,7 +395,7 @@ export class SfuSession {
     await this.relayer(kind, layers);
     const sound = stream.getAudioTracks()[0];
     if (p.audio && sound) await p.audio.replaceTrack({ track: sound });
-    else if (p.audio) (p.audio.close(), ask(this.socket, 'sfu:close', { producerId: p.audio.id }), (p.audio = null));
+    else if (p.audio) (p.audio.close(), this.closeOnServer({ producerId: p.audio.id }), (p.audio = null));
     else if (sound && kind === 'screen') await this.publishSound(p, sound);
   }
 
@@ -317,17 +410,20 @@ export class SfuSession {
       Object.assign(e, { scaleResolutionDownBy: l.scale, maxBitrate: l.maxBitrate, maxFramerate: l.fps });
     });
     await p.video.rtpSender.setParameters(params).catch((e) => console.warn('sfu: layers', e.message));
-    ask(this.socket, 'sfu:layers', { producerId: p.video.id, layers: layers.map(({ w, h, fps }) => ({ w, h, fps })) });
+    // A camera held to its lowest layer for a thin upload (checkUplink) still runs only that one
+    const running = kind === 'camera' && this.uplink.weak ? layers.slice(0, 1) : layers;
+    ask(this.socket, 'sfu:layers', { producerId: p.video.id, layers: running.map(({ w, h, fps }) => ({ w, h, fps })) });
   }
 
   // ----- publishing: the media sidecar -----
 
   // Resolves once the sidecar's share is connected to the SFU; rejects when it can't start or connect,
-  // and the caller shares through the browser engine instead
-  async publishNative(kind, source, quality) {
+  // and the caller shares through the browser engine instead. `own`: the stream our own tile already shows, when
+  // the same share is published again (republish), so the tile keeps it.
+  async publishNative(kind, source, quality, own = null) {
     await this.ready;
-    this.unpublish(kind, true);
-    const p = (this.pub[kind] = { native: true, kind, source, quality, video: null, audio: null, transportId: null, stats: null, layers: [], own: new MediaStream(), preview: null });
+    this.unpublish(kind, true, true);
+    const p = (this.pub[kind] = { native: true, kind, source, quality, video: null, audio: null, transportId: null, stats: null, layers: [], own: own || new MediaStream(), preview: null });
     await new Promise((resolve, reject) => {
       p.settle = { resolve, reject };
       p.onEvent = (ev) => this.nativeEvent(p, ev).catch((e) => this.nativeFailed(p, e));
@@ -335,7 +431,7 @@ export class SfuSession {
       nativeMedia.send({ op: 'start', kind, source, ...quality, key: { index: this.key.index, key: hex(this.key.raw) } });
       p.timer = setTimeout(() => reject(new Error('the share did not reach the server')), NATIVE_WAIT_MS);
     }).catch((e) => {
-      this.unpublish(kind, true);
+      this.unpublish(kind, true, true);
       throw e;
     });
     clearTimeout(p.timer);
@@ -387,11 +483,36 @@ export class SfuSession {
     }
   }
 
-  // The sidecar's share ended by itself (the window closed, the sidecar died, the connection broke)
+  // The sidecar's share ended by itself (the window closed, the sidecar died, the connection broke). A share
+  // that only lost its connection is published again; anything else moves to the browser engine (onNativeLost).
   nativeEnded(p, reason) {
     if (this.pub[p.kind] !== p) return;
-    this.unpublish(p.kind, true);
-    this.ctx.onNativeLost(p.kind, p.source, reason);
+    this.unpublish(p.kind, true, true);
+    if (/connection|did not answer|reach the server/i.test(reason || '') && this.socket.connected) this.republish(p.kind, p, reason);
+    else this.ctx.onNativeLost(p.kind, p.source, reason);
+  }
+
+  // The same sidecar share again, from the same source, until it is connected or NATIVE_RETRY_FOR_MS have passed
+  // (a link down for a while), further apart each time. Stopping the share meanwhile (unpublish) ends this.
+  async republish(kind, p, reason) {
+    const token = (this.renative[kind] = { since: Date.now() });
+    for (let n = 0; ; n++) {
+      await sleep(n ? RETRY_MS[Math.min(n - 1, RETRY_MS.length - 1)] : 1000);
+      if (this.closed || this.renative[kind] !== token) return;
+      if (!this.socket.connected || Date.now() - token.since > NATIVE_RETRY_FOR_MS) break;
+      try {
+        await this.publishNative(kind, p.source, p.quality, p.own);
+        if (this.renative[kind] === token) this.renative[kind] = null;
+        log.info(`sfu: the ${kind === 'screen' ? 'share' : 'camera'} is published again after ${Math.round((Date.now() - token.since) / 1000)} s`);
+        return;
+      } catch (e) {
+        if (this.renative[kind] !== token) return;
+        reason = e.message;
+      }
+    }
+    if (this.renative[kind] !== token || this.closed) return;
+    this.renative[kind] = null;
+    this.ctx.onNativeLost(kind, p.source, reason);
   }
 
   setNativeQuality(kind, quality) {
@@ -406,6 +527,7 @@ export class SfuSession {
     const consumer = await recv.consume({ id: r.id, producerId: r.producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, this.ctx.sid(), 'H264') });
     if (this.pub[p.kind] !== p) return consumer.close();
     p.ownConsumer = consumer;
+    for (const old of p.own.getTracks()) p.own.removeTrack(old); // a share published again: the new track only
     p.own.addTrack(consumer.track);
     await ask(this.socket, 'sfu:resume', { consumerId: r.id });
     this.ctx.onChange(this.ctx.sid(), p.kind);
@@ -417,7 +539,9 @@ export class SfuSession {
     return p ? (p.native ? p.own : p.stream) : null;
   }
 
-  unpublish(kind, quiet = false) {
+  // `again`: the share is about to be published again (republish), which this doesn't cancel
+  unpublish(kind, quiet = false, again = false) {
+    if (!again) this.renative[kind] = null;
     const p = this.pub[kind];
     if (!p) return;
     this.pub[kind] = null;
@@ -433,14 +557,76 @@ export class SfuSession {
       nativeMedia.release(p.kind, p.onEvent);
       nativeMedia.send({ op: 'stop', kind: p.kind });
       p.ownConsumer?.close();
-      if (p.transportId) for (const x of [p.video, p.audio]) if (x) ask(this.socket, 'sfu:close', { producerId: x.id });
+      // Its transport, and with it what it carried (a server from before transportId closes the producers by id)
+      if (p.transportId) {
+        this.closeOnServer({ transportId: p.transportId, producerId: p.video?.id });
+        if (p.audio) this.closeOnServer({ producerId: p.audio.id });
+      }
     } else {
       for (const x of [p.video, p.audio]) {
         if (!x) continue;
         x.close();
-        ask(this.socket, 'sfu:close', { producerId: x.id });
+        this.closeOnServer({ producerId: x.id });
       }
     }
+  }
+
+  // ----- an upload too thin for a screen and a camera (D71) -----
+
+  async checkUplink() {
+    const { screen: s, camera: c } = this.pub;
+    const u = this.uplink;
+    if (!s?.video || !c?.video) {
+      if (u.weak && c?.video) await this.cameraLow(c, false);
+      Object.assign(u, { weak: false, weakSince: null, strongSince: null });
+      return;
+    }
+    const est = await this.uplinkEstimate();
+    const sNeed = needsOf(s);
+    const cNeed = needsOf(c);
+    if (!Number.isFinite(est) || !sNeed.length || !cNeed.length) return;
+    const lower = sNeed.slice(0, 2).reduce((a, x) => a + x, 0); // the screen's lower layers (both, when it has two)
+    const now = Date.now();
+    if (!u.weak) {
+      if (est >= WEAK_ROOM * (lower + cNeed[0])) return void (u.weakSince = null);
+      u.weakSince ??= now;
+      if (now - u.weakSince < WEAK_FOR_MS) return;
+      Object.assign(u, { weak: true, strongSince: null });
+      log.info(`sfu: the upload (${(est / 1e6).toFixed(1)} Mbit/s) can't carry the screen and the camera; the camera is down to its lowest layer`);
+      await this.cameraLow(c, true);
+      if (!u.told) (u.told = true), this.ctx.onWeakUplink?.(true);
+    } else {
+      if (est < STRONG_ROOM * (lower + cNeed.reduce((a, x) => a + x, 0))) return void (u.strongSince = null);
+      u.strongSince ??= now;
+      if (now - u.strongSince < STRONG_FOR_MS) return;
+      Object.assign(u, { weak: false, weakSince: null });
+      log.info('sfu: the upload has room again; the camera is back to all its layers');
+      await this.cameraLow(c, false);
+      this.ctx.onWeakUplink?.(false);
+    }
+  }
+
+  // The upload's estimate, in bits per second: the page's connection's (when it publishes anything) plus each
+  // sidecar share's own; NaN when there is none yet
+  async uplinkEstimate() {
+    let est = 0;
+    let any = false;
+    if (['screen', 'camera'].some((k) => this.pub[k] && !this.pub[k].native) && this.send) {
+      const stats = await (await this.send).getStats();
+      const best = Math.max(...[...stats.values()].filter((r) => r.type === 'candidate-pair' && r.availableOutgoingBitrate > 0).map((r) => r.availableOutgoingBitrate));
+      if (best > 0) (est += best), (any = true);
+    }
+    for (const p of [this.pub.screen, this.pub.camera]) if (p?.native && p.stats?.availMbps > 0) (est += p.stats.availMbps * 1e6), (any = true);
+    return any ? est : NaN;
+  }
+
+  // The camera on its lowest layer only, or on all of them again. The SFU is told which run, so its viewers move first.
+  async cameraLow(p, low) {
+    if (p.native) return nativeMedia.send({ op: 'quality', kind: 'camera', ...(low ? LOW_CAMERA : p.quality) });
+    const params = p.video.rtpSender.getParameters();
+    params.encodings.forEach((e, i) => (e.active = !low || i === 0));
+    await p.video.rtpSender.setParameters(params).catch((e) => console.warn('sfu: camera layers', e.message));
+    ask(this.socket, 'sfu:layers', { producerId: p.video.id, layers: (low ? p.layers.slice(0, 1) : p.layers).map(({ w, h, fps }) => ({ w, h, fps })) });
   }
 
   // ----- watching -----
@@ -471,7 +657,7 @@ export class SfuSession {
     if (!on) {
       if (!was) return;
       this.watching.delete(key);
-      for (const c of was.consumers.values()) (c.close(), ask(this.socket, 'sfu:close', { consumerId: c.id }));
+      for (const c of was.consumers.values()) (c.close(), this.closeOnServer({ consumerId: c.id }));
       return;
     }
     if (was) return;
@@ -489,20 +675,25 @@ export class SfuSession {
     const r = await ask(this.socket, 'sfu:consume', { producerId, rtpCapabilities: this.device.rtpCapabilities });
     if (r.error) throw new Error(r.error);
     const consumer = await recv.consume({ id: r.id, producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, w.sid, r.kind === 'audio' ? 'opus' : 'H264') });
-    if (this.watching.get(`${w.sid}|${w.kind}`) !== w || !this.producers.has(producerId)) return (consumer.close(), ask(this.socket, 'sfu:close', { consumerId: r.id }));
+    if (this.watching.get(`${w.sid}|${w.kind}`) !== w || !this.producers.has(producerId)) return (consumer.close(), this.closeOnServer({ consumerId: r.id }));
     w.consumers.set(producerId, consumer);
     w.stream.addTrack(consumer.track);
+    // A screen share plays a little behind live, so a short stall in the network doesn't freeze it (D71); its sound,
+    // in the same stream, keeps in sync. A camera is part of a conversation and stays close to real time.
+    const buffer = consumer.kind === 'video' ? this.buffer[w.kind] : null;
+    if (buffer != null && 'jitterBufferTarget' in consumer.rtpReceiver) consumer.rtpReceiver.jitterBufferTarget = buffer;
     if (consumer.kind === 'video' && w.view) ask(this.socket, 'sfu:view', { consumerId: consumer.id, ...w.view });
     if (!(consumer.kind === 'video' && w.paused)) await ask(this.socket, 'sfu:resume', { consumerId: consumer.id });
     this.ctx.onChange(w.sid, w.kind);
     void kind;
   }
 
-  // The tile's size in device pixels picks the layer (on the server); a hidden window pauses the video
-  view(sid, kind, { w = 0, h = 0, hidden = false } = {}) {
+  // The tile's size in device pixels picks the layer (on the server); a hidden window pauses the video. `focus`:
+  // the stream the stage shows large, which the server serves first when the link can't carry everything (D71).
+  view(sid, kind, { w = 0, h = 0, hidden = false, focus = false } = {}) {
     const x = this.watching.get(`${sid}|${kind}`);
     if (!x) return;
-    x.view = w && h ? { w: Math.round(w), h: Math.round(h) } : x.view;
+    x.view = w && h ? { w: Math.round(w), h: Math.round(h), focus: !!focus } : x.view;
     for (const c of x.consumers.values()) {
       if (c.kind !== 'video') continue; // a minimized stream is still heard
       if (hidden !== x.paused) ask(this.socket, hidden ? 'sfu:pause' : 'sfu:resume', { consumerId: c.id });
@@ -530,7 +721,13 @@ export class SfuSession {
     const c = w && [...w.consumers.values()].find((x) => x.kind === 'video');
     if (!c) return null;
     const recv = await this.recv;
-    return { stats: await c.getStats(), transport: () => recv.getStats(), layer: w.layer, view: w.view, paused: w.paused };
+    return { stats: await c.getStats(), transport: () => recv.getStats(), layer: w.layer, view: w.view, paused: w.paused, starved: !!w.starved, buffer: c.rtpReceiver?.jitterBufferTarget ?? null };
+  }
+
+  // Whether the server paused this stream for us because our link can't carry it with the rest (D71): the tile
+  // shows its preview still instead of a frozen frame
+  starved(sid, kind) {
+    return !!this.watching.get(`${sid}|${kind}`)?.starved;
   }
 
   // One entry per layer of our own share, in the shape of the stats panel's sender rows
@@ -549,10 +746,15 @@ export class SfuSession {
         w: l.w,
         h: l.h,
         fps: l.fps,
+        rungFps: l.rungFps,
         mbps: l.mbps,
         sentMbps: l.sentMbps,
         needMbps: l.needMbps,
         encMs: l.encMs,
+        encP90: l.encP90,
+        // Why the layer is off or slowed: the upload ('bandwidth') or the encoders ('encoder'), D71
+        limit: l.limit || undefined,
+        sendErrors: s.sendErrors,
         note: l.note,
         paused: !l.on,
         capW: s.capW,
@@ -633,11 +835,17 @@ export class SfuSession {
     this.socket.emit('sfu:preview', { kind: p.kind, blob: b64(out) });
   }
 
-  // ----- a worker died on the server: start over -----
+  // ----- a worker died on the server, or a connection couldn't be restarted: start over -----
 
-  async reset() {
-    if (this.closed) return;
-    log.warn('sfu: the server restarted its media relay; publishing and watching again');
+  // One at a time: a publishing and a watching connection that fail together start over once
+  reset(why = 'the server restarted its media relay') {
+    if (this.closed) return Promise.resolve();
+    this.resetting ||= this.startOver(why).finally(() => (this.resetting = null));
+    return this.resetting;
+  }
+
+  async startOver(why) {
+    log.warn(`sfu: ${why}; publishing and watching again`);
     const pubs = { ...this.pub };
     const watching = [...this.watching.values()];
     for (const kind of ['screen', 'camera']) if (this.pub[kind]) this.unpublish(kind, true);
@@ -655,7 +863,7 @@ export class SfuSession {
     for (const kind of ['screen', 'camera']) {
       const p = pubs[kind];
       if (!p) continue;
-      if (p.native) this.publishNative(kind, p.source, p.quality).catch((e) => this.ctx.onNativeLost(kind, p.source, e.message));
+      if (p.native) this.republish(kind, p, why);
       else this.publish(kind, p.stream, p.layers).catch((e) => log.warn(`sfu: could not publish again: ${e.message}`));
     }
     for (const w of watching) {

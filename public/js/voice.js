@@ -264,10 +264,18 @@ export function ladderRungs(mode, w, h, fps) {
   return rungs;
 }
 
-// The simulcast layers the browser engine publishes to the SFU (D70), lowest first: 360p, then 720p (1080p
-// under a taller ceiling), then the ceiling, as the sidecar's ladder::layers does. `smooth` keeps the frame
-// rate above the lowest layer; `sharp` runs its best layer at 30 and the others at 15. Each is
-// { w, h, fps, scale (of the track), maxBitrate }.
+// Bits per second a simulcast layer needs to look clean: the sidecar's ladder::need (bits per pixel per mode),
+// never under its floor
+const LAYER_BPP = { smooth: 0.04, sharp: 0.02 };
+const LAYER_MIN_BPS = 150_000;
+const layerNeed = (w, h, fps, sharp = false) => Math.max(LAYER_MIN_BPS, Math.round(w * h * fps * LAYER_BPP[sharp ? 'sharp' : 'smooth']));
+
+// The simulcast layers the browser engine publishes to the SFU (D70), lowest first, as the sidecar's
+// ladder::layers does. A screen: 360p, then 720p (1080p under a taller ceiling), then the ceiling; `smooth`
+// keeps the frame rate above the lowest layer, `sharp` runs its best layer at 30 and the others at 15. A
+// camera: 180p at 15, 360p at 30, then the ceiling, so a viewer on a thin link still gets a moving picture.
+// Each is { w, h, fps, scale (of the track), maxBitrate, need }. Chromium fills layers from the bottom up, so the
+// layers below the top are held to what they need (D71): what is left goes to the top one, which keeps its ceiling.
 export function simulcastLayers(kind, track, { tier, mode }) {
   const cap = ceilingOf(kind, tier);
   const set = track?.getSettings() || {};
@@ -277,13 +285,16 @@ export function simulcastLayers(kind, track, { tier, mode }) {
   const H = even(height * top);
   const fps = Math.min(set.frameRate || cap.fps, kind === 'camera' ? MEDIA.camera.ideal.fps : cap.fps);
   const sharp = kind === 'screen' && mode === 'sharp';
-  const heights = [H > 360 && 360, H > 1440 ? 1080 : H > 720 ? 720 : 0, H].filter(Boolean);
+  const camera = kind === 'camera';
+  const heights = (camera ? [H > 180 && 180, H > 360 && 360, H] : [H > 360 && 360, H > 1440 ? 1080 : H > 720 ? 720 : 0, H]).filter(Boolean);
   return heights.map((h, i) => {
     const last = i === heights.length - 1;
-    const f = sharp ? Math.min(fps, last ? 30 : 15) : i === 0 && heights.length > 1 ? Math.min(fps, 30) : fps;
+    const f = sharp ? Math.min(fps, last ? 30 : 15) : camera && !last ? Math.min(fps, i === 0 ? 15 : 30) : i === 0 && heights.length > 1 ? Math.min(fps, 30) : fps;
     const scale = evenScale(width, height, height / h);
     const w = even(width / scale);
-    return { w, h: even(height / scale), fps: f, scale, maxBitrate: bitrateFor(w, even(height / scale), f) };
+    const hh = even(height / scale);
+    const need = layerNeed(w, hh, f, sharp);
+    return { w, h: hh, fps: f, scale, maxBitrate: last ? bitrateFor(w, hh, f) : need, need };
   });
 }
 
@@ -407,9 +418,15 @@ export class VoiceClient {
           else this.emitMedia();
         },
         onClamped: (kind, tier) => VoiceClient.onClamped?.(this, kind, tier),
+        onWeakUplink: (weak) => VoiceClient.onWeakUplink?.(this, weak),
       },
       producers
     );
+  }
+
+  // Whether the SFU paused `sid`'s `kind` for us because our link can't carry it with the rest (D71)
+  starved(sid, kind) {
+    return !!this.sfu?.starved(sid, kind);
   }
 
   // Whether `sid`'s app shares and watches through the SFU (one from before it watches the old way)
@@ -864,9 +881,10 @@ export class VoiceClient {
   }
 
   // Tell a peer how big we show their screen or camera (device pixels), or that
-  // we can't see it right now, so they can size their encoder for us.
-  view(sid, kind, { w = 0, h = 0, hidden = false } = {}) {
-    if (this.viaSfu(sid)) return this.sfu.view(sid, kind, { w, h, hidden });
+  // we can't see it right now, so they can size their encoder for us. `focus`: the
+  // stream the stage shows large, which the SFU serves first on a thin link (D71).
+  view(sid, kind, { w = 0, h = 0, hidden = false, focus = false } = {}) {
+    if (this.viaSfu(sid)) return this.sfu.view(sid, kind, { w, h, hidden, focus });
     const peer = this.peers.get(sid);
     if (!peer) return;
     peer.viewed[kind] = { w: Math.round(w), h: Math.round(h), hidden };
@@ -937,8 +955,9 @@ export class VoiceClient {
       if (!r) return null;
       stats = r.stats;
       pc = { getStats: r.transport };
-      // The layer the SFU sends, and the size it picked it for (D70)
-      extra = { layer: r.layer, view: r.paused ? { hidden: true } : r.view };
+      // The layer the SFU sends, and the size it picked it for (D70); whether it paused the stream for our link, and
+      // the jitter buffer's target (D71)
+      extra = { layer: r.layer, view: r.paused ? { hidden: true } : r.view, starved: r.starved, jbTargetMs: r.buffer };
     } else {
       pc = peer?.pc;
       const tr = pc?.getTransceivers().find((t) => t.receiver.track?.kind === 'video' && this.mediaOf(sid, kind)?.getTracks().includes(t.receiver.track));

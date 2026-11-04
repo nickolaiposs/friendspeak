@@ -1236,7 +1236,7 @@ async function startServer(opts = {}) {
     //    events costing more. What goes over is dropped, and answered if it wanted an answer.
     const EVENT_BUDGET = 400;
     const EVENT_REFILL = 40; // per second
-    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:restartIce': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
     let lastHandlerError = 0;
     function guard(socket, next) {
       const add = socket.on.bind(socket);
@@ -2559,17 +2559,30 @@ async function startServer(opts = {}) {
       sfuOn('sfu:keyframe', async ({ consumerId }, sfu) => (sfu.keyframe(socket.id, sfuId(consumerId)), { ok: true }));
       sfuOn('sfu:pause', async ({ consumerId }, sfu) => (await sfu.pause(socket.id, sfuId(consumerId)), { ok: true }));
 
-      // Stop watching (consumerId) or publishing (producerId)
-      sfuOn('sfu:close', async ({ consumerId, producerId }, sfu) => {
-        if (consumerId) sfu.stopConsumer(socket.id, sfuId(consumerId));
-        if (producerId) sfu.unpublish(socket.id, sfuId(producerId));
-        return { ok: true };
+      // Stop watching (consumerId) or publishing (producerId), or drop a transport the app is done with
+      // (transportId: a sidecar's share that ended). Closing what is already gone is fine: leaving the voice
+      // channel closed everything, so a socket that isn't in one has nothing to close and is told ok.
+      on('sfu:close', ({ consumerId, producerId, transportId }, ack) => {
+        const sfu = sfuRef.current;
+        if (sfu && users.get(socket.id).voice) {
+          if (consumerId) sfu.stopConsumer(socket.id, sfuId(consumerId));
+          if (producerId) sfu.unpublish(socket.id, sfuId(producerId));
+          if (transportId) sfu.dropTransport(socket.id, sfuId(transportId));
+        }
+        ack({ ok: true });
       });
 
-      // The viewer's tile in device pixels: the SFU picks the layer that fills it (D70)
-      sfuOn('sfu:view', async ({ consumerId, w, h }, sfu) => {
+      // A connection that lost its path gets new ICE credentials, and the app checks again with them (D71)
+      sfuOn('sfu:restartIce', async ({ transportId }, sfu) => {
+        if (!sfuId(transportId)) return { error: 'No such transport' };
+        return { ok: true, iceParameters: await sfu.restartIce(socket.id, transportId) };
+      });
+
+      // The viewer's tile in device pixels: the SFU picks the layer that fills it (D70). `focus` (optional): the
+      // tile the stage shows large, which gets the viewer's link first when it can't carry everything (D71).
+      sfuOn('sfu:view', async ({ consumerId, w, h, focus }, sfu) => {
         const clamp = (n) => Math.max(0, Math.min(16384, Math.round(+n) || 0));
-        return sfu.view(socket.id, sfuId(consumerId), clamp(w), clamp(h)) ? { ok: true } : { error: 'No such stream' };
+        return sfu.view(socket.id, sfuId(consumerId), clamp(w), clamp(h), focus === true) ? { ok: true } : { error: 'No such stream' };
       });
 
       // A media key sealed to someone in the same voice channel (D70). The server can't open it.
@@ -2758,6 +2771,7 @@ async function startServer(opts = {}) {
       udpPort: opts.sfu?.udpPort || port,
       tcpPort: opts.sfu?.tcpPort || 0,
       announced: opts.sfu?.announced || '',
+      deadTransportMs: (opts.sfu?.deadTransportS ?? 30) * 1000,
       who: (sid) => whoIs(users.get(sid)?.profile),
       channelName: (id) => channel(id)?.name ?? 'a deleted channel',
       emit: {
@@ -2889,6 +2903,8 @@ if (require.main === module) {
       udpPort: Number(env.SFU_UDP_PORT) || 0,
       tcpPort: Number(env.SFU_TCP_PORT) || 0,
       announced: (env.SFU_ANNOUNCED_ADDRESS || '').trim(),
+      // Seconds a transport may go without a path before the server closes it (D71); 0 never
+      deadTransportS: /^\s*\d+\s*$/.test(env.SFU_DEAD_TRANSPORT_S || '') ? Number(env.SFU_DEAD_TRANSPORT_S) : 30,
     },
     // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser
     admin: { proxy: !!publicOrigin(env.PUBLIC_URL), enabled: !/^(off|0|false|no)$/i.test(env.ADMIN || ''), local: env.ADMIN_LOCAL ? !/^(off|0|false|no)$/i.test(env.ADMIN_LOCAL) : !publicOrigin(env.PUBLIC_URL), key: env.ADMIN_KEY, mfa: !/^(off|0|false|no)$/i.test(env.ADMIN_MFA || ''), path: /^(off|0|false|no)$/i.test(env.ADMIN_PATH || '') ? false : env.ADMIN_PATH },
