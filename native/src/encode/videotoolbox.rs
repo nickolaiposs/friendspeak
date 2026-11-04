@@ -65,7 +65,7 @@ unsafe fn annex_b(buf: &CMSampleBuffer) -> Result<Encoded, String> {
     }
     let key = has_idr(&nals);
     if !key {
-        return Ok(Encoded { data: nals, key });
+        return Ok(Encoded::now(nals, key));
     }
     let mut out = Vec::with_capacity(nals.len() + 128);
     for i in 0..count {
@@ -77,7 +77,7 @@ unsafe fn annex_b(buf: &CMSampleBuffer) -> Result<Encoded, String> {
         out.extend_from_slice(std::slice::from_raw_parts(p, n));
     }
     out.extend_from_slice(&nals);
-    Ok(Encoded { data: out, key })
+    Ok(Encoded::now(out, key))
 }
 
 unsafe extern "C-unwind" fn output(slot: *mut c_void, _frame: *mut c_void, status: i32, _flags: VTEncodeInfoFlags, buf: *mut CMSampleBuffer) {
@@ -145,7 +145,7 @@ impl Vt {
 }
 
 impl Encoder for Vt {
-    fn encode(&mut self, f: &Nv12, key: bool) -> Result<Option<Encoded>, String> {
+    fn encode(&mut self, f: &Nv12, key: bool, _seq: u64) -> Result<Option<Encoded>, String> {
         // SAFETY: the buffer is locked while written, and every row copied lies inside its plane (checked below)
         unsafe {
             let buf = self.buffer(f.w, f.h)?;

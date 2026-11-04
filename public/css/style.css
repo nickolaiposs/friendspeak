@@ -676,6 +676,12 @@ body.stream-pop > .popover { z-index: 55; } /* the video grid's window has no #p
 .watch-who { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.3; }
 .watch-who strong { color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .watch-row .avatar, .watch-row .btn { flex: none; }
+/* A still of the stream above its row (D70): 16:9, letterboxed by the sharer */
+.watch-preview { position: relative; margin: 6px 6px 0; border-radius: 6px; overflow: hidden; background: #000; aspect-ratio: 16 / 9; }
+.watch-preview img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.watch-age { position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 4px; background: rgb(0 0 0 / 0.65); color: #fff; font-size: calc(11px * var(--font-scale)); }
+/* Someone whose app predates the SFU can't watch shares there */
+.voice-user .old-app { flex: none; font-size: calc(10px * var(--font-scale)); color: var(--yellow); white-space: nowrap; }
 
 .emoji-pop { padding: 0; overflow: hidden; }
 emoji-picker { --background: var(--bg-1); --border-color: var(--line); --input-border-color: var(--bg-3); --input-font-color: var(--text); --indicator-color: var(--accent); --button-hover-background: var(--bg-3); --button-active-background: var(--bg-active); height: 400px; width: 360px; }
@@ -773,7 +779,8 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .share-choice .icon { width: 40px; height: 40px; }
 .share-tabs { display: flex; margin-bottom: 14px; }
 .share-options { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 16px; }
-.share-quality-row { display: flex; gap: 12px; padding: 0; flex: 1 1 360px; }
+.share-quality-wrap { flex: 1 1 360px; }
+.share-quality-row { display: flex; gap: 12px; padding: 0; }
 .share-quality-row .field { flex: 1; margin-bottom: 8px; }
 .share-options .check-row { margin: 0 0 18px; }
 .share-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 14px; margin-bottom: 16px; padding: 2px; }
@@ -833,6 +840,9 @@ button.live-badge:hover, .live-badge.watching { box-shadow: 0 0 0 2px var(--text
 .bg-remove .icon { width: 14px; height: 14px; }
 .bg-tile:hover .bg-remove, .bg-remove:focus-visible { display: grid; }
 .bg-remove:hover { background: var(--red); }
+.tile-still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.tile-still:not([src]) { visibility: hidden; }
+.tile-still-note { position: absolute; left: 8px; right: 8px; top: 8px; text-align: center; color: white; background: rgba(0,0,0,.6); font-size: var(--fs-meta); padding: 2px 8px; border-radius: var(--r-xs); justify-self: center; }
 .tile-name { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,.6); color: white; font-size: var(--fs-meta); font-weight: 600; padding: 2px 8px; border-radius: var(--r-xs); }
 .cam-badge { width: 20px; height: 18px; display: grid; place-items: center; border-radius: var(--r-xs); color: var(--muted); margin-left: 4px; flex: none; }
 .cam-badge .icon { width: 16px; height: 16px; }

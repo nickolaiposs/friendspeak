@@ -11,10 +11,22 @@ mod mediafoundation;
 mod software;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
+mod vui;
+
+pub use vui::low_delay;
 
 pub struct Encoded {
     pub data: Vec<u8>, // Annex B, with SPS and PPS in front of every keyframe
     pub key: bool,
+    // For an encoder with several frames in flight (pipelined): the `seq` of the frame this unit is. None: the
+    // frame just given.
+    pub seq: Option<u64>,
+}
+
+impl Encoded {
+    pub fn now(data: Vec<u8>, key: bool) -> Self {
+        Self { data, key, seq: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -30,12 +42,20 @@ pub struct Config {
 }
 
 pub trait Encoder: Send {
-    // None: the encoder kept the frame to itself (rate control dropped it)
-    fn encode(&mut self, frame: &Nv12, key: bool) -> Result<Option<Encoded>, String>;
+    // None: the encoder kept the frame to itself (rate control dropped it), or, pipelined, it isn't out yet
+    // (poll() hands it over later). `seq` numbers the frames given, for the units of a pipelined encoder.
+    fn encode(&mut self, frame: &Nv12, key: bool, seq: u64) -> Result<Option<Encoded>, String>;
     // For an encoder that takes a captured frame where it is (a texture on its GPU): Some when it did. None:
     // the caller makes NV12 of it and calls encode().
-    fn encode_frame(&mut self, _frame: &Frame, _key: bool) -> Option<Result<Option<Encoded>, String>> {
+    fn encode_frame(&mut self, _frame: &Frame, _key: bool, _seq: u64) -> Option<Result<Option<Encoded>, String>> {
         None
+    }
+    // A pipelined encoder: whether frames are in flight, and the next unit that came out since, if any
+    fn in_flight(&self) -> bool {
+        false
+    }
+    fn poll(&mut self) -> Result<Option<Encoded>, String> {
+        Ok(None)
     }
     fn set_rates(&mut self, bps: u32, fps: f32);
     fn name(&self) -> &'static str;
@@ -132,6 +152,19 @@ pub fn open(cfg: Config, hw: bool, like: Option<&Frame>) -> Result<(Box<dyn Enco
     return Ok((Box::new(software::Soft::new(cfg)?), why));
     #[cfg(not(feature = "software"))]
     Err(why.unwrap_or_else(|| "built without the software encoder".to_string()))
+}
+
+// The profile and level of an Annex B access unit's SPS, as "High 5.2", for the log
+pub fn sps_profile(data: &[u8]) -> Option<String> {
+    let at = data.windows(4).position(|w| w[0] == 0 && w[1] == 0 && w[2] == 1 && w[3] & 0x1f == 7)? + 4;
+    let (profile, level) = (*data.get(at)?, *data.get(at + 2)?);
+    let name = match profile {
+        66 => "Baseline",
+        77 => "Main",
+        100 => "High",
+        _ => "profile",
+    };
+    Some(format!("{name} {}.{}", level / 10, level % 10))
 }
 
 // Whether an Annex B access unit holds an IDR slice (NAL type 5)

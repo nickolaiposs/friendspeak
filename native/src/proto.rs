@@ -59,9 +59,39 @@ pub struct Source {
     pub exclude_pid: u32,
 }
 
+// A media key (D70): its index (1 to 255) and 16 bytes as 32 hex characters
+#[derive(Clone, Debug, Deserialize)]
+pub struct MediaKey {
+    pub index: u8,
+    pub key: String,
+}
+
+// The SFU's end of a publishing connection, as mediasoup describes a WebRtcTransport
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IceParameters {
+    pub username_fragment: String,
+    pub password: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct IceCandidate {
+    pub address: String,
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct DtlsFingerprint {
+    pub algorithm: String,
+    pub value: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Cmd {
+    // Capture and encode a share, and make the connection that publishes it (answered with `started`)
     Start {
         kind: Kind,
         source: Source,
@@ -70,8 +100,14 @@ pub enum Cmd {
         mode: String, // smooth | sharp
         #[serde(default = "yes")]
         hw: bool,
-        #[serde(default)]
-        stun: Vec<String>, // host:port
+        key: MediaKey, // nothing is sent before there is a key, so it comes with the start
+    },
+    // Where to publish it: the SFU's ICE and DTLS parameters for this share's send transport
+    Connect {
+        kind: Kind,
+        ice: IceParameters,
+        candidates: Vec<IceCandidate>,
+        fingerprints: Vec<DtlsFingerprint>,
     },
     Quality {
         kind: Kind,
@@ -79,35 +115,12 @@ pub enum Cmd {
         #[serde(default)]
         mode: String,
     },
+    // A new media key for everything this app shares from now on (someone left the channel)
+    Key {
+        key: MediaKey,
+    },
     Stop {
         kind: Kind,
-    },
-    // Someone watches: the sidecar answers with an offer for them
-    Viewer {
-        kind: Kind,
-        viewer: String,
-        #[serde(default, rename = "self")]
-        own: bool, // our own preview: never the reason a stream gets worse
-    },
-    Unviewer {
-        kind: Kind,
-        viewer: String,
-    },
-    // Their answer or an ICE candidate
-    Signal {
-        kind: Kind,
-        viewer: String,
-        data: Value,
-    },
-    View {
-        kind: Kind,
-        viewer: String,
-        #[serde(default)]
-        w: f32,
-        #[serde(default)]
-        h: f32,
-        #[serde(default)]
-        hidden: bool,
     },
     Quit,
 }

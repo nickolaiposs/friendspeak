@@ -13,12 +13,16 @@
 // encoder on that GPU is given the device and takes them as they are, scaled
 // and converted by the GPU's video processor: encode_frame(). Everything else
 // (cameras, the test pattern, an encoder on another GPU) is fed from memory.
+//
+// Encoders come and go while a share runs (the upload budget starts and stops layers). Each one is opened and
+// shut down under one lock (lifecycle()), and shut down in order: drained, shut down, its event thread joined,
+// then released (D73: releasing two at once, or one while it still had work in flight, crashed the sidecar).
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
-use std::thread::ThreadId;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use windows::core::{Interface, GUID};
@@ -28,7 +32,7 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaEventGenerator, IMFMediaType, IMFSample, IMFShutdown, IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
     MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_NV12, MFVideoInterlace_Progressive, CODECAPI_AVEncCommonBufferSize, CODECAPI_AVEncCommonMaxBitRate, CODECAPI_AVEncCommonMeanBitRate,
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, MEError,
-    METransformHaveOutput, METransformNeedInput, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+    METransformDrainComplete, METransformHaveOutput, METransformNeedInput, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_END_OF_STREAM, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_ENUM_HARDWARE_VENDOR_ID_Attribute, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_STREAMING,
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_MPEG_SEQUENCE_HEADER,
@@ -52,6 +56,39 @@ const VBV_SECS: (f32, f32) = (0.1, 0.25);
 const VBV_FLOOR_FRAMES: f32 = 3.0;
 // The first NeedInput after streaming starts can take a while on a cold GPU
 const IN_WAIT: Duration = Duration::from_millis(1500);
+// At shutdown: how long the transform gets to hand back what it holds, and its event thread to end
+const DRAIN_WAIT: Duration = Duration::from_millis(500);
+const JOIN_WAIT: Duration = Duration::from_millis(1000);
+
+// One encoder at a time is opened or shut down, in this process. The hardware transforms of one GPU share the
+// driver's state, and a shutdown that overlapped another encoder's start or shutdown crashed the sidecar (D73).
+// Reentrant: an open that fails shuts down what it made while it holds this.
+static LIFE: Mutex<(Option<ThreadId>, u32)> = Mutex::new((None, 0));
+static LIFE_FREE: Condvar = Condvar::new();
+
+struct Life;
+
+fn lifecycle() -> Life {
+    let me = std::thread::current().id();
+    let mut held = LIFE.lock().unwrap_or_else(|e| e.into_inner());
+    while held.0.is_some_and(|t| t != me) {
+        held = LIFE_FREE.wait(held).unwrap_or_else(|e| e.into_inner());
+    }
+    held.0 = Some(me);
+    held.1 += 1;
+    Life
+}
+
+impl Drop for Life {
+    fn drop(&mut self) {
+        let mut held = LIFE.lock().unwrap_or_else(|e| e.into_inner());
+        held.1 -= 1;
+        if held.1 == 0 {
+            held.0 = None;
+            LIFE_FREE.notify_all();
+        }
+    }
+}
 
 // COM and Media Foundation for this thread, undone in Drop (the last field of Mf, so after its objects)
 struct Runtime {
@@ -92,6 +129,7 @@ impl Drop for Runtime {
 enum Ev {
     NeedInput,
     HaveOutput,
+    Drained,
     Failed(String),
 }
 
@@ -111,6 +149,8 @@ fn pump(events: Events, tx: Sender<Ev>) {
             Ev::NeedInput
         } else if kind == METransformHaveOutput.0 as u32 {
             Ev::HaveOutput
+        } else if kind == METransformDrainComplete.0 as u32 {
+            Ev::Drained
         } else if kind == MEError.0 as u32 {
             // SAFETY: reading the event just received
             Ev::Failed(unsafe { ev.GetStatus() }.map(|s| s.message()).unwrap_or_default())
@@ -133,6 +173,7 @@ struct Direct {
 pub struct Mf {
     mft: IMFTransform,
     rx: Receiver<Ev>,
+    pump: Option<JoinHandle<()>>, // the thread that passes on the transform's events
     direct: Option<Direct>,
     made: u64,    // units that came out
     closed: bool, // close() ran
@@ -143,6 +184,7 @@ pub struct Mf {
     bps: u32,
     fps: f32,
     n: i64,                       // frames submitted, for sample times
+    inflight: VecDeque<(i64, u64, Instant)>, // frames given and not out yet: sample time, the caller's seq, when
     need: u32,                    // NeedInput events not yet answered with a frame
     ready: VecDeque<Encoded>,     // finished units not yet handed out
     provides: bool,               // the transform allocates its own output samples
@@ -244,6 +286,7 @@ impl Mf {
     // One candidate encoder, configured and streaming
     fn open(cfg: Config, act: IMFActivate, dev: Option<&Arc<Device>>) -> Result<Self, String> {
         let e = |what: &'static str| move |e: windows::core::Error| format!("{what}: {e}");
+        let _life = lifecycle();
         let rt = Runtime::start()?;
         // SAFETY: the calls below follow the documented order for an asynchronous encoder MFT: unlock, device
         // manager, tune, output type, input type, start streaming
@@ -271,6 +314,7 @@ impl Mf {
             let mut me = Self {
                 mft,
                 rx,
+                pump: None,
                 direct,
                 made: 0,
                 closed: false,
@@ -281,6 +325,7 @@ impl Mf {
                 bps: cfg.bps,
                 fps: cfg.fps,
                 n: 0,
+                inflight: VecDeque::new(),
                 need: 0,
                 ready: VecDeque::new(),
                 provides: false,
@@ -314,7 +359,7 @@ impl Mf {
             me.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(e("can't start the stream"))?;
             // Last, so every way out above leaves no thread behind. Events from before this wait in the queue.
             let events = Events(events);
-            std::thread::Builder::new().name("encoder-events".into()).spawn(move || pump(events, tx)).map_err(|e| e.to_string())?;
+            me.pump = Some(std::thread::Builder::new().name("encoder-events".into()).spawn(move || pump(events, tx)).map_err(|e| e.to_string())?);
             Ok(me)
         }
     }
@@ -384,6 +429,7 @@ impl Mf {
         match ev {
             Ev::NeedInput => self.need += 1,
             Ev::HaveOutput => self.output()?,
+            Ev::Drained => {}
             Ev::Failed(status) => return Err(format!("the encoder failed: {status}")),
         }
         Ok(())
@@ -434,6 +480,21 @@ impl Mf {
             Err(e) => return Err(format!("encode: {e}")),
         }
         let Some(sample) = sample else { return Ok(()) };
+        // Which frame this is, by the sample time it went in with; frames before it that never came out (the rate
+        // control dropped them) are forgotten
+        // SAFETY: reading an attribute of the sample just received
+        let pts = unsafe { sample.GetSampleTime() }.ok();
+        let mut of = None;
+        while let Some(&(t, seq, _)) = self.inflight.front() {
+            if pts.is_some_and(|p| t > p) {
+                break;
+            }
+            self.inflight.pop_front();
+            if Some(t) == pts {
+                of = Some(seq);
+                break;
+            }
+        }
         // SAFETY: the buffer is locked for the copy and unlocked after; the lengths come from the buffer itself
         let mut data = unsafe {
             let b = sample.ConvertToContiguousBuffer().map_err(|e| e.to_string())?;
@@ -463,7 +524,7 @@ impl Mf {
             }
         }
         self.made += 1;
-        self.ready.push_back(Encoded { data, key });
+        self.ready.push_back(Encoded { data, key, seq: of });
         Ok(())
     }
 
@@ -528,8 +589,12 @@ impl Mf {
         }
     }
 
-    // One frame in, and whatever unit is finished out
-    fn run(&mut self, sample: IMFSample, key: bool) -> Result<Option<Encoded>, String> {
+    // One frame in, and whatever unit is finished out. `pipelined`: the frame's memory is its own (from_memory), so
+    // the transform may still hold it while the next one goes in. It is then waited for only until the transform
+    // has its unit out or asks for the next frame, and a unit that comes out later is handed over by poll() (D73:
+    // waiting for every frame held a 40 ms encoder to 25 fps). A texture is reused for the next frame, so a frame
+    // given as one is waited for until its unit is out.
+    fn run(&mut self, sample: IMFSample, key: bool, seq: u64, pipelined: bool) -> Result<Option<Encoded>, String> {
         // It asks for a frame when it is ready for one
         if !self.until(IN_WAIT, |me| me.need > 0)? {
             return Err("the encoder stopped asking for frames".into());
@@ -539,32 +604,79 @@ impl Mf {
             self.set(&CODECAPI_AVEncVideoForceKeyFrame, 1);
         }
         let step = (10_000_000.0 / self.fps.clamp(1.0, 240.0) as f64) as i64;
+        let time = self.n * step;
         // SAFETY: the transform asked for this frame (need > 0) and the sample is complete
         unsafe {
-            sample.SetSampleTime(self.n * step).map_err(|e| e.to_string())?;
+            sample.SetSampleTime(time).map_err(|e| e.to_string())?;
             sample.SetSampleDuration(step).map_err(|e| e.to_string())?;
             self.mft.ProcessInput(0, &sample, 0).map_err(|e| format!("encode: {e}"))?;
         }
+        self.inflight.push_back((time, seq, Instant::now()));
+        if self.inflight.len() > 16 {
+            self.inflight.pop_front();
+        }
         self.n += 1;
         self.need -= 1;
-        self.until(OUT_WAIT, |me| !me.ready.is_empty())?;
+        if pipelined {
+            self.until(OUT_WAIT, |me| !me.ready.is_empty() || me.need > 0)?;
+        } else {
+            self.until(OUT_WAIT, |me| me.inflight.iter().all(|f| f.1 != seq))?;
+        }
         Ok(self.ready.pop_front())
     }
 
-    // Orderly shutdown of the streaming transform; it also ends the pump thread's wait
+    // Orderly shutdown of the streaming transform, one encoder at a time (lifecycle()): it hands back what it still
+    // holds (drain), stops streaming, shuts down, and its event thread ends before anything of it is released. The
+    // codec interface and the device manager go here too; the transform itself when the struct is dropped, after.
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
         }
-        // SAFETY: failures at this point don't matter
+        let _life = lifecycle();
+        // SAFETY: the documented end of an asynchronous MFT's stream; failures at this point don't matter
         unsafe {
+            let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+            if self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0).is_ok() {
+                // What it still holds comes out as HaveOutput, then DrainComplete. The units are taken and dropped:
+                // a transform with output waiting is in the middle of work, which shutting down must not cut into.
+                let end = Instant::now() + DRAIN_WAIT;
+                loop {
+                    match self.rx.recv_timeout(end.saturating_duration_since(Instant::now())) {
+                        Ok(Ev::HaveOutput) => {
+                            if self.output().is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Ev::NeedInput) => {}
+                        Ok(Ev::Drained) | Ok(Ev::Failed(_)) | Err(_) => break,
+                    }
+                }
+                self.ready.clear();
+            }
             let _ = self.mft.ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
             let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             if let Ok(s) = self.mft.cast::<IMFShutdown>() {
                 let _ = s.Shutdown();
             }
+        }
+        // Shutdown ends the event thread's wait (GetEvent fails), and it lets go of the transform before we do
+        if let Some(pump) = self.pump.take() {
+            let end = Instant::now() + JOIN_WAIT;
+            while !pump.is_finished() && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            if pump.is_finished() {
+                let _ = pump.join();
+            } else {
+                log!("{}x{}: the encoder's event thread did not end", self.cfg.w, self.cfg.h);
+            }
+        }
+        // SAFETY: the transform is shut down and nothing uses it any more
+        unsafe {
             let _ = self.activate.ShutdownObject();
         }
+        self.codec = None;
+        self.direct = None;
     }
 }
 
@@ -598,17 +710,28 @@ fn hardware_encoders() -> Result<Vec<IMFActivate>, String> {
 }
 
 impl Encoder for Mf {
-    fn encode(&mut self, frame: &Nv12, key: bool) -> Result<Option<Encoded>, String> {
+    fn encode(&mut self, frame: &Nv12, key: bool, seq: u64) -> Result<Option<Encoded>, String> {
         let sample = self.from_memory(frame)?;
-        self.run(sample, key)
+        self.run(sample, key, seq, true)
     }
 
-    fn encode_frame(&mut self, frame: &Frame, key: bool) -> Option<Result<Option<Encoded>, String>> {
+    fn in_flight(&self) -> bool {
+        !self.inflight.is_empty() || !self.ready.is_empty()
+    }
+
+    fn poll(&mut self) -> Result<Option<Encoded>, String> {
+        while let Ok(ev) = self.rx.try_recv() {
+            self.on(ev)?;
+        }
+        Ok(self.ready.pop_front())
+    }
+
+    fn encode_frame(&mut self, frame: &Frame, key: bool, seq: u64) -> Option<Result<Option<Encoded>, String>> {
         let Pixels::D3d11(tex) = &frame.px else { return None };
         if !self.direct.as_ref().is_some_and(|d| Arc::ptr_eq(&d.dev, &tex.dev)) {
             return None;
         }
-        match self.from_texture(tex).and_then(|sample| self.run(sample, key)) {
+        match self.from_texture(tex).and_then(|sample| self.run(sample, key, seq, false)) {
             Err(why) if self.made == 0 => {
                 // It never worked: this driver doesn't take textures after all. The same encoder again, fed
                 // from memory, as long as that doesn't change the profile the viewers were promised.

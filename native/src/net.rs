@@ -1,12 +1,11 @@
-// UDP for the peer connections: one socket per local IPv4 address per viewer
-// (ICE host candidates), a reader thread each, and just enough STUN to learn
-// our public address (the server-reflexive candidate). Everything else on the
-// wire is str0m's.
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+// UDP for a share's publishing connection: one socket per local IPv4 address (ICE host candidates) and a
+// reader thread each. The SFU is ICE-lite and answers the checks we send it, so it learns our address
+// from them: there is no STUN of our own to do. Everything else on the wire is str0m's.
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::engine::Msg;
 use crate::proto::Kind;
@@ -15,10 +14,14 @@ use crate::proto::Kind;
 // full socket buffer would, so a flood can't grow the engine's queue without bound.
 pub static QUEUED: AtomicUsize = AtomicUsize::new(0);
 const QUEUE_LIMIT: usize = 4096;
+// The send buffer of each socket: a keyframe of a 2160p layer is hundreds of packets, and the pacer sends what is
+// due in a burst. A send that finds the buffer full fails, and is counted (D73).
+const SEND_BUFFER: i32 = 4 << 20;
 
 pub struct Sockets {
     pub list: Vec<(SocketAddr, Arc<UdpSocket>)>,
     stop: Arc<AtomicBool>,
+    errors: AtomicU64, // sends that failed
 }
 
 impl Drop for Sockets {
@@ -30,12 +33,46 @@ impl Drop for Sockets {
 impl Sockets {
     pub fn send(&self, from: SocketAddr, to: SocketAddr, data: &[u8]) {
         if let Some((_, s)) = self.list.iter().find(|(a, _)| *a == from).or(self.list.first()) {
-            let _ = s.send_to(data, to);
+            if s.send_to(data, to).is_err() {
+                self.errors.fetch_add(1, Ordering::Relaxed);
+            }
         }
+    }
+
+    pub fn errors(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
     }
 }
 
-fn local_ipv4(loopback: bool) -> Vec<Ipv4Addr> {
+// Best effort: the OS may hold it to less
+#[cfg(target_os = "windows")]
+fn send_buffer(sock: &UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{setsockopt, SOCKET, SOL_SOCKET, SO_SNDBUF};
+    // SAFETY: a live socket, and an option that takes a 4-byte integer
+    unsafe {
+        let _ = setsockopt(SOCKET(sock.as_raw_socket() as usize), SOL_SOCKET, SO_SNDBUF, Some(&SEND_BUFFER.to_ne_bytes()));
+    }
+}
+
+#[cfg(unix)]
+fn send_buffer(sock: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn setsockopt(fd: i32, level: i32, name: i32, value: *const std::ffi::c_void, len: u32) -> i32;
+    }
+    #[cfg(target_os = "macos")]
+    const LEVEL_NAME: (i32, i32) = (0xffff, 0x1001); // SOL_SOCKET, SO_SNDBUF
+    #[cfg(not(target_os = "macos"))]
+    const LEVEL_NAME: (i32, i32) = (1, 7);
+    // SAFETY: a live socket, and an option that takes a 4-byte integer
+    unsafe {
+        setsockopt(sock.as_raw_fd(), LEVEL_NAME.0, LEVEL_NAME.1, &SEND_BUFFER as *const i32 as *const std::ffi::c_void, 4);
+    }
+}
+
+// The machine's IPv4 addresses, and loopback for a server on this machine
+fn local_ipv4() -> Vec<Ipv4Addr> {
     let mut out: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
@@ -44,23 +81,22 @@ fn local_ipv4(loopback: bool) -> Vec<Ipv4Addr> {
             _ => None,
         })
         .collect();
-    if loopback || out.is_empty() {
-        out.push(Ipv4Addr::LOCALHOST);
-    }
+    out.push(Ipv4Addr::LOCALHOST);
     out.dedup();
     out
 }
 
-// Sockets for one viewer. `loopback` adds 127.0.0.1 (our own preview).
-pub fn open(kind: Kind, viewer: &str, loopback: bool, tx: &Sender<Msg>) -> std::io::Result<Sockets> {
+// Sockets for one share's connection to the SFU
+pub fn open(kind: Kind, tx: &Sender<Msg>) -> std::io::Result<Sockets> {
     let stop = Arc::new(AtomicBool::new(false));
     let mut list = Vec::new();
-    for ip in local_ipv4(loopback) {
+    for ip in local_ipv4() {
         let Ok(sock) = UdpSocket::bind(SocketAddrV4::new(ip, 0)) else { continue };
         sock.set_read_timeout(Some(Duration::from_millis(250)))?;
+        send_buffer(&sock);
         let local = sock.local_addr()?;
         let sock = Arc::new(sock);
-        let (rd, tx, stop, viewer) = (sock.clone(), tx.clone(), stop.clone(), viewer.to_string());
+        let (rd, tx, stop) = (sock.clone(), tx.clone(), stop.clone());
         std::thread::Builder::new().name("udp".into()).spawn(move || {
             let mut buf = vec![0u8; 2000];
             while !stop.load(Ordering::Relaxed) {
@@ -70,7 +106,7 @@ pub fn open(kind: Kind, viewer: &str, loopback: bool, tx: &Sender<Msg>) -> std::
                             continue;
                         }
                         QUEUED.fetch_add(1, Ordering::Relaxed);
-                        let msg = Msg::Packet { kind, viewer: viewer.clone(), local, src, data: buf[..n].to_vec(), at: Instant::now() };
+                        let msg = Msg::Packet { kind, local, src, data: buf[..n].to_vec(), at: Instant::now() };
                         if tx.send(msg).is_err() {
                             return;
                         }
@@ -87,71 +123,5 @@ pub fn open(kind: Kind, viewer: &str, loopback: bool, tx: &Sender<Msg>) -> std::
     if list.is_empty() {
         return Err(std::io::Error::other("no local address to bind"));
     }
-    Ok(Sockets { list, stop })
-}
-
-// "host:port" names to IPv4 addresses, off the engine thread (DNS can block)
-pub fn resolve(names: Vec<String>, tx: Sender<Msg>) {
-    let _ = std::thread::Builder::new().name("dns".into()).spawn(move || {
-        let mut out: Vec<SocketAddr> = Vec::new();
-        for n in names.iter().take(2) {
-            if let Ok(addrs) = n.to_socket_addrs() {
-                out.extend(addrs.filter(|a| a.is_ipv4()).take(1));
-            }
-        }
-        let _ = tx.send(Msg::Stun(out));
-    });
-}
-
-const MAGIC: u32 = 0x2112_A442;
-
-// A STUN transaction id: what a binding response has to repeat to be believed, so it must not be
-// guessable. `RandomState` is seeded by the OS's random source, once per process and then varied per
-// instance; hashing the clock with two of them gives 16 bytes nobody outside can predict, with no extra crate.
-pub fn txid() -> [u8; 12] {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let mut bytes = [0u8; 16];
-    for half in bytes.chunks_mut(8) {
-        let mut h = RandomState::new().build_hasher();
-        h.write_u128(n);
-        h.write_u32(std::process::id());
-        half.copy_from_slice(&h.finish().to_le_bytes());
-    }
-    let mut id = [0u8; 12];
-    id.copy_from_slice(&bytes[..12]);
-    id
-}
-
-// A STUN binding request (RFC 5389) with no attributes
-pub fn binding_request(id: &[u8; 12]) -> [u8; 20] {
-    let mut m = [0u8; 20];
-    m[1] = 0x01;
-    m[4..8].copy_from_slice(&MAGIC.to_be_bytes());
-    m[8..20].copy_from_slice(id);
-    m
-}
-
-// Our public address from a binding success response to request `id`
-pub fn binding_response(data: &[u8], id: &[u8; 12]) -> Option<SocketAddr> {
-    if data.len() < 20 || data[0] != 0x01 || data[1] != 0x01 || data[4..8] != MAGIC.to_be_bytes() || data[8..20] != id[..] {
-        return None;
-    }
-    let len = u16::from_be_bytes([data[2], data[3]]) as usize;
-    let mut at = 20;
-    let end = (20 + len).min(data.len());
-    while at + 4 <= end {
-        let kind = u16::from_be_bytes([data[at], data[at + 1]]);
-        let n = u16::from_be_bytes([data[at + 2], data[at + 3]]) as usize;
-        let v = data.get(at + 4..at + 4 + n)?;
-        // XOR-MAPPED-ADDRESS, IPv4
-        if kind == 0x0020 && n >= 8 && v[1] == 0x01 {
-            let port = u16::from_be_bytes([v[2], v[3]]) ^ (MAGIC >> 16) as u16;
-            let ip = u32::from_be_bytes([v[4], v[5], v[6], v[7]]) ^ MAGIC;
-            return Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port));
-        }
-        at += 4 + n.div_ceil(4) * 4;
-    }
-    None
+    Ok(Sockets { list, stop, errors: AtomicU64::new(0) })
 }

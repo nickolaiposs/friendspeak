@@ -1,0 +1,62 @@
+{
+  "format": "D70 media encryption, format 2, see docs/DECISIONS.md",
+  "clear": 5,
+  "vectors": [
+    {
+      "name": "H.264 keyframe: SPS and PPS in the clear and in the first slice, SEI and AUD left out, two slices encrypted",
+      "codec": "H264",
+      "kind": "screen",
+      "index": 1,
+      "input": "000000010910000000016764001facd9405005bb0110000003001000000303c0f18319600000000168ebe3cb22c0000000010605ffff0000000165888400000300112233445566778899aabbccddeeff00000301020304000001658800c0ffee0000030000030100aa",
+      "decrypted": "000000016764001facd9405005bb0110000003001000000303c0f18319600000000168ebe3cb22c00000000165888400000300112233445566778899aabbccddeeff00000301020304000001658800c0ffee0000030000030100aa",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "eid": "a0a1a2a3a4a5a6a7",
+      "ctr": 7,
+      "output": "000000016764001facd9405005bb0110000003001000000303c0f18319600000000168ebe3cb22c000000001658884000003002f3863b1c02a9b65cf1b2b82499ca1a02f8e69275dd9ea32a994d0d5790d909b93ebe98ba3cbe69d178f1bf08eb76989c49faf6812a755ea5f6119d11f1aa3a3f229a7fcbb1c6730fe5da0a1a2a3a4a5a6a700000300070d01000001658800c0ffeef5ddf268dce7a5ce3af52dccf36913abbe180756d74c08a0a1a2a3a4a5a6a700000300080501"
+    },
+    {
+      "name": "H.264 P slice shorter than the clear part: encrypted all the same",
+      "codec": "H264",
+      "kind": "camera",
+      "index": 2,
+      "input": "00000001419a0102",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "eid": "a0a1a2a3a4a5a6a7",
+      "ctr": 7,
+      "output": "00000001419a01022428154e3567aa79904861f9ea6779d6a0a1a2a3a4a5a6a700000300070302"
+    },
+    {
+      "name": "H.264 non-IDR slice with key index 255",
+      "codec": "H264",
+      "kind": "screen",
+      "index": 255,
+      "input": "00000001419a246c41300000030000030102030405060708",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "eid": "a0a1a2a3a4a5a6a7",
+      "ctr": 7,
+      "output": "00000001419a246c41302d3879d6a52887cd135d7c8fa2619b38b4cb3dc0128b3f4f7974137ba0a1a2a3a4a5a6a7000003000705ff"
+    },
+    {
+      "name": "H.265 keyframe: VPS, SPS, PPS in the clear and in the slice; an IDR_W_RADL slice encrypted",
+      "codec": "H265",
+      "kind": "screen",
+      "index": 7,
+      "input": "0000000140010c01ffff016000000300b000000001420101016000000300b0000003005aa0000000014401c172b46240000000012601af0812345678000003000102030405060708090a0b0c0d0e0f",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "eid": "a0a1a2a3a4a5a6a7",
+      "ctr": 7,
+      "output": "0000000140010c01ffff016000000300b000000001420101016000000300b0000003005aa0000000014401c172b46240000000012601af081234562e387496a5268536e95a1b87f29eb1102f9d2b365cd889316966537c190d95f322a822ae27db05dce7b83dff062ec3330a41459214a05ce1566ea702651e1c77677a0c89624e5af52a27e87ed987a0a1a2a3a4a5a6a700000300070d07"
+    },
+    {
+      "name": "Opus frame, encrypted whole",
+      "codec": "opus",
+      "kind": "shareAudio",
+      "index": 3,
+      "input": "fc8f3c5e2a9b00000000000000000000000000000000000000000102030405",
+      "key": "000102030405060708090a0b0c0d0e0f",
+      "eid": "a0a1a2a3a4a5a6a7",
+      "ctr": 7,
+      "output": "d1b745888eb184c9165b7b87f29db1a02f8d69375dd9e931696552ce1a09930c88a0f7bfb30efd43a82fd20efedff6a0a1a2a3a4a5a6a7000000070003"
+    }
+  ]
+}

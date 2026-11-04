@@ -17,8 +17,8 @@ No accounts or sign-up. Run a server, share your IP, and talk.
 - **Files:** drop, paste or attach up to 10 files per message. Images, videos and audio play inline, and other files get a download card. A TeamSpeak-style **file browser** (the folder icon in the channel header, or next to the server name) lists the files of one channel or the whole server, with search, sorting and storage usage. You can delete your own files, and people with **Manage files** anyone's. The host caps total storage with `MAX_STORAGE` (default 2 GB).
 - **Embeds:** links to YouTube, Vimeo, Streamable, Spotify, SoundCloud and direct image/video/audio files embed a player under the message. Wrap a link in `<angle brackets>` to post it without an embed.
 - **Voice channels:** peer-to-peer WebRTC voice with mute, deafen (with optional shortcuts), push-to-talk, a master volume, per-user volume (0–300%) and mute, speaking indicators, device selection (switchable mid-call: right-click mute), automatic gain, echo cancellation, noise suppression that runs on your device (DeepFilterNet, with a strength slider), a noise gate with a level bar, a mic test that plays your mic back to you (and silences everyone else), and the highest Opus quality (stereo, up to 510 kbps; a server can lower it in Settings → Server). The call keeps going while you look at another server: the voice panel shows where it is and takes you back.
-- **Screen sharing:** share an entire screen or a single window, with audio, at up to 1440p 60 fps, from the monitor button in the voice panel. Friends hover the voice channel or the person and click **Start watching**, or click the red **LIVE** badge; either joins the channel first if needed. Video is only sent to people who are watching. **Pop out** moves the whole video view, with every stream and camera you are watching, to a window of its own that you can keep on top of other apps while you chat or play. In the desktop app on macOS and Windows the share is captured and encoded by a native helper (on the graphics card when it can), and encoded once however many friends watch.
-- **Cameras:** the camera button next to it turns on your webcam (up to 1440p 60 fps in the desktop app on macOS and Windows, 1080p 60 fps otherwise or with a background). Right-click it, or go to **Settings → Voice & video**, to pick a device. Before the camera goes on you get a preview, where you can blur your background (with a strength slider) or replace it with a picture: one that comes with the app, or your own. Right-click the camera button to change it mid-call. The background is replaced on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching. Right-click the video view to hide the people without video (**Show non-video participants**) or your own camera and screen share (**Show my own video**); both are on to start with.
+- **Screen sharing:** share an entire screen or a single window, with audio, at up to 1440p 60 fps (2160p 60 fps on a computer whose graphics card can encode it), from the monitor button in the voice panel. Friends hover the voice channel or the person to see a still of what you share, and click **Start watching**, or click the red **LIVE** badge; either joins the channel first if needed. Video is only sent to people who are watching. **Pop out** moves the whole video view, with every stream and camera you are watching, to a window of its own that you can keep on top of other apps while you chat or play. Your share is uploaded once, in a few sizes, and the server sends each friend the size their window and connection can take: a small tile costs them little, and one friend's slow connection doesn't lower anyone else's picture. It is encrypted on your computer, so the server passes it on without being able to see it. In the desktop app on macOS and Windows the share is captured and encoded by a native helper, on the graphics card when it can.
+- **Cameras:** the camera button next to it turns on your webcam (up to 1440p 60 fps in the desktop app on macOS and Windows, 1080p 60 fps otherwise or with a background), sent through the server and encrypted like a screen share. Right-click it, or go to **Settings → Voice & video**, to pick a device. Before the camera goes on you get a preview, where you can blur your background (with a strength slider) or replace it with a picture: one that comes with the app, or your own. Right-click the camera button to change it mid-call. The background is replaced on your own computer, so the room behind you is never sent. Click the camera icon next to anyone in the channel to open the video view with every camera, plus the screen share you're watching. Right-click the video view to hide the people without video (**Show non-video participants**) or your own camera and screen share (**Show my own video**); both are on to start with.
 - **Emojis:** a full searchable emoji picker, plus **custom server emojis** that you upload and use as `:name:`. Channel names can have emojis too: use the emoji button in the create/rename dialog.
 - **GIFs:** GIPHY search built into the composer.
 - **Saved profiles:** name, avatar (any image, an animated GIF, a GIPHY GIF, or an emoji), a **profile background** (image, GIF or color, shown on your profile card when friends click your name), color and status, stored in your browser. You can keep several, switch between them, and export or import them as JSON. Each profile is its own account: it has its own server list and direct messages, and joins every server (password included) itself.
@@ -122,13 +122,18 @@ The client is the **desktop app**; the server does not serve a chat web UI. Each
 
 For an encrypted connection, the host runs the server with `npm run start:https` (or Docker, which defaults to HTTPS), and friends connect to `HOST-IP:PORT`. The first time a friend connects, the app shows the certificate's fingerprint and asks whether to trust it. The host can check it matches the `Certificate:` line the server printed on startup.
 
-To play over the internet instead of a LAN, forward the TCP port on the host's router, or host it on a domain with a real certificate ([Deploy on a domain](#deploy-on-a-domain-docker--caddy)). Chat, voice signaling and the game all use that single port. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`.
+To play over the internet instead of a LAN, forward the port on the host's router, **TCP and UDP**, or host it on a domain with a real certificate ([Deploy on a domain](#deploy-on-a-domain-docker--caddy)). Chat, voice signaling and the game use the TCP port. Screen shares and cameras go through the server over UDP on the same port number: without it forwarded, friends outside your network can't watch them. Voice is peer-to-peer and uses public STUN servers, which covers most home networks. A few strict NATs may need a TURN server, which you can add to `ICE` in `public/js/voice.js`. Someone on an older friendspeak can still talk, but can't watch shares or cameras until they update: the others see "update to watch" next to their name.
 
 ## Server options (environment variables)
 
 | Variable        | Default       | Purpose                                                        |
 |-----------------|---------------|----------------------------------------------------------------|
-| `PORT`          | `3000`        | Port to listen on                                              |
+| `PORT`          | `3000`        | Port to listen on (TCP; the SFU uses UDP on the same number)   |
+| `SFU`           | on            | `off` = screen shares and cameras go peer to peer instead of through the server (no UDP port) |
+| `SFU_UDP_PORT`  | `PORT`'s number | UDP port for screen shares and cameras                       |
+| `SFU_ANNOUNCED_ADDRESS` | the address each friend connected to | The IP or name friends send shares and cameras to, when the one they connect with doesn't reach this machine over UDP (a proxy that only carries web traffic) |
+| `SFU_WORKERS`   | `1`           | Media workers, one CPU core each. Each one past the first needs the next UDP port forwarded too |
+| `SFU_TCP_PORT`  | none          | Optional TCP port for media, for networks that block UDP       |
 | `SERVER_NAME`   | `friendspeak` | Initial server name (first start only; afterwards rename it in Settings → Server) |
 | `GIPHY_API_KEY` | none          | Lets everyone search GIFs without their own key (or set it in the admin dashboard) |
 | `MAX_STORAGE`   | `2GB`         | Total size of all uploaded files (`500MB`, `10GB`, or bytes). Uploads that don't fit are refused |
@@ -258,8 +263,9 @@ Add an `AAAA` record with the IPv6 address too, but only if the server really an
 | 443 TCP | everything: chat, voice signaling, files, the game, the admin dashboard |
 | 443 UDP | optional: HTTP/3 |
 | 3000 TCP | optional: lets friends type `chat.example.com` without `https://` (the app reads that as port 3000) |
+| 3000 UDP | screen shares and cameras: they go straight to friendspeak's container, not through Caddy |
 
-Open them in the provider's firewall (DigitalOcean: **Networking → Firewalls**), if there is one. On the server itself Docker opens what it publishes, `ufw` included. Voice is peer to peer, so it needs no ports here.
+Open them in the provider's firewall (DigitalOcean: **Networking → Firewalls**), if there is one. On the server itself Docker opens what it publishes, `ufw` included. Voice is peer to peer, so it needs no ports here. If the domain's DNS record is proxied (Cloudflare's orange cloud), UDP doesn't reach the machine by that name: set `SFU_ANNOUNCED_ADDRESS` in `.env` to the machine's public IP.
 
 ### 3. Run the installer
 
@@ -329,7 +335,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/friendsp
 | `FRIENDSPEAK_IMAGE` | `ghcr.io/nickolaiposs/friendspeak:latest` | The image from step 1 |
 | `COMPOSE_PROFILES` + `WATCHTOWER_TOKEN` | none | Optional. `autoupdate` + a secret (`openssl rand -hex 32`) to install updates automatically |
 | `AUTO_UPDATE` / `MAINTENANCE_CRON` / `TZ` | `on` / `0 6 * * 0` / `UTC` | See [Automatic updates](#automatic-updates) |
-| `FRIENDSPEAK_PORT` | `3000` | Host port (TCP) friends connect to |
+| `FRIENDSPEAK_PORT` | `3000` | Host port friends connect to: TCP, and UDP on the same number for screen shares and cameras. Forward both |
 | `FRIENDSPEAK_MEMORY` | `1g` | Most memory the server's container may use. Past it Docker restarts the server, so raise it on a big server rather than removing it |
 | `ADMIN_KEY` | generated | Key for the [admin dashboard](#admin-dashboard). If empty, one is generated and printed once in the container log |
 | `ADMIN_PATH` / `ADMIN_MFA` | generated / `on` | The dashboard's path (printed in the container log at every start; `off` = `/admin`) and 2-step sign-in (`off` = key only) |
@@ -395,6 +401,7 @@ GIF search uses GIPHY, which requires a free API key from https://developers.gip
 
 ```
 server.js           Express + Socket.IO server: channels, history, emojis, voice signaling
+sfu.js              The SFU: screen shares and cameras, forwarded (mediasoup), encrypted end to end by the apps
 updater.js          Release check and maintenance-window updates
 admin.js            Admin dashboard: access, sessions, JSON API and event stream
 logbuffer.js        The server's log: in memory for the live view, on disk (data/logs) for history, secrets removed

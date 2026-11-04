@@ -266,6 +266,8 @@ friendspeak is running at https://$DOMAIN
       cd $DIR && docker compose logs caddy
     The usual causes are a DNS record that isn't live yet, or ports 80 and 443
     not open in the provider's firewall.
+  - Screen shares and cameras go through the server over UDP port 3000: open it
+    (UDP) in the provider's firewall too.
 
   Settings:  $DIR/.env   (then: docker compose up -d)
   Logs:      cd $DIR && docker compose logs -f

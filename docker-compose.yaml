@@ -14,8 +14,9 @@
 #     Caddy…) with a real certificate. Enable WebSocket support on the proxy
 #     and remove the `ports:` mapping (or bind it to 127.0.0.1).
 #
-# Voice is peer-to-peer WebRTC: the server only relays signaling, so no UDP
-# ports need to be opened here.
+# Voice is peer-to-peer WebRTC: the server only relays signaling. Screen shares
+# and cameras go through the server's SFU (D70), over UDP on the same port number
+# as the TCP port: forward both (FRIENDSPEAK_PORT, TCP and UDP) on your router.
 #
 # Updates (D29), optional: with AUTO_UPDATE=on, friendspeak checks GitHub for
 # new releases, warns everyone, and at the maintenance window (MAINTENANCE_CRON,
@@ -36,6 +37,8 @@ services:
     init: true
     ports:
       - "${FRIENDSPEAK_PORT:-3000}:3000"
+      # The SFU's media (D70): the same number on both sides, since it tells the apps where to send
+      - "${FRIENDSPEAK_PORT:-3000}:${FRIENDSPEAK_PORT:-3000}/udp"
     environment:
       SERVER_NAME: ${SERVER_NAME:-friendspeak}
       GIPHY_API_KEY: ${GIPHY_API_KEY:-}
@@ -57,6 +60,13 @@ services:
       ADMIN_PATH: ${ADMIN_PATH:-}
       # off = an admin key alone signs in (no code from an authenticator app)
       ADMIN_MFA: ${ADMIN_MFA:-on}
+      # Streams (D70): screen shares and cameras go through the server's SFU over UDP, on the same
+      # number as the port above. off = no SFU: shares go peer to peer over the mesh (the browser engine)
+      SFU: ${SFU:-on}
+      SFU_UDP_PORT: ${FRIENDSPEAK_PORT:-3000}
+      # The address apps send media to. Empty = the host they connected to (right for most setups)
+      SFU_ANNOUNCED_ADDRESS: ${SFU_ANNOUNCED_ADDRESS:-}
+      SFU_WORKERS: ${SFU_WORKERS:-1}
       # off = disable the penguin game entirely (otherwise toggled in Settings → Server)
       GAME: ${GAME:-on}
       GAME_WORLD: ${GAME_WORLD:-Blizzard}

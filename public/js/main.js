@@ -5,6 +5,7 @@ import { profiles, servers, settings, sounds, identities, mentionUnread, exportP
 import { audio, Level, MAX_USER_VOLUME, MAX_MIC_VOLUME, MAX_VOICES_VOLUME, DENOISE_LIMIT, GATE, CUES } from './audio.js';
 import { VoiceClient, MEDIA, TIERS, MODES, AUDIO_QUALITY } from './voice.js';
 import { nativeMedia } from './native.js';
+import { Previews } from './sfu.js';
 import { DirectMessages, MAX_FILES } from './dm.js';
 import { identityFor } from './identity.js';
 import { DmCalls } from './call.js';
@@ -2193,6 +2194,18 @@ function openSocket(entry, rejoinVoice = null) {
   });
   c.voice.profileIdFor = (sid) => c.users.find((u) => u.sid === sid)?.id;
   c.voice.forceMutedFor = (sid) => !!c.users.find((u) => u.sid === sid)?.forceMuted;
+  // What the SFU session needs to know about this connection (D70): who is who, and their keys. Media keys are
+  // sealed to the card the server lists for someone; for a contact whose card we pinned (D32) a different
+  // one means no key, so a server can't slip in a card of its own for them.
+  const sfuUser = (sid) => {
+    const u = c.users.find((x) => x.sid === sid);
+    const pinned = u?.card && DM.contacts.get(u.id)?.card;
+    if (pinned && pinned.s !== u.card.s) return (log.warn('sfu: a member’s key differs from the one pinned for them; sending them no media key'), { ...u, card: null });
+    return u;
+  };
+  const sfuInfo = { serverId: () => c.server?.id || '', profile: () => me(), user: sfuUser, users: () => c.users };
+  c.voice.sfuInfo = () => sfuInfo;
+  c.previews = new Previews({ socket, ...sfuInfo }); // the hover card's stills, in a call here or not
   // Pictures come as references to this server (D58). They are made into addresses here, on the
   // payload itself: onAny listeners run before the handlers below.
   const media = mediaResolver(entry.address);
@@ -2211,6 +2224,7 @@ function openSocket(entry, rejoinVoice = null) {
       proof: identity && (await identity.hello(socket.id, new URL(entry.address).host)),
       uploadKey: true,
       proto: 2, // pictures by reference, `profile:seen`, `emoji:added` and `emoji:removed` (D58)
+      sfu: 1, // shares and cameras through the server's SFU, when it has one (D70)
     });
     if (res.error) {
       log.warn(`${host} refused hello: ${res.error}`);
@@ -2234,6 +2248,8 @@ function openSocket(entry, rejoinVoice = null) {
     media.users(res.users);
     Object.assign(c, { sid: res.sid, uploadKey: typeof res.uploadKey === 'string' ? res.uploadKey : null, server: res.server, users: res.users, connected: true, perms: res.perms && typeof res.perms === 'object' ? res.perms : null }); // no perms: a server from before permissions
     c.voice.setAudioQuality(c.server.audioQuality); // a server from before the setting sends none: the highest
+    c.sfu = res.sfu === 1; // shares and cameras go through the server (D70); without it, over the mesh
+    c.voice.useSfu = c.sfu;
     log.info(`connected to ${host}`);
     if (steamName) sendActivity(c);
     rememberServerLook(c);
@@ -2303,6 +2319,7 @@ function openSocket(entry, rejoinVoice = null) {
   socket.on('users', (users) => {
     const prev = c.users;
     c.users = users;
+    c.voice.usersChanged(); // the SFU's keys follow who is in the channel (D70)
     // voice join/leave cues for our channel
     if (c.voiceChannel) {
       const was = new Set(prev.filter((u) => u.voice === c.voiceChannel).map((u) => u.sid));
@@ -3010,6 +3027,10 @@ function voiceUserEl(u) {
       : null,
     u.forceMuted ? h('span', { class: 'icon state forced', title: 'Muted by a moderator', html: I.lock }) : null,
     u.muted || u.deafened ? icon(u.deafened ? 'headOff' : 'micOff', 'state') : null,
+    // On a server with an SFU, an app from before it can't watch shares or cameras (D70)
+    !isMe && S.conn?.sfu && u.sfu === false
+      ? h('span', { class: 'old-app', title: `${u.name}’s friendspeak is too old to watch shares and cameras here. They need to update.` }, 'update to watch')
+      : null,
     isMe ? null : userVolumeBadge(u)
   );
 }
@@ -3115,12 +3136,40 @@ function watchTipRows(key) {
           : h('button', { class: 'btn small ghost', disabled: true }, 'Watching');
       return h(
         'div',
-        { class: 'watch-row' },
-        avatarEl(u, 28),
-        h('div', { class: 'watch-who' }, h('strong', {}, u.name), h('span', { class: 'muted small' }, screen ? 'Sharing their screen' : 'Camera on')),
-        btn
+        { class: 'watch-item' },
+        S.conn?.sfu && !mine ? watchPreview(u, kind) : null,
+        h(
+          'div',
+          { class: 'watch-row' },
+          avatarEl(u, 28),
+          h('div', { class: 'watch-who' }, h('strong', {}, u.name), h('span', { class: 'muted small' }, screen ? 'Sharing their screen' : 'Camera on')),
+          btn
+        )
       );
     });
+}
+
+// A still of someone's stream for the hover card (D70): their app posts one every 10 s, encrypted, and we
+// decrypt it here. Kept for a few seconds so the card's frequent redraws don't fetch it again. Nothing is
+// shown when there is none yet or it can't be decrypted.
+const previewCache = new Map(); // "<sid>|<kind>" -> { at, promise }
+function watchPreview(u, kind) {
+  const key = `${u.sid}|${kind}`;
+  let hit = previewCache.get(key);
+  if (!hit || Date.now() - hit.at > 5000) {
+    if (hit) hit.promise.then((p) => p && setTimeout(() => URL.revokeObjectURL(p.url), 60_000));
+    hit = { at: Date.now(), promise: S.conn.previews.get(u.sid, kind).catch(() => null) };
+    previewCache.set(key, hit);
+  }
+  const box = h('div', { class: 'watch-preview', hidden: true });
+  hit.promise.then((p) => {
+    if (!p) return;
+    const age = Math.round((Date.now() - p.ts) / 1000);
+    box.replaceChildren(h('img', { src: p.url, alt: '' }), age > 30 ? h('span', { class: 'watch-age' }, age < 90 ? `${age} s ago` : `${Math.round(age / 60)} min ago`) : null);
+    box.hidden = false;
+    watchTip?.pop.place();
+  });
+  return box;
 }
 
 function showWatchTip(key) {
@@ -5318,6 +5367,14 @@ function editSound(s, redraw) {
 // Pick what to share. Browsers show their own picker after this (we hint which
 // tab it opens on); the desktop app has none, so we list sources ourselves.
 const SHARE_TIERS = { auto: 'Auto (up to 1440p60)', '720p30': '720p 30 fps', '1080p60': '1080p 60 fps', '1440p60': '1440p 60 fps' };
+const UHD_TIER = { '2160p60': '2160p 60 fps' };
+
+// 2160p60 is offered for a share the media sidecar carries with a hardware encoder, on a server with an SFU
+// (D70). The browser engine and software encoding stop at 1440p60.
+async function canUhd(v = liveVoice()) {
+  if (!v?.sfu || !(await nativeMedia.load()) || !nativeMedia.can('screen') || !nativeMedia.caps.hardware.length) return false;
+  return (await desktop?.prefs?.().catch(() => null))?.hardwareAcceleration !== false;
+}
 const SHARE_MODES = { smooth: 'Smooth: games and video', sharp: 'Sharp: text and code' };
 
 // The saved share quality: { tier, mode }
@@ -5326,21 +5383,33 @@ function shareQuality() {
   return { tier: TIERS[s.shareTier] ? s.shareTier : 'auto', mode: MODES[s.shareMode] ? s.shareMode : 'smooth' };
 }
 
-// Tier and mode selects that edit `q` in place and call onChange(q)
-function shareQualityFields(q, onChange) {
+// Tier and mode selects that edit `q` in place and call onChange(q). `uhd`: offer 2160p60 (canUhd).
+function shareQualityFields(q, onChange, uhd = false) {
+  if (!uhd && !SHARE_TIERS[q.tier]) q.tier = '1440p60';
   const select = (key, options, label) => {
     const el = h('select', { onchange: (e) => ((q[key] = e.target.value), onChange?.(q)) }, Object.entries(options).map(([v, text]) => h('option', { value: v }, text)));
     el.value = q[key];
     return h('label', { class: 'field' }, h('span', {}, label), el);
   };
-  return h('div', { class: 'share-quality' }, select('tier', SHARE_TIERS, 'Quality'), select('mode', SHARE_MODES, 'Optimize for'));
+  return h(
+    'div',
+    {},
+    h('div', { class: 'share-quality' }, select('tier', uhd ? { ...SHARE_TIERS, ...UHD_TIER } : SHARE_TIERS, 'Quality'), select('mode', SHARE_MODES, 'Optimize for')),
+    desktop &&
+      h(
+        'p',
+        { class: 'muted small' },
+        uhd ? '2160p60 needs a fast upload. Viewers get it only when they enlarge your stream.' : 'Above 1440p60 needs native streaming with a hardware encoder.'
+      )
+  );
 }
 
-function sharePopover(anchor) {
+async function sharePopover(anchor) {
   const q = shareQuality();
+  const uhd = !!liveVoice()?.native.screen && (await canUhd());
   let p;
   const menu = menuEl([{ label: 'Change source…', run: () => screenPicker({ switching: true }) }, { label: 'Stop sharing', danger: true, run: () => liveVoice()?.stopMedia('screen') }], () => p.close(), 'Screen share');
-  menu.prepend(shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q))), h('div', { class: 'menu-sep', role: 'separator' }));
+  menu.prepend(shareQualityFields(q, () => (settings.set({ shareTier: q.tier, shareMode: q.mode }), liveVoice()?.setQuality('screen', q)), uhd), h('div', { class: 'menu-sep', role: 'separator' }));
   p = popover(anchor, menu, { align: 'right', className: 'menu-pop' });
 }
 
@@ -5356,8 +5425,9 @@ async function screenPicker({ switching = false } = {}) {
   const audioBox = (label) =>
     h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: true, onchange: (e) => (withAudio = e.target.checked) }), label);
   const q = shareQuality();
-  const quality = shareQualityFields(q);
-  quality.classList.add('share-quality-row');
+  const quality = shareQualityFields(q, null, await canUhd());
+  quality.classList.add('share-quality-wrap');
+  quality.firstChild.classList.add('share-quality-row');
   const liveNote = DMCALL.voice ? null : h('span', { class: 'foot-note' }, 'Only people who click LIVE receive it.');
 
   if (!desktop) {
@@ -5436,7 +5506,7 @@ async function screenPicker({ switching = false } = {}) {
 
 // Ask for the screen or window; null when cancelled or failed (after a toast).
 async function captureScreen({ surface, sourceId, withAudio, quality }) {
-  const tier = TIERS[quality.tier];
+  const tier = TIERS[quality.tier === '2160p60' ? '1440p60' : quality.tier] || TIERS.auto; // the browser engine stops at 1440p60 (D70)
   const fps = Math.min(tier.fps, MODES[quality.mode].maxFps);
   const video = {
     width: { ideal: tier.width, max: tier.width },
@@ -5480,17 +5550,18 @@ async function captureScreen({ surface, sourceId, withAudio, quality }) {
 }
 
 // What the media sidecar should capture for a picker choice (D45), or null when this share
-// has to go through the browser engine: no sidecar, the setting is off, or audio it can't capture.
-function nativeShareSource(opts) {
+// has to go through the browser engine: no sidecar, the setting is off, audio it can't capture,
+// or a call without an SFU to publish to (a DM call, a server without one: D70).
+function nativeShareSource(opts, v = liveVoice()) {
   const type = opts.sourceId?.startsWith('window:') ? 'window' : 'screen';
-  if (!opts.sourceId || !nativeMedia.can(type)) return null;
+  if (!opts.sourceId || !v?.sfu || !nativeMedia.can(type)) return null;
   if (opts.withAudio && !nativeMedia.caps.audio) return null;
   return { type, id: opts.sourceId, audio: !!opts.withAudio };
 }
 
 // Start the share natively. False (after a console note) when it didn't work, so the caller shares the old way.
 async function shareNative(v, opts) {
-  const source = nativeShareSource(opts);
+  const source = nativeShareSource(opts, v);
   if (!source) return false;
   try {
     await v.setNativeMedia('screen', source, opts.quality);
@@ -5520,8 +5591,8 @@ async function switchShare(opts) {
   await nativeMedia.load();
   const v = liveVoice();
   if (!v) return;
-  if (nativeShareSource(opts)) {
-    // The sidecar opens the new source; everyone watching is moved over to it
+  if (nativeShareSource(opts, v)) {
+    // The sidecar opens the new source and publishes it; everyone watching moves over to it
     let ok = false;
     await v.restart('screen', async () => (ok = await shareNative(v, opts)));
     if (!ok) return startShare({ ...opts, sourceId: opts.sourceId });
@@ -5536,24 +5607,23 @@ async function switchShare(opts) {
   toast('Switched what you’re sharing', 'info', 3000);
 }
 
-// A native share's fallbacks (voice.js). A viewer on an app from before native
-// streams gets the browser engine's capture of the same source…
-VoiceClient.legacyCapture = (kind, source) => (kind === 'screen' ? captureScreen({ sourceId: source.id, withAudio: source.audio, quality: shareQuality() }) : openCamera());
-// …and if the sidecar's share ends by itself, the browser engine takes it over for everyone watching
-VoiceClient.onNativeLost = (v, kind, source, reason, viewers) => {
+// A native share's fallback (voice.js): if the sidecar's share ends by itself, the browser engine
+// captures the same source and publishes it instead
+VoiceClient.onNativeLost = (v, kind, source, reason) => {
   console.warn('native', kind, 'ended:', reason);
   if (liveVoice() !== v) return v.emitMedia();
   toast(kind === 'screen' ? 'Your share moved to the standard pipeline' : 'Your camera moved to the standard pipeline', 'info', 5000);
-  v.restart(
-    kind,
-    async () => {
-      const stream = await VoiceClient.legacyCapture(kind, source);
-      if (stream && liveVoice() === v) v.setMedia(kind, stream, kind === 'screen' ? shareQuality() : undefined);
-      else stream?.getTracks().forEach((t) => t.stop());
-    },
-    viewers
-  ).then(renderVoicePanel);
+  v.restart(kind, async () => {
+    const stream = kind === 'screen' ? await captureScreen({ sourceId: source.id, withAudio: source.audio, quality: shareQuality() }) : await openCamera();
+    if (stream && liveVoice() === v) v.setMedia(kind, stream, kind === 'screen' ? shareQuality() : undefined);
+    else stream?.getTracks().forEach((t) => t.stop());
+  }).then(renderVoicePanel);
 };
+// Our upload can't carry the screen share and the camera together (D73): the camera went down to its smallest layer
+VoiceClient.onWeakUplink = (v, weak) =>
+  liveVoice() === v && weak && toast('Your upload is too slow for your screen and camera. Turn off the camera to keep the screen smooth.', 'info', 10_000);
+// Software encoding (no hardware encoder, or one that failed) holds a share to 1440p60 (D70)
+VoiceClient.onClamped = (v, kind, tier) => liveVoice() === v && toast(`Your ${kind === 'screen' ? 'share' : 'camera'} is held to ${tier.height}p${Math.round(tier.fps)}: it is encoded in software`, 'info', 6000);
 
 // After replaceMedia our own preview keeps the same MediaStream object; reattach so it shows the new tracks
 function reattachOwn(v, kind) {
@@ -5609,7 +5679,7 @@ async function startCamera(stream) {
   // With a background the browser engine keeps it, since that is where the background is made (D37).
   await nativeMedia.load();
   const v = liveVoice();
-  if (v && nativeMedia.can('camera')) {
+  if (v?.sfu && nativeMedia.can('camera')) {
     if (!stream) setBackground(await loadBackground());
     if (!BACKGROUNDS[activeBackground().type]) {
       const id = settings.get().videoDevice;
@@ -5656,7 +5726,7 @@ function setCameraBackground(patch) {
       const v = liveVoice();
       if (!v?.local.camera) return true;
       // Back to no background: the camera may go (back) to the media sidecar
-      if (!BACKGROUNDS[bg.type] && nativeMedia.can('camera')) return await v.restart('camera', () => startCamera()), true;
+      if (!BACKGROUNDS[bg.type] && v.sfu && nativeMedia.can('camera')) return await v.restart('camera', () => startCamera()), true;
       const stream = await openCamera();
       if (!stream) return true;
       if (liveVoice() !== v || !v.local.camera) return stream.getTracks().forEach((t) => t.stop()), true;
@@ -5922,6 +5992,12 @@ function openStage({ screen } = {}) {
     S.stage = { tiles: new Map(), watching: new Set(), volumes: new Map(), muted: new Set(), focus: null, title, stats, controls, popBtns, main, grid, body, el: null, pop: null };
     S.stage.ro = new ResizeObserver(() => layoutStage());
     S.stage.ro.observe(grid);
+    // A strip that scrolls takes tiles out of view and brings others in (D73)
+    grid.addEventListener('scroll', reportTiles, { passive: true });
+    // Stills of streams that aren't decoded follow the sharer's newest one
+    S.stage.stillTimer = setInterval(() => {
+      for (const t of S.stage?.tiles.values() || []) if (t.still && !t.still.hidden) refreshStill(t);
+    }, 10_000);
     // The focused (or first) screen share or camera
     startStats(S.stage, { tile: statsTile, voice: () => S.voice, name: (sid) => S.call?.users.find((u) => u.sid === sid)?.name });
     S.stage.el = h(
@@ -6039,6 +6115,7 @@ function setStageFocus(key) {
   if (!st) return;
   st.focus = st.focus === key ? null : key;
   syncStage();
+  reportTiles(); // which one is focused is part of what the SFU is told (D73)
 }
 
 // kind: 'screen' (live video, or a "Watch stream" card), 'camera' or 'user' (avatar)
@@ -6100,10 +6177,18 @@ function stageTile(key, sid, kind, live) {
       )
     );
   }
+  if (!mine) {
+    // A stream that isn't decoded right now (past the decode budget, or paused by the server for our link) shows
+    // its sharer's preview still, refreshed every 10 s, instead of a frozen frame
+    tile.still = h('img', { class: 'tile-still', alt: '', hidden: true });
+    tile.stillNote = h('span', { class: 'tile-still-note', hidden: true });
+    extras.push(tile.still, tile.stillNote);
+  }
   tile.el = h('div', attrs, video, tile.status, label, ...extras);
   if (!mine) {
     // Tell the sender how many device pixels we show, so their encoder for us
-    // is no bigger than that (and pauses while this window is hidden).
+    // is no bigger than that (and pauses while this window is hidden, the tile
+    // is out of view, or it is past the decode budget and not hovered: D73).
     let timer;
     tile.report = () => {
       clearTimeout(timer);
@@ -6114,15 +6199,53 @@ function stageTile(key, sid, kind, live) {
         const dpr = doc.defaultView?.devicePixelRatio || 1;
         const w = video.clientWidth * dpr;
         const h = video.clientHeight * dpr;
-        if (w && h) S.voice?.view(sid, kind, { w, h, hidden: doc.hidden });
-        else if (doc.hidden) S.voice?.view(sid, kind, { hidden: true });
+        const hidden = doc.hidden || (tile.capped && !tile.hover) || outOfView(tile);
+        if (w && h) S.voice?.view(sid, kind, { w, h, hidden, focus: S.stage?.focus === key });
+        else if (hidden) S.voice?.view(sid, kind, { hidden: true });
+        updateStill(tile);
       }, 300);
     };
     tile.ro = new ResizeObserver(tile.report);
     tile.ro.observe(video);
+    // Past the decode budget, a tile plays while the pointer is on it
+    tile.el.addEventListener('mouseenter', () => ((tile.hover = true), tile.capped && tile.report()));
+    tile.el.addEventListener('mouseleave', () => ((tile.hover = false), tile.capped && tile.report()));
   }
   if (kind === 'camera' && !mine) S.voice?.watch(sid, 'camera', true);
   return tile;
+}
+
+// The decode budget (D73): the focused stream and this many more are decoded at once. The rest show their preview
+// still and play while hovered or once focused. A big grid then costs no more to watch than a small one.
+const DECODE_MORE = 6;
+
+// Whether a tile is out of view: off its window, or outside the part of the grid or strip that shows
+function outOfView(tile) {
+  const win = tile.video?.ownerDocument.defaultView;
+  if (!win || !tile.video.isConnected) return false;
+  const r = tile.video.getBoundingClientRect();
+  const meets = (b) => r.right > b.left && r.left < b.right && r.bottom > b.top && r.top < b.bottom;
+  const box = tile.el.parentElement?.getBoundingClientRect();
+  return !!r.width && (!meets({ left: 0, top: 0, right: win.innerWidth, bottom: win.innerHeight }) || (!!box && !meets(box)));
+}
+
+// The preview still over a tile that isn't decoded: past the decode budget, or paused by the server for our link (D73)
+function updateStill(tile) {
+  if (!tile.still) return;
+  const why =
+    tile.capped && !tile.hover ? 'Paused: too many videos at once. Point at it to play.' : S.voice?.starved?.(tile.sid, tile.kind) ? 'Paused: your connection can’t carry every stream' : '';
+  tile.still.hidden = tile.stillNote.hidden = !why;
+  tile.stillNote.textContent = why;
+  if (why && !tile.stillAt) refreshStill(tile);
+  if (!why) tile.stillAt = 0;
+}
+
+async function refreshStill(tile) {
+  tile.stillAt = Date.now();
+  const p = await S.call?.previews?.get(tile.sid, tile.kind).catch(() => null);
+  if (!p || !tile.still.isConnected) return p && URL.revokeObjectURL(p.url);
+  if (tile.stillUrl) URL.revokeObjectURL(tile.stillUrl);
+  tile.stillUrl = tile.still.src = p.url;
 }
 
 function dropTile(key) {
@@ -6130,6 +6253,7 @@ function dropTile(key) {
   const tile = st?.tiles.get(key);
   if (!tile) return;
   st.tiles.delete(key);
+  if (tile.stillUrl) URL.revokeObjectURL(tile.stillUrl);
   if (tile.kind === 'camera' && tile.sid !== S.call?.sid && S.call?.connected) S.voice.watch(tile.sid, 'camera', false);
   if (tile.video) tile.video.srcObject = null;
   tile.ro?.disconnect();
@@ -6148,6 +6272,8 @@ function formatVideoStats(info) {
   const hw = (x) => (x === true ? ' (hardware)' : x === false ? ' (software)' : '');
   if (!Array.isArray(info)) return info.codec + hw(info.hw);
   if (!info.length) return 'no viewers yet';
+  // Through the SFU (D70): our layers, not our viewers
+  if (info[0].layer) return info.filter((v) => !v.paused && v.w).map((v) => `${v.layer} ${v.codec}${hw(v.hw)} ${v.w}×${v.h}@${Math.round(v.fps || 0)} ${(v.sentMbps ?? v.mbps ?? 0).toFixed(1)} Mbps`).join(' | ') || 'starting';
   return info
     .map((v) =>
       v.paused
@@ -6205,9 +6331,11 @@ function statsView(tile, info, nameOf) {
   if (!Array.isArray(info)) {
     const rows = [
       ['Codec', `${info.codec} (${hw(info.hw) || '?'} decode${info.decoder ? ', ' + info.decoder : ''})`],
+      ...(info.layer !== undefined ? [['Layer', info.layer == null ? 'none yet' : `${info.layer} (the server picks it for your tile and your connection)`]] : []),
       ['Received', `${size(info.w, info.h)} @ ${f(info.fps, 0)} fps, ${f(info.mbps, 2)} Mbps, QP ${f(info.qp, 0)}`],
       ['Shown at', info.view ? (info.view.hidden ? 'hidden' : size(info.view.w, info.view.h)) : '–'],
-      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms`],
+      ['Decode', `${f(info.decMs)} ms/frame, jitter buffer ${f(info.jbMs, 0)} ms per frame${info.jbTargetMs != null ? ` (target ${f(info.jbTargetMs, 0)} ms)` : ''}`],
+      ...(info.starved ? [['Paused', 'by the server: your connection can’t carry this stream with the others you watch', true]] : []),
       ['Dropped / frozen', `${info.dropped ?? '–'} frames dropped, ${info.freezes ?? '–'} freezes (${f(info.freezeSec)} s), ${info.keyframes ?? '–'} keyframes`, info.freezes > 0],
       ['Packets', `${info.lost ?? '–'} lost, NACK ${info.nack ?? '–'}, PLI ${info.pli ?? '–'}, jitter ${f(info.jitterMs, 0)} ms`, info.jitterMs > 30],
       ['Path', `${info.cand || '–'}, RTT ${f(info.pathRtt, 0)} ms`, info.pathRtt > 250],
@@ -6216,6 +6344,7 @@ function statsView(tile, info, nameOf) {
     return h('table', { class: 'stats-table' }, h('tbody', {}, rows.map(([k, v, warn]) => h('tr', { class: warn ? 'warn' : null }, h('th', {}, k), h('td', {}, v)))));
   }
   if (!info.length) return h('p', { class: 'muted small' }, 'No viewers yet.');
+  if (info[0].layer) return layerStats(info, f, size, hw);
   const cols = ['Viewer', 'Capture', 'Rung', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path', 'Viewer size'];
   const row = (v) => {
     const name = nameOf(v.sid) || 'someone';
@@ -6247,6 +6376,32 @@ function statsView(tile, info, nameOf) {
       h('thead', {}, h('tr', {}, cols.map((c) => h('th', {}, c)))),
       h('tbody', {}, info.map((v) => h('tr', {}, row(v).map((c) => h('td', {}, c)))))
     )
+  );
+}
+
+// Our own share through the SFU (D70): one row per simulcast layer. Each viewer gets one of them, picked by
+// the server for their tile and their connection; what we upload is the same whoever watches.
+function layerStats(info, f, size, hw) {
+  const first = info[0];
+  const cols = ['Layer', 'Capture', 'Encoded', 'Sent / target / avail Mbps', 'Encoder', 'Limit', 'QP', 'Enc ms', 'Loss', 'RTT ms', 'Path'];
+  const row = (v) => [
+    v.layer + (v.paused ? ' (stopped: not enough upload)' : ''),
+    `${size(v.capW, v.capH)} @ ${f(v.capFps, 0)}`,
+    `${size(v.w, v.h)} @ ${f(v.fps, 0)}`,
+    `${f(v.sentMbps, 2)} / ${f(v.mbps, 2)} / ${f(v.availMbps, 1)}`,
+    `${v.codec} ${hw(v.hw)} ${v.impl || ''}`.trim() + (v.note ? ` (${v.note})` : ''),
+    v.limit && v.limit !== 'none' ? v.limit : 'none',
+    f(v.qp, 0),
+    f(v.encMs),
+    v.loss != null ? f(v.loss * 100, 1) + '%' : '–',
+    f(v.rtt ?? v.pathRtt, 0),
+    v.cand || '–',
+  ];
+  return h(
+    'div',
+    {},
+    h('p', { class: 'muted small' }, `Quality: ${{ ...SHARE_TIERS, ...UHD_TIER }[first.tier] || 'Camera'}, ${first.mode}${first.native ? ', native' : ''}${first.clamped ? ', held to 1440p60 (software encoding)' : ''}. Each viewer gets the layer that fits their tile and connection.`),
+    h('table', { class: 'stats-table' }, h('thead', {}, h('tr', {}, cols.map((c) => h('th', {}, c)))), h('tbody', {}, info.map((v) => h('tr', {}, row(v).map((c) => h('td', {}, c))))))
   );
 }
 
@@ -6320,6 +6475,15 @@ function syncStage() {
   if (rest.length !== st.grid.children.length || rest.some((el, i) => st.grid.children[i] !== el)) st.grid.replaceChildren(...rest);
   st.body.classList.toggle('focused', !!focused);
   for (const t of st.tiles.values()) t.el.classList.toggle('focus', t === focused);
+
+  // The decode budget (D73): the focused stream first, then the others in the grid's order
+  const rank = new Map(want.map((w, i) => [w.key, i]));
+  const decoded = [...st.tiles.values()].filter((t) => t.report).sort((a, b) => (b === focused) - (a === focused) || rank.get(a.key) - rank.get(b.key));
+  decoded.forEach((t, i) => {
+    const capped = i > DECODE_MORE;
+    if (t.capped !== capped) (t.capped = capped), t.report();
+    else updateStill(t);
+  });
 
   for (const t of st.tiles.values()) {
     if (!t.video) continue;
@@ -6411,6 +6575,7 @@ function closeStage({ nav = false } = {}) {
   const st = S.stage;
   if (!st || (nav && st.pop)) return;
   clearInterval(st.timer);
+  clearInterval(st.stillTimer);
   st.timer = null;
   st.statsPanel?.close();
   st.ro.disconnect();

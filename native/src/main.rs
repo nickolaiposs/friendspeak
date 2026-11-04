@@ -7,6 +7,7 @@
 mod audio;
 #[cfg(target_os = "windows")]
 mod d3d;
+mod e2ee;
 mod encode;
 mod engine;
 mod frame;

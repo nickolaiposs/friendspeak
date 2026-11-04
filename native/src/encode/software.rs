@@ -40,7 +40,7 @@ impl Soft {
 }
 
 impl Encoder for Soft {
-    fn encode(&mut self, f: &Nv12, key: bool) -> Result<Option<Encoded>, String> {
+    fn encode(&mut self, f: &Nv12, key: bool, _seq: u64) -> Result<Option<Encoded>, String> {
         let n = f.w * f.h / 4;
         self.u.resize(n, 0);
         self.v.resize(n, 0);
@@ -62,7 +62,7 @@ impl Encoder for Soft {
         if self.out.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Encoded { data: self.out.clone(), key: matches!(kind, FrameType::IDR) }))
+        Ok(Some(Encoded::now(self.out.clone(), matches!(kind, FrameType::IDR))))
     }
 
     fn set_rates(&mut self, bps: u32, fps: f32) {
