@@ -16,7 +16,7 @@
 # ---------------------------------------------------------------- build the game
 # The build output is plain JS, so build once on the native platform even for
 # multi-arch images (no slow emulated webpack run for arm64).
-FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS build
 WORKDIR /app
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 COPY package.json package-lock.json ./
@@ -29,7 +29,7 @@ RUN npm run build:game
 
 # ---------------------------------------------------------------- runtime dependencies
 # Installed for the target platform in a stage of their own, so the runtime image needs no npm.
-FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS deps
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
@@ -51,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
     && find worker/out/Release -mindepth 1 ! -name mediasoup-worker -exec rm -rf {} +
 
 # ---------------------------------------------------------------- runtime
-FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
 LABEL org.opencontainers.image.source=https://github.com/nickolaiposs/friendspeak
 WORKDIR /app
 # FRIENDSPEAK_DOCKER: AUTO_UPDATE=on is only allowed here, where a Watchtower
