@@ -6,6 +6,53 @@ in package.json) before starting it:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.2.0 - 2026-11-03
+
+- **Screen shares and cameras go through the server.** The server forwards
+  them (an SFU), so sharing costs your upload the same whether one friend
+  watches or ten, and each viewer gets the quality that fits their tile and
+  connection. They are encrypted end to end: the server passes them on
+  without seeing them, and keys change whenever someone
+  joins or leaves and every 30 minutes. Voice and DM calls stay peer to peer.
+  **Updating:** the server needs **UDP** on the same port number as its TCP
+  port (3000 by default). Forward it on your router, or open UDP 3000 in the
+  firewall for the domain stack. A Docker stack installed before this needs
+  the new `ports` line from this release's compose file. Behind a proxied DNS
+  record (Cloudflare's orange cloud), set `SFU_ANNOUNCED_ADDRESS` to the
+  machine's public IP. `SFU=off` keeps shares peer to peer
+- Someone on an older app can still talk, but needs to update to watch
+  shares and cameras: the others see "update to watch" next to their name
+- Hovering a stream shows a still of it. A native share with a hardware
+  encoder can go up to 2160p 60 fps
+- Streams recover by themselves when a connection drops, and get smaller
+  before they freeze on a thin link: cameras step down first, and streams
+  past the first seven you watch show a still until you focus them
+- A new look: one set of text sizes and corners, buttons whose text is
+  readable in every theme, and keyboard focus you can see. Every control,
+  including message actions, can be reached with Tab
+- Dialogs, menus and pickers work the same everywhere: Escape closes the top
+  one, focus comes back where it was, menus work from the keyboard
+  (Shift+F10 or the menu key). New right-click menus on messages, video
+  tiles, categories and channels. Toasts can offer Undo
+- Settings are regrouped, with switches, a member search and noise
+  suppression as one slider
+- The app draws its own title bar in the theme's colors, showing where you
+  are; an app update shows as a pill at its end. Loading spinners while the
+  app starts, a server connects and messages load
+- Channels can be put in another order: drag one within its list, or
+  right-click it for **Move up** and **Move down**. Whoever can manage a
+  channel can move it. The server needs this version too
+- Calls in DMs: the stream stats, **Pop out** with **Keep on top** and
+  **Back to app**, full screen and **Grid**
+- The video grid's right-click menu: show people without video, show your
+  own video, focus, full screen, mute a stream, stop watching
+- The Steam game someone is playing shows with the game's own icon
+- Admin dashboard: a GIPHY API key can be set in Server settings, a Streams
+  view shows who shares and watches, and the HTTPS row is right behind a
+  reverse proxy
+- Releases are now started by hand from `main`. The Docker image builds the
+  SFU's media worker from source, with its build tools pinned
+
 ## 1.1.9 - 2026-10-07
 
 - **No open servers.** Permissions always apply, and the first person to join
