@@ -41,6 +41,17 @@ const FEED_ROOM = 1.2;
 const LOW_BPP = 0.04; // bits per pixel a layer needs (the sidecar's ladder::need for smooth)
 const LOW_MIN_BPS = 150_000;
 const LOW_GUESS_BPS = 300_000; // a lowest layer whose size the publisher didn't say
+// Keyframes (D70): mediasoup asks a publisher for one no more often than this, and a viewer's own asks for one stream
+// are taken no more often than KEYFRAME_ASK_MS. A viewer asking over and over would otherwise keep the sharer's
+// encoder making keyframes, which every viewer of that layer pays for in picture quality.
+const KEYFRAME_DELAY_MS = 1000;
+const KEYFRAME_ASK_MS = 1000;
+
+// An error whose words are for the app (server.js passes them on); anything else is answered in general terms
+const refuse = (message) => Object.assign(new Error(message), { expose: true });
+// A loopback or private (LAN) address, as a socket's peer
+const isLoopback = (ip) => /^(127\.|::1$)/.test(String(ip || '').replace(/^::ffff:/i, ''));
+const isLocal = (ip) => isLoopback(ip) || /^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|f[cd][0-9a-f]{2}:|fe[89ab][0-9a-f]:)/i.test(String(ip || '').replace(/^::ffff:/i, ''));
 
 // deadTransportMs: how long a transport may be without a path (its ICE disconnected) before it is closed, with its
 // producers, so the room doesn't keep what an app gave up on (0: never)
@@ -112,7 +123,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     let room = rooms.get(channelId);
     if (room) return room.ready;
     const slot = pool.filter(Boolean).sort((a, b) => a.routers.size - b.routers.size)[0];
-    if (!slot) throw new Error('The server’s media relay is restarting');
+    if (!slot) throw refuse('The server’s media relay is restarting');
     room = { id: channelId, slot, peers: new Set(), router: null };
     rooms.set(channelId, room);
     slot.routers.add(channelId);
@@ -168,8 +179,8 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
   }
 
   // A send transport (for `owner`: the page, or the sidecar for one kind) or the receive transport.
-  // `host` is the host the socket dialed: what the app is told to send to (D70).
-  async function transport(sid, channelId, { direction, owner }, host) {
+  // `host` is the host the socket dialed: what the app is told to send to (D70); `ip` the socket's own address.
+  async function transport(sid, channelId, { direction, owner }, host, ip) {
     const room = await roomFor(channelId);
     const peer = peerOf(sid, channelId);
     owner = direction === 'recv' ? 'recv' : owner;
@@ -186,7 +197,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     });
     if (peers.get(sid) !== peer) {
       t.close();
-      throw new Error('left the channel');
+      throw refuse('left the channel');
     }
     if (direction === 'send') await t.setMaxIncomingBitrate(MAX_INCOMING).catch(() => {});
     // The estimate of a viewer's link, as it changes: whether it carries the lowest layers of what they watch (D71)
@@ -218,17 +229,19 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
       }
     });
     changed();
-    return { id: t.id, iceParameters: t.iceParameters, iceCandidates: candidates(t.iceCandidates, host), dtlsParameters: t.dtlsParameters };
+    return { id: t.id, iceParameters: t.iceParameters, iceCandidates: candidates(t.iceCandidates, host, ip), dtlsParameters: t.dtlsParameters };
   }
 
-  // The candidates an app is given: the dialed host (or SFU_ANNOUNCED_ADDRESS), then this machine's LAN
-  // addresses, each at the transport's port. The server listens on every interface, so any of them reach it.
-  function candidates(list, host) {
+  // The candidates an app is given: the dialed host (or SFU_ANNOUNCED_ADDRESS), then, for an app on this machine's
+  // network, its LAN addresses (and loopback, for one on this machine), each at the transport's port. The server
+  // listens on every interface, so any of them reach it. An app out on the internet couldn't reach a LAN address,
+  // and isn't told what they are.
+  function candidates(list, host, ip) {
     const out = [];
     const seen = new Set();
     const dialed = hostOnly(host);
     const first = announced || (/^(localhost|127\.\d+\.\d+\.\d+|::1)$/i.test(dialed) ? '' : dialed);
-    const addresses = [first, ...lan(), '127.0.0.1'].filter(Boolean);
+    const addresses = [first, ...(isLocal(ip) ? lan() : []), isLoopback(ip) ? '127.0.0.1' : ''].filter(Boolean);
     for (const base of list) {
       let priority = base.priority;
       for (const address of addresses) {
@@ -263,13 +276,13 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
   // New ICE credentials for a transport that lost its path; the app checks again with them (D71)
   async function restartIce(sid, transportId) {
     const t = peers.get(sid)?.transports.get(transportId);
-    if (!t) throw new Error('No such transport');
+    if (!t) throw refuse('No such transport');
     return t.transport.restartIce();
   }
 
   async function connect(sid, transportId, dtlsParameters) {
     const t = peers.get(sid)?.transports.get(transportId);
-    if (!t) throw new Error('No such transport');
+    if (!t) throw refuse('No such transport');
     await t.transport.connect({ dtlsParameters });
   }
 
@@ -278,12 +291,12 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
   async function produce(sid, transportId, kind, rtpParameters, layers) {
     const peer = peers.get(sid);
     const t = peer?.transports.get(transportId);
-    if (!t || t.direction !== 'send') throw new Error('No such transport');
+    if (!t || t.direction !== 'send') throw refuse('No such transport');
     for (const [pid, p] of [...peer.producers]) if (p.kind === kind) closeProducer(peer, pid);
-    const producer = await t.transport.produce({ kind: KINDS[kind], rtpParameters, appData: { sid, kind } });
+    const producer = await t.transport.produce({ kind: KINDS[kind], rtpParameters, appData: { sid, kind }, ...(KINDS[kind] === 'video' ? { keyFrameRequestDelay: KEYFRAME_DELAY_MS } : null) });
     if (peers.get(sid) !== peer || !peer.transports.has(transportId)) {
       producer.close();
-      throw new Error('left the channel');
+      throw refuse('left the channel');
     }
     peer.producers.set(producer.id, { producer, kind, transportId, layers: layers || [] });
     producer.on('transportclose', () => peer.producers.delete(producer.id));
@@ -339,19 +352,19 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
   // A consumer starts paused, on the lowest layer: a grid of tiles costs only their small layers. sfu:view moves it.
   async function consume(sid, producerId, rtpCapabilities) {
     const peer = peers.get(sid);
-    if (!peer) throw new Error('Not in a voice channel');
+    if (!peer) throw refuse('Not in a voice channel');
     const room = rooms.get(peer.channelId);
     const found = room && producerIn(peer.channelId, producerId);
-    if (!found) throw new Error('That stream has ended');
-    if (peer.consumers.size >= MAX_CONSUMERS) throw new Error('Watching too many streams');
-    if (!room.router.canConsume({ producerId, rtpCapabilities })) throw new Error('This app can’t play that stream');
+    if (!found) throw refuse('That stream has ended');
+    if (peer.consumers.size >= MAX_CONSUMERS) throw refuse('Watching too many streams');
+    if (!room.router.canConsume({ producerId, rtpCapabilities })) throw refuse('This app can’t play that stream');
     const recv = [...peer.transports.values()].find((t) => t.direction === 'recv');
-    if (!recv) throw new Error('No receive transport');
+    if (!recv) throw refuse('No receive transport');
     const video = found.p.producer.kind === 'video';
     const consumer = await recv.transport.consume({ producerId, rtpCapabilities, paused: true, ...(video ? { preferredLayers: { spatialLayer: 0 } } : null), appData: { sid } });
     if (peers.get(sid) !== peer) {
       consumer.close();
-      throw new Error('left the channel');
+      throw refuse('left the channel');
     }
     // appPaused: the app paused it (it starts paused); starved: the server did, for the viewer's link (D71)
     const c = { consumer, producerId, transportId: recv.transport.id, from: found.peer.sid, kind: found.p.kind, view: null, layer: 0, downAt: 0, focus: false, appPaused: true, starved: false };
@@ -379,14 +392,14 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
 
   async function resume(sid, consumerId) {
     const c = consumerOf(sid, consumerId);
-    if (!c) throw new Error('No such consumer');
+    if (!c) throw refuse('No such consumer');
     c.appPaused = false;
     if (!c.starved) await c.consumer.resume();
   }
 
   async function pause(sid, consumerId) {
     const c = consumerOf(sid, consumerId);
-    if (!c) throw new Error('No such consumer');
+    if (!c) throw refuse('No such consumer');
     c.appPaused = true;
     await c.consumer.pause();
   }
@@ -440,9 +453,17 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     changed();
   }
 
-  // mediasoup limits how often a producer is asked
+  // A viewer's ask, at most once per KEYFRAME_ASK_MS for each stream (whatever number of consumers it has of it);
+  // mediasoup then asks the publisher no more often than KEYFRAME_DELAY_MS for everyone
   function keyframe(sid, consumerId) {
-    consumerOf(sid, consumerId)?.consumer.requestKeyFrame().catch(() => {});
+    const peer = peers.get(sid);
+    const c = peer?.consumers.get(consumerId);
+    if (!c) return;
+    const now = Date.now();
+    peer.keyAsk ||= new Map(); // producerId -> when
+    if (now - (peer.keyAsk.get(c.producerId) || 0) < KEYFRAME_ASK_MS) return;
+    peer.keyAsk.set(c.producerId, now);
+    c.consumer.requestKeyFrame().catch(() => {});
   }
 
   function stopConsumer(sid, consumerId) {

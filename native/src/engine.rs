@@ -249,6 +249,7 @@ struct Stream {
     slot: Arc<Mutex<Option<Frame>>>,
     last: Option<(Arc<Frame>, Instant)>, // the newest frame and when it was last fed to the layers
     opus: Option<Opus>,
+    audio_sealer: e2ee::Sealer, // the sound's IVs (D70)
     audio_time: u64,           // in samples
     audio_at: Option<Instant>, // when sound last arrived
     src: (usize, usize),       // size of the captured frames; (0, 0) before the first
@@ -545,6 +546,7 @@ impl Stream {
             slot,
             last: None,
             opus,
+            audio_sealer: e2ee::Sealer::new(),
             audio_time: 0,
             audio_at: None,
             src: (0, 0),
@@ -846,13 +848,13 @@ impl Stream {
         }
         self.audio_at = Some(now);
         let key = self.key.lock().unwrap().clone();
-        let (conn, time) = (&mut self.conn, &mut self.audio_time);
+        let (conn, time, sealer) = (&mut self.conn, &mut self.audio_time, &mut self.audio_sealer);
         let mut wrote = false;
         opus.push(pcm, |packet| {
             let at = MediaTime::new(*time, Frequency::FORTY_EIGHT_KHZ);
             *time += audio::FRAME as u64;
             let (Some(key), true) = (key.as_ref(), conn.connected) else { return };
-            let data = e2ee::encrypt(e2ee::Codec::Opus, packet, key, &mut e2ee::random_iv);
+            let Some(data) = e2ee::encrypt(e2ee::Codec::Opus, e2ee::SHARE_AUDIO, packet, key, sealer) else { return };
             if let Some(w) = conn.rtc.writer(Mid::from(AUDIO_MID)) {
                 let _ = w.write(Pt::from(PT_OPUS), now, at, data);
                 wrote = true;
@@ -1150,6 +1152,12 @@ impl Stream {
             // Frames given to the encoder and not out yet: their number, when they are shown, when they went in. A
             // pipelined encoder hands a unit over later, and it is matched back to its frame by number (D71).
             let mut seq: u64 = 0;
+            // This layer's IVs, and what the stream is to the receivers (D70)
+            let mut sealer = e2ee::Sealer::new();
+            let code = match kind {
+                Kind::Screen => e2ee::SCREEN,
+                Kind::Camera => e2ee::CAMERA,
+            };
             let mut given: VecDeque<(u64, Instant, Instant)> = VecDeque::new();
             loop {
                 // While a pipelined encoder has frames in flight it is polled between frames
@@ -1218,17 +1226,20 @@ impl Stream {
                     let s = unit.seq.unwrap_or(seq);
                     let Some(&(_, at, went)) = given.iter().find(|g| g.0 == s) else { continue };
                     given.retain(|g| g.0 > s);
+                    // The SPS with a low-delay VUI, which the receiver decodes with (D70)
+                    let fixed = if unit.key { encode::low_delay(&unit.data) } else { None };
                     // What the encoder really made, once per encoder: the level has to allow the size and rate
                     if unit.key && !told {
                         told = true;
-                        log!("{kind:?} {}x{}@{}: {} {}", cfg.w, cfg.h, cfg.fps, enc.name(), encode::sps_profile(&unit.data).unwrap_or_else(|| "(no SPS)".into()));
+                        let vui = if fixed.is_some() { ", VUI made low-delay" } else { "" };
+                        log!("{kind:?} {}x{}@{}: {} {}{vui}", cfg.w, cfg.h, cfg.fps, enc.name(), encode::sps_profile(&unit.data).unwrap_or_else(|| "(no SPS)".into()));
                     }
                     if let Some(factor) = trim.spent(Instant::now(), unit.data.len(), unit.key, cfg.bps) {
                         enc.set_rates((cfg.bps as f32 * factor) as u32, cfg.fps);
                     }
                     // Encrypted here, before it leaves the thread: no key, nothing is sent (D70)
                     let Some(k) = key.lock().unwrap().clone() else { continue };
-                    let data = e2ee::encrypt(e2ee::Codec::H264, &unit.data, &k, &mut e2ee::random_iv);
+                    let Some(data) = e2ee::encrypt(e2ee::Codec::H264, code, fixed.as_deref().unwrap_or(&unit.data), &k, &mut sealer) else { continue };
                     // From when the frame was taken up to its unit leaving: the encoder's time, a scale and a copy included
                     let ms = went.elapsed().as_secs_f32() * 1000.0;
                     if out.send(Msg::Encoded { kind, id, data, key: unit.key, at, ms }).is_err() {

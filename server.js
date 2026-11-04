@@ -1171,6 +1171,7 @@ async function startServer(opts = {}) {
         game: u.game || '',
         gameIcon: lean && u.gameIcon ? refOf(u.gameIcon) : '', // not to apps from before D58: they would be sent the picture on every update
         sfu: !!u.sfu, // the app shares and watches through the SFU (D70); one that doesn't can't watch those who do
+        sfuNonce: u.sfuNonce || undefined, // its SFU session in the voice channel, which media keys for it are sealed to (D70)
       };
     });
   }
@@ -1236,7 +1237,7 @@ async function startServer(opts = {}) {
     //    events costing more. What goes over is dropped, and answered if it wanted an answer.
     const EVENT_BUDGET = 400;
     const EVENT_REFILL = 40; // per second
-    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:restartIce': 4, 'sfu:preview': 10, 'sfu:preview:get': 4 };
+    const EVENT_COST = { hello: 20, 'profile:update': 40, 'emoji:add': 40, 'server:update': 40, 'msg:send': 4, 'msg:edit': 4, 'msg:search': 8, 'gif:search': 8, 'game:login': 20, 'mail:put': 2, identify: 20, 'sfu:transport': 10, 'sfu:produce': 10, 'sfu:consume': 4, 'sfu:keyframe': 4, 'sfu:restartIce': 4, 'sfu:preview': 10, 'sfu:preview:get': 4, 'sfu:keys': 2, 'sfu:preview:key': 2, 'sfu:preview:want': 4, 'sfu:preview:viewers': 4 };
     let lastHandlerError = 0;
     function guard(socket, next) {
       const add = socket.on.bind(socket);
@@ -1592,6 +1593,7 @@ async function startServer(opts = {}) {
       // Whatever it published or watched through the SFU goes with it (D70)
       sfuRef.current?.leave(socket.id);
       for (const k of ['screen', 'camera']) previews.delete(`${socket.id}|${k}`);
+      u.sfuNonce = null;
       socket.to('voice:' + u.voice).emit('voice:peer-left', { sid: socket.id });
       socket.leave('voice:' + u.voice);
       u.voice = null;
@@ -2400,7 +2402,8 @@ async function startServer(opts = {}) {
 
       // --- voice (WebRTC mesh signaling) ---
 
-      on('voice:join', ({ channelId }, ack) => {
+      // `sfuNonce` (optional): the app's SFU session there, which the others seal its media keys to (D70)
+      on('voice:join', ({ channelId, sfuNonce }, ack) => {
         const ch = channel(channelId);
         if (!ch || ch.type !== 'voice') return ack({ error: 'no such channel' });
         if (!inChannel(channelId).send) return ack(noPerm('join that voice channel'));
@@ -2408,6 +2411,7 @@ async function startServer(opts = {}) {
         const u = users.get(socket.id);
         const peers = [...users.entries()].filter(([, x]) => x.voice === channelId).map(([sid]) => sid);
         u.voice = channelId;
+        u.sfuNonce = typeof sfuNonce === 'string' && /^[\w-]{16,64}$/.test(sfuNonce) ? sfuNonce : null;
         console.debug(`[voice] ${whoIs(u.profile)} joined ${ch.name}`);
         socket.join('voice:' + channelId);
         // What is published there through the SFU (D70), for an app that watches that way
@@ -2498,9 +2502,22 @@ async function startServer(opts = {}) {
           try {
             ack(await fn(payload, sfu, u.voice));
           } catch (err) {
-            ack({ error: String(err?.message || err).slice(0, 200) });
+            // What sfu.js says in words is for the app; anything mediasoup says stays here (console.debug, D49)
+            if (!err?.expose) console.debug(`[sfu] ${event} from ${whoIs(u.profile)} failed: ${err?.message || err}`);
+            ack({ error: err?.expose ? err.message : 'The server’s media relay couldn’t do that' });
           }
         });
+      // Relays from this socket to one other, at most `max` per `ms` each (D70): one member sending another key or
+      // preview messages over and over would make them spend their own socket's event budget answering
+      const relayed = new Map(); // "<event>|<sid>" -> { at, n }
+      const relayOk = (event, to, max, ms) => {
+        const now = Date.now();
+        if (relayed.size > 512) for (const [k, r] of relayed) if (now - r.at > ms) relayed.delete(k);
+        const id = `${event}|${to}`;
+        const r = relayed.get(id);
+        if (!r || now - r.at > ms) return relayed.set(id, { at: now, n: 1 }), true;
+        return ++r.n <= max;
+      };
       // A small JSON object from the app, or null: what mediasoup gets is never more than it needs
       const small = (v, max) => {
         if (!isObj(v)) return null;
@@ -2523,7 +2540,7 @@ async function startServer(opts = {}) {
       sfuOn('sfu:transport', async ({ direction, owner }, sfu, room) => {
         if (direction !== 'send' && direction !== 'recv') return { error: 'direction must be send or recv' };
         if (direction === 'send' && !SFU_OWNERS.includes(owner)) return { error: 'Unknown publisher' };
-        return { ok: true, ...(await sfu.transport(socket.id, room, { direction, owner }, hostOf(socket))) };
+        return { ok: true, ...(await sfu.transport(socket.id, room, { direction, owner }, hostOf(socket), clientIp(socket))) };
       });
 
       sfuOn('sfu:connect', async ({ transportId, dtlsParameters }, sfu) => {
@@ -2589,7 +2606,7 @@ async function startServer(opts = {}) {
       on('sfu:keys', ({ to, blob }) => {
         const me = users.get(socket.id);
         const them = users.get(sfuId(to));
-        if (!me.voice || them?.voice !== me.voice || typeof blob !== 'string' || blob.length > 4096) return;
+        if (!me.voice || them?.voice !== me.voice || typeof blob !== 'string' || blob.length > 4096 || !relayOk('keys', to, 8, 10_000)) return;
         io.to(to).emit('sfu:keys', { from: socket.id, blob });
       });
 
@@ -2611,13 +2628,13 @@ async function startServer(opts = {}) {
       });
 
       on('sfu:preview:key', ({ to, blob }) => {
-        if (typeof blob !== 'string' || blob.length > 4096 || !viewsChannelOf(sfuId(to), socket.id)) return;
+        if (typeof blob !== 'string' || blob.length > 4096 || !viewsChannelOf(sfuId(to), socket.id) || !relayOk('previewKey', to, 4, 10_000)) return;
         io.to(to).emit('sfu:preview:key', { from: socket.id, blob });
       });
 
       // Someone who has no key yet (came online later, or was just given the channel) asks the sharer for it
       on('sfu:preview:want', ({ sid: sharer }) => {
-        if (!viewsChannelOf(socket.id, sfuId(sharer)) || !sfuRef.current?.has(sharer)) return;
+        if (!viewsChannelOf(socket.id, sfuId(sharer)) || !sfuRef.current?.has(sharer) || !relayOk('want', sharer, 1, 10_000)) return;
         io.to(sharer).emit('sfu:preview:want', { from: socket.id });
       });
 

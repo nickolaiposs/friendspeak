@@ -11,6 +11,9 @@ mod mediafoundation;
 mod software;
 #[cfg(target_os = "macos")]
 mod videotoolbox;
+mod vui;
+
+pub use vui::low_delay;
 
 pub struct Encoded {
     pub data: Vec<u8>, // Annex B, with SPS and PPS in front of every keyframe

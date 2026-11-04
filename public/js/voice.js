@@ -19,7 +19,7 @@
 // publishes only to an SFU.
 import { log } from './log.js';
 import { audio, Level, MAX_USER_VOLUME } from './audio.js';
-import { SfuSession } from './sfu.js';
+import { SfuSession, sessionNonce } from './sfu.js';
 import { settings } from './store.js';
 
 export const ICE = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }];
@@ -392,15 +392,17 @@ export class VoiceClient {
       this.micError = e;
       audio.ensure();
     }
-    const res = await this.socket.emitWithAck('voice:join', { channelId });
+    // Our SFU session's nonce: media keys for us are sealed to it, so none made for an earlier one is taken (D70)
+    const nonce = this.useSfu ? sessionNonce() : undefined;
+    const res = await this.socket.emitWithAck('voice:join', { channelId, sfuNonce: nonce });
     if (res.error) throw new Error(res.error);
     this.channelId = channelId;
-    if (this.useSfu && this.sfuInfo && res.producers) this.openSfu(res.producers);
+    if (this.useSfu && this.sfuInfo && res.producers) this.openSfu(res.producers, nonce);
     // The newcomer calls everyone already in the room.
     for (const sid of res.peers) this.call(sid);
   }
 
-  openSfu(producers) {
+  openSfu(producers, nonce) {
     const info = this.sfuInfo();
     const channelId = this.channelId;
     this.sfu = new SfuSession(
@@ -408,6 +410,7 @@ export class VoiceClient {
         ...info,
         socket: this.socket,
         channelId,
+        nonce,
         sid: () => this.socket.id,
         members: () => info.users().filter((u) => u.voice === channelId && u.sid !== this.socket.id).map((u) => u.sid),
         onChange: (sid, kind) => this.onMediaChange(sid, kind),

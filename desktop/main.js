@@ -527,15 +527,24 @@ async function sendMedia(cmd) {
   media.proc.stdin.write(JSON.stringify(cmd) + '\n');
 }
 
-// The SFU names itself by the host the app dialed, which can be a name (D70); the sidecar takes addresses
-async function resolveCandidates(cmd) {
+// The SFU names itself by the host the app dialed, which can be a name (D70); the sidecar takes addresses. Only
+// addresses of one machine are passed on (not unspecified, multicast or broadcast), and loopback only when the page
+// says the server was dialed on loopback (`loopback`), so a server can't point the sidecar at them.
+const usableIp = (ip, loopback) => {
+  if (net.isIPv4(ip)) {
+    const a = Number(ip.split('.')[0]);
+    return a !== 0 && a < 224 && (loopback || a !== 127);
+  }
+  return net.isIPv6(ip) && !/^(::|ff)/i.test(ip) && (loopback || ip !== '::1');
+};
+async function resolveCandidates({ loopback, ...cmd }) {
   const out = [];
   for (const c of (Array.isArray(cmd.candidates) ? cmd.candidates : []).slice(0, 8)) {
     const address = String(c?.address || '');
-    if (net.isIP(address)) out.push(c);
-    else if (address) for (const a of await dns.promises.lookup(address, { all: true, family: 4 }).catch(() => [])) out.push({ ...c, address: a.address });
+    if (net.isIP(address)) usableIp(address, loopback === true) && out.push(c);
+    else if (address) for (const a of await dns.promises.lookup(address, { all: true, family: 4 }).catch(() => [])) if (usableIp(a.address, loopback === true)) out.push({ ...c, address: a.address });
   }
-  return { ...cmd, candidates: out };
+  return { ...cmd, candidates: out.slice(0, 8) };
 }
 
 // What only the main process knows about a share: where the screen is, whose

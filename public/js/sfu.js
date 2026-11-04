@@ -9,7 +9,9 @@
 //
 // Everything is end-to-end encrypted (e2ee.js, on a worker as an RTCRtpScriptTransform): each sender has
 // a media key per channel, sealed to each member with identity.js and passed through the server as a blob
-// it can't open (`sfu:keys`). When anyone leaves the channel every sender moves to a new key.
+// it can't open (`sfu:keys`). Every sender moves to a new key when anyone leaves or joins the channel, and every
+// ROTATE_MS. A key message is sealed to the receiver's session (its nonce, sent in voice:join) and numbered, so
+// the server can't bring an old key back.
 //
 // Previews: a sharer posts an encrypted still of each share every 10 s; Previews (one per connection, in
 // a call or not) fetches and decrypts them for the hover card.
@@ -19,11 +21,18 @@ import { importMediaKey, newMediaKey } from './e2ee.js';
 import { log } from './log.js';
 import { nativeMedia } from './native.js';
 
-const KEY_AAD = 'friendspeak-media-key-v1';
+const KEY_AAD = 'friendspeak-media-key-v2';
 const PREVIEW_KEY_AAD = 'friendspeak-preview-key-v1';
 const PREVIEW_AAD = 'friendspeak-preview-v1';
 const USE_AFTER_MS = 1000; // a new key is used this long after it was sent, so receivers have it
 const OLD_KEY_MS = 10_000; // a receiver keeps a sender's previous key this long
+const ROTATE_MS = 30 * 60_000; // a sender's key lasts no longer than this (D70)
+// A sender's key messages are numbered from its clock (microseconds, then one up), so they only grow, across sessions
+// too. A receiver takes from a socket only numbers above the last it took, and from a profile on another socket
+// nothing older than this.
+const KEY_SEQ_SLACK = 5 * 60_000 * 1000;
+const KEYFRAME_EVERY_MS = 2000; // keyframes asked of a sender whose frames don't decrypt, at most this often
+const PREVIEW_KEY_AGAIN_MS = 30_000; // a preview key is sealed again to someone who asks no sooner than this
 const PREVIEW_EVERY_MS = 10_000;
 const PREVIEW_W = 320;
 const PREVIEW_H = 180;
@@ -54,6 +63,28 @@ const LOW_CAMERA = { tier: { width: 320, height: 180, fps: 15 }, mode: 'smooth' 
 const ask = (socket, event, payload = {}) => socket.timeout(10_000).emitWithAck(event, payload).catch(() => ({ error: 'The server did not answer' }));
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let keySeq = 0;
+const nextKeySeq = () => (keySeq = Math.max(keySeq + 1, Date.now() * 1000));
+// A session's nonce (voice:join): 16 random bytes
+export const sessionNonce = () => b64(crypto.getRandomValues(new Uint8Array(16)));
+
+// Candidates an app may be told to send to: UDP or TCP, a name or an IPv4 address of one machine (not unspecified,
+// multicast or broadcast), and loopback only when the server itself was dialed on loopback (D70)
+const LOOPBACK = /^(localhost|127\.\d+\.\d+\.\d+|::1|\[::1\])$/i;
+export function usableCandidates(list, dialed) {
+  const loopback = LOOPBACK.test(dialed || '');
+  return (Array.isArray(list) ? list : [])
+    .filter((c) => {
+      const address = String(c?.address || c?.ip || '');
+      if (!/^(udp|tcp)$/.test(c?.protocol) || !(c.port >= 1 && c.port <= 65535) || !address) return false;
+      const v4 = address.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+      if (!v4) return /^[a-z0-9.-]+$/i.test(address) && (loopback || !LOOPBACK.test(address));
+      const [a, ...rest] = v4.slice(1).map(Number);
+      if (a > 255 || rest.some((n) => n > 255) || a === 0 || a >= 224) return false;
+      return loopback || a !== 127;
+    })
+    .slice(0, 8);
+}
 // What each layer of a share of ours needs, in bits per second, lowest first: the sidecar says for its own; the
 // browser engine's layers carry it (voice.js simulcastLayers)
 const needsOf = (p) => (p.native ? (p.stats?.layers || []).map((l) => (l.needMbps || 0) * 1e6) : (p.layers || []).map((l) => l.need || 0)).filter((x) => x > 0);
@@ -104,7 +135,12 @@ export class SfuSession {
     this.watching = new Map(); // "<sid>|<kind>" -> { sid, kind, stream, consumers: Map(producerId -> consumer), layer, view, paused }
     this.key = null; // ours: { index, raw }
     this.theirs = new Map(); // sid -> [{ index, at }]: the keys we hold for each sender
-    this.members = new Set(ctx.members());
+    this.members = this.roster(); // sid -> their session's nonce
+    this.nonce = ctx.nonce; // ours, which keys for us are sealed to
+    this.seqFrom = new Map(); // sid -> the last key message number taken from it
+    this.seqOf = new Map(); // profile id -> the highest key message number taken from it
+    this.keyframeAt = new Map(); // sid -> when we last asked its streams for a keyframe
+    this.rotateTimer = setInterval(() => this.rotate().catch((e) => console.warn('sfu: new key', e.message)), ROTATE_MS);
     this.ring = keyring(ctx.profile);
     this.worker = new Worker(new URL('./e2ee-worker.js', import.meta.url), { type: 'module' });
     this.worker.onmessage = ({ data }) => data?.t === 'fail' && this.undecryptable(data.sender);
@@ -135,7 +171,7 @@ export class SfuSession {
       },
       'sfu:reset': () => this.reset().catch((e) => log.warn(`sfu: could not start over: ${e.message}`)),
       'sfu:preview:want': ({ from }) => {
-        for (const kind of ['screen', 'camera']) if (this.pub[kind]?.preview) this.sealPreviewKey(from, kind).catch(() => {});
+        for (const kind of ['screen', 'camera']) if (this.pub[kind]?.preview) this.sealPreviewKey(from, kind, true).catch(() => {});
       },
     };
     for (const [ev, fn] of Object.entries(this.on)) this.socket.on(ev, fn);
@@ -152,7 +188,12 @@ export class SfuSession {
       this.key = await this.makeKey(1);
       this.use(this.key);
     }
-    await this.sendKey([...this.members]);
+    await this.sendKey([...this.members.keys()]);
+  }
+
+  // Who is in the channel, and each one's session nonce
+  roster() {
+    return new Map(this.ctx.members().map((sid) => [sid, this.ctx.user(sid)?.sfuNonce || null]));
   }
 
   // Asks the server to close something of ours. Not once the session is closed: leaving the channel closed it all there.
@@ -164,6 +205,7 @@ export class SfuSession {
     if (this.closed) return;
     this.closed = true;
     clearInterval(this.uplinkTimer);
+    clearInterval(this.rotateTimer);
     for (const [ev, fn] of Object.entries(this.on)) this.socket.off(ev, fn);
     for (const kind of ['screen', 'camera']) this.unpublish(kind, true);
     for (const w of this.watching.values()) for (const c of w.consumers.values()) c.close();
@@ -189,21 +231,22 @@ export class SfuSession {
     if (this.pub.screen?.native || this.pub.camera?.native) nativeMedia.send({ op: 'key', key: { index: key.index, key: hex(key.raw) } });
   }
 
-  aad(from, to) {
-    return `${KEY_AAD}|${this.ctx.serverId()}|${this.channelId}|${from}|${to}`;
+  // The additional data of a key message: who to whom, here, for the receiver's session
+  aad(from, to, nonce) {
+    return `${KEY_AAD}|${this.ctx.serverId()}|${this.channelId}|${from}|${to}|${nonce}`;
   }
 
-  // Our key, sealed to each of these people (by socket id). Someone on an app without keys gets nothing:
-  // they couldn't watch anyway.
+  // Our key, sealed to each of these people (by socket id), for their session. Someone on an app without keys, or
+  // without a session yet, gets nothing: they couldn't watch anyway.
   async sendKey(sids, key = this.key) {
     const me = this.ctx.profile().id;
     await Promise.all(
       sids.map(async (sid) => {
         const u = this.ctx.user(sid);
-        if (!u?.card || !u.sfu) return;
+        if (!u?.card || !u.sfu || typeof u.sfuNonce !== 'string') return;
         try {
           const pk = await this.ring.with(u.card);
-          const blob = await sealJson(pk, this.aad(me, u.id), { i: key.index, k: b64(key.raw) });
+          const blob = await sealJson(pk, this.aad(me, u.id, u.sfuNonce), { i: key.index, k: b64(key.raw), n: nextKeySeq() });
           if (!this.closed) this.socket.emit('sfu:keys', { to: sid, blob });
         } catch (e) {
           console.warn('sfu: no key for', sid, e.message);
@@ -212,14 +255,19 @@ export class SfuSession {
     );
   }
 
+  // A key from `from`, if it was sealed for this session of ours and is newer than any it sent before
   async keysFrom({ from, blob }) {
     const u = this.ctx.user(from);
-    if (!u?.card || typeof blob !== 'string') return;
+    if (!u?.card || typeof blob !== 'string' || !this.nonce) return;
     const pk = await this.ring.with(u.card);
-    const { i, k } = await unsealJson(pk, this.aad(u.id, this.ctx.profile().id), blob);
+    const { i, k, n } = await unsealJson(pk, this.aad(u.id, this.ctx.profile().id, this.nonce), blob);
     const raw = unb64(String(k));
-    if (!(i >= 1 && i <= 255) || raw.length !== 16 || this.closed) return;
+    if (!(i >= 1 && i <= 255) || raw.length !== 16 || !Number.isSafeInteger(n) || this.closed) return;
+    if (n <= (this.seqFrom.get(from) ?? -1) || n < (this.seqOf.get(u.id) ?? 0) - KEY_SEQ_SLACK) return console.debug('sfu: an old key message, ignored');
+    this.seqFrom.set(from, n);
+    this.seqOf.set(u.id, Math.max(n, this.seqOf.get(u.id) ?? 0));
     this.worker.postMessage({ t: 'key', sender: from, index: i, raw });
+    const first = !this.theirs.get(from)?.length;
     const list = (this.theirs.get(from) || []).filter((x) => x.index !== i);
     list.push({ index: i, at: Date.now() });
     this.theirs.set(from, list);
@@ -231,40 +279,59 @@ export class SfuSession {
       this.theirs.set(from, keep);
       this.worker.postMessage({ t: 'forget', sender: from, keep: keep.map((x) => x.index) });
     }, OLD_KEY_MS + 100);
-    // What arrived before the key was dropped: start from a keyframe
-    for (const w of this.watching.values()) if (w.sid === from) for (const c of w.consumers.values()) if (c.kind === 'video') ask(this.socket, 'sfu:keyframe', { consumerId: c.id });
+    // Our first key from them: what arrived before it was dropped, so start from a keyframe made with it (they use a
+    // new key USE_AFTER_MS after sending it). After that, frames that don't decrypt ask (undecryptable).
+    if (first) setTimeout(() => this.askKeyframe(from, true), USE_AFTER_MS + 250);
   }
 
-  // Frames from `sid` don't decrypt: we have no key (yet), so ask them again by sending ours, which they answer
+  // A keyframe from each video stream of `sid` we watch, no more often than KEYFRAME_EVERY_MS
+  askKeyframe(sid, force = false) {
+    if (this.closed) return;
+    const now = Date.now();
+    if (!force && now - (this.keyframeAt.get(sid) || 0) < KEYFRAME_EVERY_MS) return;
+    this.keyframeAt.set(sid, now);
+    for (const w of this.watching.values()) if (w.sid === sid) for (const c of w.consumers.values()) if (c.kind === 'video') ask(this.socket, 'sfu:keyframe', { consumerId: c.id });
+  }
+
+  // Frames from `sid` don't decrypt (the worker says so every 2 s at most). With a key for them, the keyframe we
+  // have is older than their key, or was lost: a new one puts it right. Without a key there is nothing to ask yet.
   undecryptable(sid) {
-    if (sid !== 'self') console.debug('sfu: frames without a key from', sid);
+    if (sid === 'self' || !this.theirs.get(sid)?.length) return console.debug('sfu: frames without a key from', sid);
+    this.askKeyframe(sid);
   }
 
-  // Who is in the channel changed: newcomers get our key, and when anyone left everyone moves to a new one
+  // A new key for everyone in the channel, used once they have had it for USE_AFTER_MS
+  async rotate() {
+    if (!this.device || this.closed) return;
+    const key = await this.makeKey((this.key.index % 255) + 1);
+    this.key = key;
+    await this.sendKey([...this.members.keys()], key);
+    setTimeout(() => this.key === key && !this.closed && this.use(key), USE_AFTER_MS);
+  }
+
+  // Who is in the channel changed. Anyone who left or joined (or joined again, with a new session) means a new key
+  // for everyone: one who left can't read what comes next, and one who joined can't read what came before (D70).
   async membersChanged() {
-    const now = new Set(this.ctx.members());
-    const joined = [...now].filter((s) => !this.members.has(s));
-    const left = [...this.members].filter((s) => !now.has(s));
+    const now = this.roster();
+    const joined = [...now].filter(([sid, nonce]) => this.members.get(sid) !== nonce).map(([sid]) => sid);
+    const left = [...this.members.keys()].filter((sid) => !now.has(sid));
     this.members = now;
     if (!this.device) return; // start() sends to everyone there
     for (const sid of left) {
       this.theirs.delete(sid);
+      this.seqFrom.delete(sid);
       this.worker.postMessage({ t: 'forget', sender: sid, keep: [] });
     }
-    if (left.length) {
-      const key = await this.makeKey((this.key.index % 255) + 1);
-      this.key = key;
-      await this.sendKey([...now], key);
-      setTimeout(() => this.key === key && !this.closed && this.use(key), USE_AFTER_MS);
-    } else if (joined.length) await this.sendKey(joined);
+    if (left.length || joined.length) await this.rotate();
   }
 
-  encrypt(sender, codec) {
-    sender.transform = new RTCRtpScriptTransform(this.worker, { role: 'send', codec });
+  // `kind`: the stream's (screen, camera, shareAudio), which its frames are bound to
+  encrypt(sender, codec, kind) {
+    sender.transform = new RTCRtpScriptTransform(this.worker, { role: 'send', codec, kind });
   }
 
-  decrypt(receiver, sid, codec) {
-    receiver.transform = new RTCRtpScriptTransform(this.worker, { role: 'recv', sender: sid, codec });
+  decrypt(receiver, sid, codec, kind) {
+    receiver.transform = new RTCRtpScriptTransform(this.worker, { role: 'recv', sender: sid, codec, kind });
   }
 
   // ----- transports -----
@@ -272,7 +339,17 @@ export class SfuSession {
   async transport(direction, owner) {
     const t = await ask(this.socket, 'sfu:transport', { direction, owner });
     if (t.error) throw new Error(t.error);
+    t.iceCandidates = usableCandidates(t.iceCandidates, this.dialed());
     return t;
+  }
+
+  // The host this connection dialed
+  dialed() {
+    try {
+      return new URL(this.socket.io.uri).hostname;
+    } catch {
+      return '';
+    }
   }
 
   wire(t) {
@@ -367,7 +444,7 @@ export class SfuSession {
       encodings: layers.map((l) => ({ scaleResolutionDownBy: l.scale, maxBitrate: l.maxBitrate, maxFramerate: l.fps, scalabilityMode: 'L1T1' })),
       stopTracks: false,
       appData: { kind, layers: layers.map(({ w, h, fps }) => ({ w, h, fps })) },
-      onRtpSender: (s) => this.encrypt(s, 'H264'),
+      onRtpSender: (s) => this.encrypt(s, 'H264', kind),
     });
     const sound = kind === 'screen' && stream.getAudioTracks()[0];
     if (sound) await this.publishSound(p, sound);
@@ -382,7 +459,7 @@ export class SfuSession {
       codecOptions: { opusStereo: true, opusDtx: false, opusFec: true, opusMaxAverageBitrate: 192_000 },
       stopTracks: false,
       appData: { kind: 'shareAudio' },
-      onRtpSender: (s) => this.encrypt(s, 'opus'),
+      onRtpSender: (s) => this.encrypt(s, 'opus', 'shareAudio'),
     });
   }
 
@@ -451,7 +528,7 @@ export class SfuSession {
     if (ev.ev === 'started') {
       const t = await this.transport('send', p.kind);
       p.transportId = t.id;
-      nativeMedia.send({ op: 'connect', kind: p.kind, ice: t.iceParameters, candidates: t.iceCandidates, fingerprints: t.dtlsParameters.fingerprints });
+      nativeMedia.send({ op: 'connect', kind: p.kind, ice: t.iceParameters, candidates: t.iceCandidates, fingerprints: t.dtlsParameters.fingerprints, loopback: LOOPBACK.test(this.dialed()) });
       const c = await ask(this.socket, 'sfu:connect', { transportId: t.id, dtlsParameters: ev.publish.dtls });
       if (c.error) throw new Error(c.error);
       const v = await ask(this.socket, 'sfu:produce', { transportId: t.id, kind: p.kind, rtpParameters: ev.publish.video, layers: p.layers });
@@ -524,7 +601,7 @@ export class SfuSession {
     const recv = await this.recvTransport();
     const r = await ask(this.socket, 'sfu:consume', { producerId: p.video.id, rtpCapabilities: this.device.rtpCapabilities });
     if (r.error) throw new Error(r.error);
-    const consumer = await recv.consume({ id: r.id, producerId: r.producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, this.ctx.sid(), 'H264') });
+    const consumer = await recv.consume({ id: r.id, producerId: r.producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, this.ctx.sid(), 'H264', p.kind) });
     if (this.pub[p.kind] !== p) return consumer.close();
     p.ownConsumer = consumer;
     for (const old of p.own.getTracks()) p.own.removeTrack(old); // a share published again: the new track only
@@ -674,7 +751,7 @@ export class SfuSession {
     const recv = await this.recvTransport();
     const r = await ask(this.socket, 'sfu:consume', { producerId, rtpCapabilities: this.device.rtpCapabilities });
     if (r.error) throw new Error(r.error);
-    const consumer = await recv.consume({ id: r.id, producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, w.sid, r.kind === 'audio' ? 'opus' : 'H264') });
+    const consumer = await recv.consume({ id: r.id, producerId, kind: r.kind, rtpParameters: r.rtpParameters, onRtpReceiver: (rv) => this.decrypt(rv, w.sid, r.kind === 'audio' ? 'opus' : 'H264', kind) });
     if (this.watching.get(`${w.sid}|${w.kind}`) !== w || !this.producers.has(producerId)) return (consumer.close(), this.closeOnServer({ consumerId: r.id }));
     w.consumers.set(producerId, consumer);
     w.stream.addTrack(consumer.track);
@@ -783,6 +860,7 @@ export class SfuSession {
     const p = this.pub[kind];
     if (!p) return;
     const raw = newMediaKey();
+    p.previewTo = new Map(); // sid -> when it was last sealed to them
     p.preview = { raw, key: await importMediaKey(raw) };
     const viewers = await ask(this.socket, 'sfu:preview:viewers');
     if (this.pub[kind] !== p) return;
@@ -792,10 +870,14 @@ export class SfuSession {
     p.previewTimer = setInterval(shoot, PREVIEW_EVERY_MS);
   }
 
-  async sealPreviewKey(sid, kind) {
+  // `asked`: they asked for it (sfu:preview:want), answered once per PREVIEW_KEY_AGAIN_MS: someone asking over and
+  // over would otherwise spend our socket's event budget
+  async sealPreviewKey(sid, kind, asked = false) {
     const p = this.pub[kind];
     const u = this.ctx.user(sid);
     if (!p?.preview || !u?.card) return;
+    if (asked && Date.now() - (p.previewTo.get(sid) || 0) < PREVIEW_KEY_AGAIN_MS) return;
+    p.previewTo.set(sid, Date.now());
     const pk = await this.ring.with(u.card);
     const blob = await sealJson(pk, `${PREVIEW_KEY_AAD}|${this.ctx.serverId()}|${this.ctx.profile().id}|${u.id}`, { kind, k: b64(p.preview.raw) });
     this.socket.emit('sfu:preview:key', { to: sid, blob });
