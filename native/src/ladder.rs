@@ -26,7 +26,7 @@ const CAMERA_LOW_FPS: f32 = 15.0;
 
 // The layers for a ceiling of w×h at up to fps, lowest first. The middle layer is 1080p under a 2160p
 // ceiling and 720p under anything from 1080p to 1440p; a ceiling of 720p or less has two layers, and one
-// of 360p or less only one. A camera's are 180p at 15, 360p at 30 and the ceiling (D71): a viewer on a thin
+// of 360p or less only one. A camera's are 180p at 15, 360p at 30 and the ceiling (D73): a viewer on a thin
 // link still gets a moving picture of everyone, for little.
 pub fn layers(sharp: bool, camera: bool, w: usize, h: usize, fps: f32) -> Vec<Rung> {
     let at = |hh: usize, f: f32| Rung { w: even(hh * w / h), h: even(hh), fps: f };

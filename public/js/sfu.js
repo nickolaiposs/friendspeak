@@ -38,17 +38,17 @@ const PREVIEW_W = 320;
 const PREVIEW_H = 180;
 const PREVIEW_MAX = 24 * 1024 - 28; // bytes of picture, so the encrypted blob stays under the server's cap
 const NATIVE_WAIT_MS = 20_000; // the sidecar's share has this long to be connected to the SFU
-// A connection that lost its path (D71): "disconnected" gets this long to come back by itself; then (or at once on
+// A connection that lost its path (D73): "disconnected" gets this long to come back by itself; then (or at once on
 // "failed") new ICE credentials, and this long to connect with them before the session starts over (reset)
 const DISCONNECTED_MS = 5000;
 const RESTART_WAIT_MS = 10_000;
 const RETRY_MS = [2000, 4000, 8000, 15_000]; // between tries while it stays down, then every 15 s
 const NATIVE_RETRY_FOR_MS = 180_000; // a sidecar share that lost its connection is published again for this long
-// How far behind live a stream we watch plays (its jitter buffer's target, D71): a screen share gives a little delay
+// How far behind live a stream we watch plays (its jitter buffer's target, D73): a screen share gives a little delay
 // for smooth playback; a camera, part of a conversation, stays close to real time
 const SCREEN_BUFFER_MS = 200;
 const CAMERA_BUFFER_MS = 60;
-// An upload that can't carry a screen share and a camera together (D71): while the estimate stays under WEAK_ROOM
+// An upload that can't carry a screen share and a camera together (D73): while the estimate stays under WEAK_ROOM
 // times what the screen's lower layers and the camera's lowest need, for WEAK_FOR_MS, the camera sends only its
 // lowest layer (180p15), and the sharer is told once. It goes back once the estimate covers the screen's lower
 // layers and the whole camera STRONG_ROOM times over, for STRONG_FOR_MS.
@@ -145,11 +145,11 @@ export class SfuSession {
     this.worker = new Worker(new URL('./e2ee-worker.js', import.meta.url), { type: 'module' });
     this.worker.onmessage = ({ data }) => data?.t === 'fail' && this.undecryptable(data.sender);
     this.closed = false;
-    this.tries = 0; // recoveries in a row without a connection coming back (D71)
+    this.tries = 0; // recoveries in a row without a connection coming back (D73)
     this.renative = { screen: null, camera: null }; // a sidecar share being published again after its connection broke
-    // The jitter buffer each kind of stream we watch plays with, in ms (null: the browser's own). D71.
+    // The jitter buffer each kind of stream we watch plays with, in ms (null: the browser's own). D73.
     this.buffer = { screen: SCREEN_BUFFER_MS, camera: CAMERA_BUFFER_MS };
-    this.uplink = { weak: false, weakSince: null, strongSince: null, told: false }; // D71
+    this.uplink = { weak: false, weakSince: null, strongSince: null, told: false }; // D73
     this.uplinkTimer = setInterval(() => this.checkUplink().catch((e) => console.debug('sfu uplink', e.message)), UPLINK_EVERY_MS);
     for (const p of producers || []) this.producers.set(p.producerId, p);
     this.on = {
@@ -160,7 +160,7 @@ export class SfuSession {
       'sfu:layer': ({ consumerId, spatialLayer }) => {
         for (const w of this.watching.values()) for (const c of w.consumers.values()) if (c.id === consumerId) w.layer = spatialLayer;
       },
-      // Our link can't carry this stream with the others we watch: the server paused it, or let it go again (D71)
+      // Our link can't carry this stream with the others we watch: the server paused it, or let it go again (D73)
       'sfu:starved': ({ consumerId, starved }) => {
         for (const w of this.watching.values())
           for (const c of w.consumers.values())
@@ -361,7 +361,7 @@ export class SfuSession {
   }
 
   // A connection that loses its path (a dropped Wi-Fi, a link down for half a minute) comes back by itself, with
-  // new ICE credentials, or by the session starting over (D71)
+  // new ICE credentials, or by the session starting over (D73)
   pathChanged(t, state) {
     if (this.closed || t.closed) return;
     clearTimeout(t.appData.lost);
@@ -648,7 +648,7 @@ export class SfuSession {
     }
   }
 
-  // ----- an upload too thin for a screen and a camera (D71) -----
+  // ----- an upload too thin for a screen and a camera (D73) -----
 
   async checkUplink() {
     const { screen: s, camera: c } = this.pub;
@@ -755,7 +755,7 @@ export class SfuSession {
     if (this.watching.get(`${w.sid}|${w.kind}`) !== w || !this.producers.has(producerId)) return (consumer.close(), this.closeOnServer({ consumerId: r.id }));
     w.consumers.set(producerId, consumer);
     w.stream.addTrack(consumer.track);
-    // A screen share plays a little behind live, so a short stall in the network doesn't freeze it (D71); its sound,
+    // A screen share plays a little behind live, so a short stall in the network doesn't freeze it (D73); its sound,
     // in the same stream, keeps in sync. A camera is part of a conversation and stays close to real time.
     const buffer = consumer.kind === 'video' ? this.buffer[w.kind] : null;
     if (buffer != null && 'jitterBufferTarget' in consumer.rtpReceiver) consumer.rtpReceiver.jitterBufferTarget = buffer;
@@ -766,7 +766,7 @@ export class SfuSession {
   }
 
   // The tile's size in device pixels picks the layer (on the server); a hidden window pauses the video. `focus`:
-  // the stream the stage shows large, which the server serves first when the link can't carry everything (D71).
+  // the stream the stage shows large, which the server serves first when the link can't carry everything (D73).
   view(sid, kind, { w = 0, h = 0, hidden = false, focus = false } = {}) {
     const x = this.watching.get(`${sid}|${kind}`);
     if (!x) return;
@@ -801,7 +801,7 @@ export class SfuSession {
     return { stats: await c.getStats(), transport: () => recv.getStats(), layer: w.layer, view: w.view, paused: w.paused, starved: !!w.starved, buffer: c.rtpReceiver?.jitterBufferTarget ?? null };
   }
 
-  // Whether the server paused this stream for us because our link can't carry it with the rest (D71): the tile
+  // Whether the server paused this stream for us because our link can't carry it with the rest (D73): the tile
   // shows its preview still instead of a frozen frame
   starved(sid, kind) {
     return !!this.watching.get(`${sid}|${kind}`)?.starved;
@@ -829,7 +829,7 @@ export class SfuSession {
         needMbps: l.needMbps,
         encMs: l.encMs,
         encP90: l.encP90,
-        // Why the layer is off or slowed: the upload ('bandwidth') or the encoders ('encoder'), D71
+        // Why the layer is off or slowed: the upload ('bandwidth') or the encoders ('encoder'), D73
         limit: l.limit || undefined,
         sendErrors: s.sendErrors,
         note: l.note,

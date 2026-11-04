@@ -30,7 +30,7 @@ const MAX_LAYERS = 3;
 const UP_AFTER_DOWN_MS = 2000; // a consumer moves up no sooner than this after it moved down
 const MAX_INCOMING = 60e6; // bits per second a send transport takes (2160p60 at its ceiling, with room)
 const START_BITRATE = 4_000_000; // where the estimate of a viewer's link starts (see transport())
-// A viewer whose link can't carry the lowest layer of everything they watch (D71). Their streams are served in order
+// A viewer whose link can't carry the lowest layer of everything they watch (D73). Their streams are served in order
 // of priority (the stream they enlarged, other screens, cameras), and while the estimate stays under what the
 // lowest layers need for STARVE_AFTER_MS, their lowest-priority camera is paused, one at a time; it comes back once
 // the estimate has room for it, with FEED_ROOM to spare, for FEED_AFTER_MS.
@@ -200,7 +200,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
       throw refuse('left the channel');
     }
     if (direction === 'send') await t.setMaxIncomingBitrate(MAX_INCOMING).catch(() => {});
-    // The estimate of a viewer's link, as it changes: whether it carries the lowest layers of what they watch (D71)
+    // The estimate of a viewer's link, as it changes: whether it carries the lowest layers of what they watch (D73)
     if (direction === 'recv') {
       await t.enableTraceEvent(['bwe']).catch(() => {});
       t.on('trace', (tr) => tr.type === 'bwe' && feed(peer, tr.info?.availableBitrate));
@@ -211,8 +211,8 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     t.on('dtlsstatechange', (state) => {
       if (state === 'failed') log.warn(`[sfu] ${who(sid)}: a ${what} connection failed (DTLS)`);
     });
-    // A transport without a path is given deadTransportMs to find one again (the app restarts ICE, D71); after that
-    // it is closed with its producers, so its viewers are told and the room doesn't keep it (D71)
+    // A transport without a path is given deadTransportMs to find one again (the app restarts ICE, D73); after that
+    // it is closed with its producers, so its viewers are told and the room doesn't keep it (D73)
     t.on('icestatechange', (state) => {
       if (state === 'disconnected') {
         console.debug(`[sfu] ${who(sid)}: a ${what} connection lost its path`);
@@ -273,7 +273,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     return true;
   }
 
-  // New ICE credentials for a transport that lost its path; the app checks again with them (D71)
+  // New ICE credentials for a transport that lost its path; the app checks again with them (D73)
   async function restartIce(sid, transportId) {
     const t = peers.get(sid)?.transports.get(transportId);
     if (!t) throw refuse('No such transport');
@@ -366,7 +366,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
       consumer.close();
       throw refuse('left the channel');
     }
-    // appPaused: the app paused it (it starts paused); starved: the server did, for the viewer's link (D71)
+    // appPaused: the app paused it (it starts paused); starved: the server did, for the viewer's link (D73)
     const c = { consumer, producerId, transportId: recv.transport.id, from: found.peer.sid, kind: found.p.kind, view: null, layer: 0, downAt: 0, focus: false, appPaused: true, starved: false };
     peer.consumers.set(consumer.id, c);
     if (video) prioritize(c);
@@ -415,7 +415,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
     return l?.w && l?.h ? Math.max(LOW_MIN_BPS, l.w * l.h * Math.max(l.fps || 30, 1) * LOW_BPP) : LOW_GUESS_BPS;
   }
 
-  // A viewer's link estimate (D71): their lowest-priority camera is paused when the estimate stays below what the
+  // A viewer's link estimate (D73): their lowest-priority camera is paused when the estimate stays below what the
   // lowest layers of everything they watch need, and comes back when there is room for it again. At most one
   // change a second; the app is told (sfu:starved), so the tile shows the preview still instead of a frozen frame.
   function feed(peer, avail) {
@@ -478,7 +478,7 @@ function createSfu({ workers = 1, udpPort, tcpPort = 0, announced = '', deadTran
 
   // The viewer's tile, in device pixels: the smallest layer at least that tall (with a little slack, as the
   // sidecar's ladder::cap did), the top one when none is. Down at once, up no sooner than 2 s after a move down.
-  // `focus`: the tile the stage shows large, served first on a thin link (D71).
+  // `focus`: the tile the stage shows large, served first on a thin link (D73).
   function view(sid, consumerId, w, h, focus = false) {
     const c = consumerOf(sid, consumerId);
     if (!c || c.consumer.kind !== 'video') return false;

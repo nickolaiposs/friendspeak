@@ -15,7 +15,7 @@ use crate::proto::Kind;
 pub static QUEUED: AtomicUsize = AtomicUsize::new(0);
 const QUEUE_LIMIT: usize = 4096;
 // The send buffer of each socket: a keyframe of a 2160p layer is hundreds of packets, and the pacer sends what is
-// due in a burst. A send that finds the buffer full fails, and is counted (D71).
+// due in a burst. A send that finds the buffer full fails, and is counted (D73).
 const SEND_BUFFER: i32 = 4 << 20;
 
 pub struct Sockets {

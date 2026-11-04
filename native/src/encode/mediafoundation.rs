@@ -16,7 +16,7 @@
 //
 // Encoders come and go while a share runs (the upload budget starts and stops layers). Each one is opened and
 // shut down under one lock (lifecycle()), and shut down in order: drained, shut down, its event thread joined,
-// then released (D71: releasing two at once, or one while it still had work in flight, crashed the sidecar).
+// then released (D73: releasing two at once, or one while it still had work in flight, crashed the sidecar).
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -61,7 +61,7 @@ const DRAIN_WAIT: Duration = Duration::from_millis(500);
 const JOIN_WAIT: Duration = Duration::from_millis(1000);
 
 // One encoder at a time is opened or shut down, in this process. The hardware transforms of one GPU share the
-// driver's state, and a shutdown that overlapped another encoder's start or shutdown crashed the sidecar (D71).
+// driver's state, and a shutdown that overlapped another encoder's start or shutdown crashed the sidecar (D73).
 // Reentrant: an open that fails shuts down what it made while it holds this.
 static LIFE: Mutex<(Option<ThreadId>, u32)> = Mutex::new((None, 0));
 static LIFE_FREE: Condvar = Condvar::new();
@@ -591,7 +591,7 @@ impl Mf {
 
     // One frame in, and whatever unit is finished out. `pipelined`: the frame's memory is its own (from_memory), so
     // the transform may still hold it while the next one goes in. It is then waited for only until the transform
-    // has its unit out or asks for the next frame, and a unit that comes out later is handed over by poll() (D71:
+    // has its unit out or asks for the next frame, and a unit that comes out later is handed over by poll() (D73:
     // waiting for every frame held a 40 ms encoder to 25 fps). A texture is reused for the next frame, so a frame
     // given as one is waited for until its unit is out.
     fn run(&mut self, sample: IMFSample, key: bool, seq: u64, pipelined: bool) -> Result<Option<Encoded>, String> {

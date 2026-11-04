@@ -2589,14 +2589,14 @@ async function startServer(opts = {}) {
         ack({ ok: true });
       });
 
-      // A connection that lost its path gets new ICE credentials, and the app checks again with them (D71)
+      // A connection that lost its path gets new ICE credentials, and the app checks again with them (D73)
       sfuOn('sfu:restartIce', async ({ transportId }, sfu) => {
         if (!sfuId(transportId)) return { error: 'No such transport' };
         return { ok: true, iceParameters: await sfu.restartIce(socket.id, transportId) };
       });
 
       // The viewer's tile in device pixels: the SFU picks the layer that fills it (D70). `focus` (optional): the
-      // tile the stage shows large, which gets the viewer's link first when it can't carry everything (D71).
+      // tile the stage shows large, which gets the viewer's link first when it can't carry everything (D73).
       sfuOn('sfu:view', async ({ consumerId, w, h, focus }, sfu) => {
         const clamp = (n) => Math.max(0, Math.min(16384, Math.round(+n) || 0));
         return sfu.view(socket.id, sfuId(consumerId), clamp(w), clamp(h), focus === true) ? { ok: true } : { error: 'No such stream' };
@@ -2920,7 +2920,7 @@ if (require.main === module) {
       udpPort: Number(env.SFU_UDP_PORT) || 0,
       tcpPort: Number(env.SFU_TCP_PORT) || 0,
       announced: (env.SFU_ANNOUNCED_ADDRESS || '').trim(),
-      // Seconds a transport may go without a path before the server closes it (D71); 0 never
+      // Seconds a transport may go without a path before the server closes it (D73); 0 never
       deadTransportS: /^\s*\d+\s*$/.test(env.SFU_DEAD_TRANSPORT_S || '') ? Number(env.SFU_DEAD_TRANSPORT_S) : 30,
     },
     // ADMIN_LOCAL unset: on, except behind a proxy (PUBLIC_URL says there is one), where loopback is the proxy and not the host's own browser

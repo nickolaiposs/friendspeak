@@ -275,7 +275,7 @@ const layerNeed = (w, h, fps, sharp = false) => Math.max(LAYER_MIN_BPS, Math.rou
 // keeps the frame rate above the lowest layer, `sharp` runs its best layer at 30 and the others at 15. A
 // camera: 180p at 15, 360p at 30, then the ceiling, so a viewer on a thin link still gets a moving picture.
 // Each is { w, h, fps, scale (of the track), maxBitrate, need }. Chromium fills layers from the bottom up, so the
-// layers below the top are held to what they need (D71): what is left goes to the top one, which keeps its ceiling.
+// layers below the top are held to what they need (D73): what is left goes to the top one, which keeps its ceiling.
 export function simulcastLayers(kind, track, { tier, mode }) {
   const cap = ceilingOf(kind, tier);
   const set = track?.getSettings() || {};
@@ -427,7 +427,7 @@ export class VoiceClient {
     );
   }
 
-  // Whether the SFU paused `sid`'s `kind` for us because our link can't carry it with the rest (D71)
+  // Whether the SFU paused `sid`'s `kind` for us because our link can't carry it with the rest (D73)
   starved(sid, kind) {
     return !!this.sfu?.starved(sid, kind);
   }
@@ -885,7 +885,7 @@ export class VoiceClient {
 
   // Tell a peer how big we show their screen or camera (device pixels), or that
   // we can't see it right now, so they can size their encoder for us. `focus`: the
-  // stream the stage shows large, which the SFU serves first on a thin link (D71).
+  // stream the stage shows large, which the SFU serves first on a thin link (D73).
   view(sid, kind, { w = 0, h = 0, hidden = false, focus = false } = {}) {
     if (this.viaSfu(sid)) return this.sfu.view(sid, kind, { w, h, hidden, focus });
     const peer = this.peers.get(sid);
@@ -959,7 +959,7 @@ export class VoiceClient {
       stats = r.stats;
       pc = { getStats: r.transport };
       // The layer the SFU sends, and the size it picked it for (D70); whether it paused the stream for our link, and
-      // the jitter buffer's target (D71)
+      // the jitter buffer's target (D73)
       extra = { layer: r.layer, view: r.paused ? { hidden: true } : r.view, starved: r.starved, jbTargetMs: r.buffer };
     } else {
       pc = peer?.pc;
@@ -1206,6 +1206,14 @@ export class VoiceClient {
       pathRtt: pair.currentRoundTripTime != null ? pair.currentRoundTripTime * 1000 : undefined,
       cand: `${desc(pair.localCandidateId)} → ${desc(pair.remoteCandidateId)}`,
     };
+  }
+
+  // The longest round trip (ms) to anyone in the call, from each link's selected candidate pair;
+  // null while no one is connected
+  async roundTrip() {
+    const live = [...this.peers.values()].filter((p) => p.pc.connectionState === 'connected');
+    const rtts = (await Promise.all(live.map((p) => this.pathStats(new Map(), p.pc).then((x) => x.pathRtt)))).filter((v) => v != null);
+    return rtts.length ? Math.max(...rtts) : null;
   }
 
   mediaOf(sid, kind) {

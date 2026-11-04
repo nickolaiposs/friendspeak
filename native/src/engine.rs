@@ -56,17 +56,17 @@ const UP: f64 = 1.2;
 const DOWN_TICKS: u8 = 2;
 const UP_TICKS: u8 = 3;
 // A layer the budget stopped starts again no sooner than its hold after the stop. A layer that stops within QUICK
-// of starting had its hold doubled, up to HOLD_MAX; one that has run for HOLD_RESET is back to HOLD (D71: a layer
+// of starting had its hold doubled, up to HOLD_MAX; one that has run for HOLD_RESET is back to HOLD (D73: a layer
 // that couldn't stay up started again every 10 s, about 450 times in a two-hour run).
 const HOLD: Duration = Duration::from_secs(8);
 const HOLD_MAX: Duration = Duration::from_secs(60);
 const QUICK: Duration = Duration::from_secs(10);
 const HOLD_RESET: Duration = Duration::from_secs(60);
 // A layer that starts asks for half its need and climbs to it over RAMP, so its first keyframe and the frames
-// after it don't land on the link as one burst (D71)
+// after it don't land on the link as one burst (D73)
 const RAMP: Duration = Duration::from_secs(2);
 const SEVERE: f64 = 0.6; // the estimate fell below this share of what runs: drop to what fits at once, not a layer a tick
-// The encoders' budget (D71). A running layer's encoder keeps up when it delivers ENC_KEEP of its frame rate (or of
+// The encoders' budget (D73). A running layer's encoder keeps up when it delivers ENC_KEEP of its frame rate (or of
 // what the capture gives, when that is less); one that doesn't while its frames take longer than their interval
 // (p90) is the encoder's limit, not the source's. After ENC_TICKS of that, the top layer goes to half its frame
 // rate, and after ENC_TICKS more it stops. A step is undone after its hold (ENC_HOLD, doubled up to ENC_HOLD_MAX
@@ -150,11 +150,11 @@ struct Layer {
     bytes: u64,
     bytes_prev: u64,
     sent_bps: f64,
-    hold: Duration,              // how long it stays stopped after a stop (D71)
+    hold: Duration,              // how long it stays stopped after a stop (D73)
     hold_until: Option<Instant>, // it may start again from then
     since: Option<Instant>,      // when its encoder last started
     why: Option<&'static str>,   // why it is stopped: "bandwidth" or "encoder"
-    slow: bool,                  // at half its rung's frame rate: the encoders' budget (D71)
+    slow: bool,                  // at half its rung's frame rate: the encoders' budget (D73)
 }
 
 impl Layer {
@@ -165,7 +165,7 @@ impl Layer {
 }
 
 // A budget stops a layer: reported off at once, its encoder kept LEAVE longer, and it may start again after its
-// hold, which doubles when it stops this soon after starting (D71)
+// hold, which doubles when it stops this soon after starting (D73)
 fn stop(l: &mut Layer, now: Instant, why: &'static str) {
     l.on = false;
     l.leaving = Some(now + LEAVE);
@@ -183,7 +183,7 @@ fn start(l: &mut Layer) {
 }
 
 // Windows wakes a thread that waits with a timeout at most every 15.6 ms unless a finer timer is asked for, and
-// str0m's pacer then sends in bursts (D71). Asked for while anything is shared.
+// str0m's pacer then sends in bursts (D73). Asked for while anything is shared.
 #[cfg(target_os = "windows")]
 fn fine_timer(on: bool) {
     use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
@@ -225,7 +225,7 @@ struct Conn {
 struct Budget {
     down: u8,
     up: u8,
-    // The encoders' (D71): ticks over and clear of their limit, how many layers they allow, and when a step may be undone
+    // The encoders' (D73): ticks over and clear of their limit, how many layers they allow, and when a step may be undone
     enc_over: u8,
     enc_clear: u8,
     enc_cap: usize,
@@ -267,7 +267,7 @@ struct Stream {
     churn: Option<(Duration, Instant, u32)>, // FRIENDSPEAK_MEDIA_CHURN: every, next, cycles so far
 }
 
-// FRIENDSPEAK_MEDIA_CHURN=<ms>, a test (D71): every that many milliseconds the layers above the lowest stop, as the
+// FRIENDSPEAK_MEDIA_CHURN=<ms>, a test (D73): every that many milliseconds the layers above the lowest stop, as the
 // budget stops them, or start again, so encoders are opened and released over and over. The budget is off then.
 fn churn_every() -> Option<Duration> {
     let ms = std::env::var("FRIENDSPEAK_MEDIA_CHURN").ok()?.trim().parse::<u64>().ok()?;
@@ -808,7 +808,7 @@ impl Stream {
         // a 60 fps tier) is handed only the frames that keep its own pace.
         let cap_fps = self.tier.fps;
         for l in self.layers.iter_mut() {
-            // At half its rung's rate when the encoders' budget says so (D71)
+            // At half its rung's rate when the encoders' budget says so (D73)
             let fps = l.running().map_or(0.0, |r| r.fps);
             let Some(e) = l.enc.as_mut() else { continue };
             // A layer at the capture's rate takes every frame: frames never arrive evenly, and timing them would drop some
@@ -970,7 +970,7 @@ impl Stream {
         }
     }
 
-    // The encoders' budget (D71): a layer whose encoder can't keep its frame rate costs the top layer half its frame
+    // The encoders' budget (D73): a layer whose encoder can't keep its frame rate costs the top layer half its frame
     // rate, then the top layer itself. Undone one step at a time once that has held.
     fn encoders(&mut self, now: Instant) {
         let cap = if self.cap_fps > 0.0 { self.cap_fps } else { self.tier.fps };
@@ -1103,7 +1103,7 @@ impl Stream {
             let bps = if top { left.min(need * TOP_HEADROOM).clamp(MIN_BPS as f64, ladder::ceiling(&rung) as f64) } else { need.min(left).max(MIN_BPS as f64) };
             left = (left - bps).max(0.0);
             let e = self.layers[i].enc.as_mut().unwrap();
-            // A layer that just started climbs from half of it (D71)
+            // A layer that just started climbs from half of it (D73)
             let ramp = (0.5 + 0.5 * now.saturating_duration_since(e.started).as_secs_f64() / RAMP.as_secs_f64()).min(1.0);
             let bps = ((bps * ramp) as u32).max(MIN_BPS);
             if (bps as f64 - e.bps as f64).abs() > 0.05 * e.bps as f64 || rung.fps != e.sent_fps {
@@ -1131,7 +1131,7 @@ impl Stream {
         self.next_enc += 1;
         let (ltx, lrx) = std::sync::mpsc::sync_channel::<LayerMsg>(1);
         // Half of what the rung needs at its own frame rate, whatever the capture delivers right now: the encoder
-        // sizes its rate control for this, so the first keyframe is small (D71); plan() ramps it up over RAMP
+        // sizes its rate control for this, so the first keyframe is small (D73); plan() ramps it up over RAMP
         let bps = ((ladder::need(&rung, self.sharp, 0.0) / 2.0) as u32).clamp(MIN_BPS, ladder::ceiling(&rung));
         let cfg = encode::Config { w: rung.w, h: rung.h, fps: rung.fps, bps, max_bps: ladder::ceiling(&rung), high: self.hw, sharp: self.sharp };
         let (kind, hw, out, key) = (self.kind, self.hw, self.tx.clone(), self.key.clone());
@@ -1150,7 +1150,7 @@ impl Stream {
             let mut cfg = cfg;
             let mut told = false;
             // Frames given to the encoder and not out yet: their number, when they are shown, when they went in. A
-            // pipelined encoder hands a unit over later, and it is matched back to its frame by number (D71).
+            // pipelined encoder hands a unit over later, and it is matched back to its frame by number (D73).
             let mut seq: u64 = 0;
             // This layer's IVs, and what the stream is to the receivers (D70)
             let mut sealer = e2ee::Sealer::new();
