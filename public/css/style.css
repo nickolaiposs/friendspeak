@@ -436,6 +436,21 @@ body.game-visible #main { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes breathe { to { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } .rail-server.connecting { animation: none; } }
+
+/* The launch screen: covers the window while the app starts (index.html).
+   The mark beats and sends out two rings, like a voice speaking. Its content
+   waits 150 ms, so a quick start shows only the background. The whole of it
+   drags the window, since the title bar is under it. */
+#launch { position: fixed; inset: 0; z-index: 300; display: grid; place-items: center; background: var(--bg-2); -webkit-app-region: drag; user-select: none; transition: opacity .25s ease, visibility 0s linear .25s; }
+#launch.done { opacity: 0; visibility: hidden; pointer-events: none; }
+.launch-inner { display: flex; flex-direction: column; align-items: center; gap: 32px; animation: fade .3s ease .15s both; }
+.launch-mark { position: relative; width: 72px; height: 72px; border-radius: 30%; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: var(--on-accent); font: 800 30px/1 var(--font); letter-spacing: -1px; animation: launch-beat 1.6s ease-in-out infinite; }
+.launch-mark::before, .launch-mark::after { content: ''; position: absolute; inset: 0; border-radius: inherit; border: 2px solid var(--accent); opacity: 0; animation: launch-ring 1.6s cubic-bezier(.2, .6, .3, 1) infinite; }
+.launch-mark::after { animation-delay: .8s; }
+.launch-name { font-size: 20px; font-weight: 700; letter-spacing: -.3px; color: var(--text-strong); }
+@keyframes launch-beat { 0%, 30%, 100% { transform: scale(1); } 12% { transform: scale(1.06); } }
+@keyframes launch-ring { from { transform: scale(1); opacity: .7; } to { transform: scale(1.6); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .launch-mark, .launch-mark::before, .launch-mark::after { animation: none; } }
 .home-server { display: flex; justify-content: space-between; gap: 12px; width: 100%; padding: 12px 14px; background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--r-md); margin-top: 8px; }
 .home-server:hover { background: var(--bg-hover); }
 .hosting { margin-top: 32px; }

@@ -21,7 +21,7 @@
         <div id="voice-panel" hidden></div>
         <div id="user-panel"></div>
       </aside>
-      <main id="main"><div class="home"><span class="spinner big" role="status" aria-label="Loading"></span></div></main>
+      <main id="main"></main>
       <section id="game-view"></section>
       <section id="stream-view"></section>
       <aside id="members"></aside>
@@ -30,5 +30,12 @@
     <div id="modal-root"></div>
     <div id="call-ring" hidden></div>
     <div id="toasts"></div>
+    <!-- Shown while the app starts; main.js fades it out once the first screen is drawn -->
+    <div id="launch" role="status" aria-label="Starting friendspeak">
+      <div class="launch-inner" aria-hidden="true">
+        <div class="launch-mark">fs</div>
+        <div class="launch-name">friendspeak</div>
+      </div>
+    </div>
   </body>
 </html>
