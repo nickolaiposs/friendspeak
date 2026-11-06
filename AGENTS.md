@@ -90,7 +90,7 @@ scripts/denoise/       builds vendor/deepfilternet in Docker: build.sh, libdf.pa
 scripts/release-notes.js  prints a version's CHANGELOG.md section (release notes)
 scripts/build-mediasoup-client.js  bundles mediasoup-client into public/vendor/mediasoup-client
 scripts/check-e2ee.mjs, e2ee-vectors.json  the media encryption's shared test vectors and the JS check (D70)
-.github/workflows/     ci.yml (main + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, game build, media sidecar build on macOS and Windows); release.yml (started by hand from main → release, D29, D68; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows); image-scan.yml (known vulnerabilities in the server image, D65)
+.github/workflows/     ci.yml (main + PRs: syntax of server, admin and client modules, the deploy stack (D53), server boot, the server image starting, game build, media sidecar build on macOS and Windows); release.yml (started by hand from main → release, D29, D68; builds without write access or caches, then signs provenance, D64); codeql.yml (static analysis of our JavaScript and the workflows); image-scan.yml (known vulnerabilities in the server image, D65)
 .github/dependabot.yml weekly PRs into main for actions, the base image, the Rust toolchain, npm and cargo (D64)
 SECURITY.md            how to report a vulnerability, and how to check a download's provenance
 data/                  (gitignored) server state when run via `npm start` (state.json, profiles/, messages/, mail/, files/, …)

@@ -77,7 +77,7 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
 COPY package.json package-lock.json ./
 COPY --from=deps /app/node_modules ./node_modules
 
-COPY server.js updater.js admin.js logbuffer.js crashlog.js persist.js ./
+COPY server.js sfu.js updater.js admin.js logbuffer.js crashlog.js persist.js ./
 COPY admin-ui ./admin-ui
 COPY public/js/util.js ./public/js/util.js
 COPY docker/healthcheck.js ./docker/healthcheck.js

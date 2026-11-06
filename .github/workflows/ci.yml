@@ -1,6 +1,7 @@
 # Checks for `main` and pull requests. There's no test suite (AGENTS.md →
-# Verifying changes), so this catches syntax errors, a broken game build and a
-# media sidecar that doesn't compile, and makes sure a version bump is releasable.
+# Verifying changes), so this catches syntax errors, a broken game build, a
+# server image that doesn't start and a media sidecar that doesn't compile, and
+# makes sure a version bump is releasable.
 name: CI
 
 on:
@@ -49,6 +50,30 @@ jobs:
           curl -s localhost:3999/api/info
           exit 1
       - run: npm run build:game
+
+  # The server image must start, not just build: its Dockerfile copies the server's modules by
+  # name, and "Server starts" above runs from the checkout, which has them all (1.2.0 shipped
+  # without sfu.js). Run as deploy/docker-compose.yaml runs it: read-only root, no capabilities.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build -t friendspeak:ci .
+      - name: It starts
+        run: |
+          docker run -d --name fs --init --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges:true -v fs-data:/data \
+            -p 3999:3000 -p 3000:3000/udp friendspeak:ci
+          for i in $(seq 60); do
+            curl -sf localhost:3999/api/info | grep -q '"sfu":1' && exit 0
+            [ "$(docker inspect -f '{{.State.Running}}' fs)" = true ] || break
+            sleep 1
+          done
+          curl -s localhost:3999/api/info
+          docker logs fs
+          exit 1
 
   # The native media sidecar (native/, Rust): it must build on every OS it ships for
   media:
