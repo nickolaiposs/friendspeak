@@ -6,6 +6,19 @@ in package.json) before starting it:
 the release workflow publishes it as the GitHub Release notes, and the app and
 servers link to it. Newest first.
 
+## 1.2.1 - 2026-11-06
+
+- **Fixes the 1.2.0 server image, which didn't start.** It was missing the
+  SFU's module, so the server stopped at once with "Cannot find module
+  './sfu'" and Docker restarted it over and over. Servers on `:latest`
+  update to this by themselves. If you pinned an older version
+  (`FRIENDSPEAK_IMAGE` in `.env`) to get back up, remove that line, then
+  `docker compose pull && docker compose up -d`. CI now starts the image
+  before a change can merge
+- A launch screen while the app starts, in place of the small spinner
+- The release builds the server image's arm64 half on an arm64 machine
+  instead of emulating one, which makes a release much faster
+
 ## 1.2.0 - 2026-11-03
 
 - **Screen shares and cameras go through the server.** The server forwards
