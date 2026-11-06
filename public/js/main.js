@@ -1829,7 +1829,7 @@ function saveProfile(save) {
 }
 
 function welcome() {
-  $('#main').replaceChildren(); // the start-up spinner
+  $('#main').replaceChildren();
   const { el, draft } = profileEditor({ name: '', color: randomColor(), avatar: '', status: '' });
   const importInput = h('input', {
     type: 'file',
@@ -8392,4 +8392,12 @@ window.addEventListener('focus', () => {
 // Browsers block audio until a user gesture; unlock on first interaction.
 window.addEventListener('pointerdown', () => audio.ensure(), { once: true });
 
-boot();
+// The first screen is drawn (or boot failed): fade the launch screen out
+function launched() {
+  const el = $('#launch');
+  if (!el || el.classList.contains('done')) return;
+  el.classList.add('done');
+  setTimeout(() => el.remove(), 300);
+}
+
+boot().finally(launched);
